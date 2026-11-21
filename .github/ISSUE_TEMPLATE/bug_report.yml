@@ -1,0 +1,83 @@
+name: Bug 反馈 (Bug Report)
+description: 反馈软件崩溃、界面异常、播放问题或功能错误
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢提交反馈！请尽量填写以下信息以便快速定位问题。提交前请确认未泄露个人账号 Cookie、Token 或手机号等隐私信息。
+
+  - type: input
+    id: app_version
+    attributes:
+      label: 客户端版本
+      description: 可在「设置 → 关于微风音乐」中查看
+      placeholder: 例如：v1.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_type
+    attributes:
+      label: 安装/运行方式
+      options:
+        - NSIS 安装包 (.exe)
+        - MSI 安装包 (.msi)
+        - 从源码自行构建
+    validations:
+      required: true
+
+  - type: input
+    id: os_version
+    attributes:
+      label: Windows 系统版本
+      description: 可按 Win + R 输入 winver 查看
+      placeholder: 例如：Windows 11 24H2 (26100)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: theme_context
+    attributes:
+      label: 涉及的主题或窗口（可选）
+      options:
+        - 不确定 / 与主题无关
+        - D1 黑曜石极光 (Obsidian Aurora)
+        - D2 丝绒星云 (Velvet Nebula)
+        - L1 棉纸水彩 (Cotton Watercolor)
+        - L2 晨雾燕麦 (Nordic Oat)
+        - 沉浸播放页 (封面取色 / 光学背景)
+        - 桌面悬浮歌词窗 / Mini 灵动岛小窗
+    validations:
+      required: false
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 请描述触发该问题的具体操作路径
+      placeholder: |
+        1. 打开软件并进入「...」页面
+        2. 点击「...」
+        3. 出现异常现象...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_vs_actual
+    attributes:
+      label: 期望行为与实际现象
+      placeholder: |
+        - 期望行为：...
+        - 实际现象：...
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 截图或补充信息（可选）
+      description: 可直接拖拽截图到此处，或补充音频输出设备、屏幕缩放比例等信息
+    validations:
+      required: false

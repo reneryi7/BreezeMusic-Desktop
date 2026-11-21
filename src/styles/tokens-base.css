@@ -1,0 +1,769 @@
+/* =========================================================================
+ * BreezeMusic · 微风音乐 (Windows 桌面概念版 — 四主题 × 全无框多辅助色体系)
+ * 核心视觉语言：
+ * 1. 全局主调：鸢尾靛蓝 (Iris Indigo)，辅以 玫瑰珊瑚 / 流金琥珀 / 薄荷青玉 / 天青湖蓝 / 星云紫；
+ * 2. 深色 D1「黑曜石与暗夜极光」(#121216) & D2「丝绒暗紫与星云流光」(#161219)；
+ * 3. 浅色 L1「棉纸水彩浸润」(#F5F2EB) & L2「晨雾燕麦与矿物纸感」(#EDE7DB)；
+ * 4. 100% 彻底零边框（无 1px 描边/无内框阴影），依靠表面色阶高差与环境漫射光影分层。
+ * ========================================================================= */
+
+/* -------------------------------------------------------------------------
+ * 独立于深浅主题选择器的全局排版、字重、行距、动效与界面密度根令牌
+ * （切勿放入 .scheme-abyssal_dark 内，防止覆盖 html 内联动态排版变量）
+ * ------------------------------------------------------------------------- */
+:root {
+  --bm-ui-font-scale: 1;
+  --bm-ui-font-weight: var(--bm-fw-regular, 400);
+  --bm-ui-line-height: 1.48;
+  --bm-fw-regular: 400;
+  --bm-fw-medium: 500;
+  --bm-fw-semibold: 600;
+  --bm-fw-bold: 700;
+  --bm-fw-heavy: 800;
+  --bm-font-ui: "Segoe UI Variable Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --bm-fs-micro: calc(11px * var(--bm-ui-font-scale, 1));
+  --bm-fs-caption: calc(12.5px * var(--bm-ui-font-scale, 1));
+  --bm-fs-meta: calc(13.5px * var(--bm-ui-font-scale, 1));
+  --bm-fs-body: calc(14.5px * var(--bm-ui-font-scale, 1));
+  --bm-fs-song-title: calc(15px * var(--bm-ui-font-scale, 1));
+  --bm-fs-subhead: calc(16.5px * var(--bm-ui-font-scale, 1));
+  --bm-fs-title: calc(20px * var(--bm-ui-font-scale, 1));
+  --bm-fs-hero: clamp(
+    calc(1.375rem * var(--bm-ui-font-scale, 1)),
+    calc((1.1rem + 0.8vw) * var(--bm-ui-font-scale, 1)),
+    calc(1.875rem * var(--bm-ui-font-scale, 1))
+  );
+
+  /* 三档界面信息密度变量（默认 standard；严格仅作用于列表/卡片/设置/侧栏） */
+  --bm-density-row-py: 8px;
+  --bm-density-row-h: 56px;
+  --bm-density-card-gap: 16px;
+  --bm-density-card-pad: 16px;
+  --bm-density-settings-gap: 18px;
+  --bm-density-settings-pad-y: 16px;
+  --bm-density-settings-pad-x: 22px;
+  --bm-density-nav-py: 10px;
+}
+
+html[data-ui-density="compact"] {
+  --bm-density-row-py: 5px;
+  --bm-density-row-h: 46px;
+  --bm-density-card-gap: 12px;
+  --bm-density-card-pad: 12px;
+  --bm-density-settings-gap: 12px;
+  --bm-density-settings-pad-y: 12px;
+  --bm-density-settings-pad-x: 16px;
+  --bm-density-nav-py: 7px;
+}
+
+html[data-ui-density="spacious"] {
+  --bm-density-row-py: 12px;
+  --bm-density-row-h: 66px;
+  --bm-density-card-gap: 22px;
+  --bm-density-card-pad: 20px;
+  --bm-density-settings-gap: 24px;
+  --bm-density-settings-pad-y: 22px;
+  --bm-density-settings-pad-x: 26px;
+  --bm-density-nav-py: 13px;
+}
+
+/* 三档全局动效引擎（best 默认完整体验 / standard 简洁平缓 / none 零过渡零持续动画） */
+html[data-motion-level="standard"] {
+  --ease-fluid: cubic-bezier(0.25, 0.8, 0.25, 1);
+  --ease-jelly: cubic-bezier(0.25, 0.8, 0.25, 1);
+  --ease-spring-smooth: cubic-bezier(0.25, 0.8, 0.25, 1);
+  --ease-island-split: cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+html[data-motion-level="standard"] .inflow-greeting-dot,
+html[data-motion-level="standard"] .usr-locate-pulse {
+  animation-duration: 0.45s !important;
+}
+
+html[data-motion-level="none"] {
+  --ease-fluid: linear;
+  --ease-jelly: linear;
+  --ease-spring-smooth: linear;
+  --ease-island-split: linear;
+  scroll-behavior: auto;
+}
+
+/* 精准关闭无效果模式下的位移/旋转类过渡，保留按钮色彩反馈并避免 0.001ms 干扰事件回调 */
+html[data-motion-level="none"] .skyline-stage-viewport,
+html[data-motion-level="none"] .bms-switch-thumb,
+html[data-motion-level="none"] .plump-slider::before,
+html[data-motion-level="none"] .skyline-floating-center,
+html[data-motion-level="none"] .skyline-win-floating-capsule,
+html[data-motion-level="none"] .np-immersive-win-controls {
+  transition: none !important;
+}
+
+:root,
+.scheme-abyssal_dark,
+.scheme-abyss_dark,
+[data-theme="abyssal_dark"],
+[data-color-scheme="dark"] {
+  color-scheme: dark;
+  /* D1 黑曜石与暗夜极光（极夜冷曜 #0C0E14 + 极光蓝青靛主调 + 纯冷冰川散景） */
+  --bm-text-1: #EEF2F6;
+  --bm-text-2: rgba(203, 213, 225, 0.82);
+  --bm-text-3: rgba(148, 163, 184, 0.76);
+  --bm-surface-row-hover: rgba(56, 189, 248, 0.065);
+  --bm-surface-row-active: rgba(94, 106, 210, 0.16);
+  --bm-accent-azure: #38BDF8;
+  --bm-accent-jade: #2DD4BF;
+  --bm-accent-amber: #FACC15;
+  --bm-divider: transparent;
+
+  /* D1 极夜冷曜石石墨冰晶表面体系 */
+  --bg-base: #0C0E14;
+  --bg-app: #0C0E14;
+  --bg-surface: rgba(18, 22, 31, 0.86);
+  --bg-card: rgba(23, 28, 40, 0.76);
+  --bg-card-hover: rgba(31, 38, 54, 0.90);
+  --bg-elevated: rgba(20, 25, 36, 0.96);
+  --bg-floating-capsule: rgba(19, 24, 34, 0.86);
+  --bg-glass: rgba(226, 232, 240, 0.055);
+  --bg-glass-hover: rgba(226, 232, 240, 0.098);
+  --bg-hover-square: rgba(56, 189, 248, 0.085);
+  --bg-row-hover: rgba(94, 106, 210, 0.095);
+  --bg-pill: rgba(94, 106, 210, 0.16);
+  --bg-pill-hover: rgba(94, 106, 210, 0.26);
+
+  /* 极光蓝青靛主色 + 五维多彩辅助色 */
+  --primary: #5e6ad2;
+  --primary-light: #818cf8;
+  --primary-deep: #4338ca;
+  --primary-soft: rgba(94, 106, 210, 0.18);
+  --cyan: #38bdf8;
+  --mint: #2dd4bf;
+  --coral: #fb7185;
+  --violet: #818cf8;
+  --gold: #facc15;
+
+  /* 极光蓝青靛 × 冰川天青渐变令牌 */
+  --grad-kugou-blue: linear-gradient(135deg, #4f46e5 0%, #5e6ad2 48%, #38bdf8 100%);
+  --grad-kugou-primary: linear-gradient(135deg, #4f46e5 0%, #5e6ad2 48%, #38bdf8 100%);
+  --grad-kugou-deep: linear-gradient(135deg, #3730a3 0%, #5e6ad2 54%, #2dd4bf 100%);
+  --grad-coral-heart: linear-gradient(135deg, #f43f5e 0%, #fb7185 100%);
+  --grad-aurora-fm: linear-gradient(135deg, #0d9488 0%, #2dd4bf 52%, #38bdf8 100%);
+  --grad-vip-gold: linear-gradient(135deg, #eab308 0%, #fde047 100%);
+  --grad-emerald-sq: linear-gradient(135deg, #0d9488 0%, #2dd4bf 100%);
+  --grad-liked-hero: linear-gradient(135deg, #4f46e5 0%, #5e6ad2 50%, #38bdf8 100%);
+
+  /* 歌曲行无边框四态响应令牌 */
+  --song-hover-mist: rgba(94, 106, 210, 0.095);
+  --song-playing-aura: linear-gradient(
+    90deg,
+    rgba(94, 106, 210, 0.24) 0%,
+    rgba(56, 189, 248, 0.11) 58%,
+    transparent 100%
+  );
+
+  /* 语义化辅色与柔光底色令牌 */
+  --accent-mint: #2dd4bf;
+  --accent-mint-soft: rgba(45, 212, 191, 0.18);
+  --accent-coral: #fb7185;
+  --accent-coral-soft: rgba(251, 113, 133, 0.18);
+  --accent-violet: #818cf8;
+  --accent-violet-soft: rgba(129, 140, 248, 0.18);
+  --accent-gold: #facc15;
+  --accent-gold-soft: rgba(250, 204, 21, 0.18);
+
+  --text-primary: #eef2f6;
+  --text-main: #eef2f6;
+  --text-secondary: #94a3b8;
+  --text-sub: #94a3b8;
+  --text-muted: #64748b;
+
+  /* 100% 彻底零边框体系 */
+  --border-subtle: transparent;
+  --border-card: transparent;
+  --border-accent: transparent;
+  --border-player-top: transparent;
+  --glass-border: transparent;
+  --hairline-border: transparent;
+  --hairline-divider: transparent;
+  --glass-edge: transparent;
+  --glass-edge-strong: transparent;
+  --border-highlight: transparent;
+
+  /* 底栏与按钮交互光效令牌 */
+  --pb-btn-hover-bg: rgba(56, 189, 248, 0.09);
+  --pb-btn-hover-glow: rgba(56, 189, 248, 0.26);
+
+  /* 全局统一 6 档圆角体系 */
+  --bm-r-xs: 6px;
+  --bm-r-sm: 10px;
+  --bm-r-md: 14px;
+  --bm-r-lg: 18px;
+  --bm-r-xl: 24px;
+  --bm-r-pill: 999px;
+
+  --shadow-soft: 0 12px 32px rgba(2, 6, 14, 0.42);
+  --shadow-card: 0 16px 38px -10px rgba(2, 6, 14, 0.54);
+  --shadow-elevated: 0 22px 52px rgba(2, 6, 14, 0.68);
+  --shadow-glow: 0 8px 22px rgba(94, 106, 210, 0.34);
+
+  /* 物理临界阻尼与流体曲线令牌 */
+  --ease-fluid: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-jelly: cubic-bezier(0.22, 1.24, 0.36, 1);
+  --ease-spring-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-island-split: cubic-bezier(0.22, 1.28, 0.36, 1);
+}
+
+/* D2 丝绒暗紫与星云流光 (Velvet Nebula)：微醺苦巧天鹅绒基底 (#1A1116) + 落日玫瑰×琥珀流金主调 */
+.scheme-abyssal_dark.dark-variant-velvet_nebula,
+[data-theme="abyssal_dark"][data-dark-variant="velvet_nebula"] {
+  --bm-text-1: #F9EFE6;
+  --bm-text-2: rgba(235, 214, 205, 0.82);
+  --bm-text-3: rgba(190, 160, 173, 0.76);
+  --bm-surface-row-hover: rgba(244, 63, 94, 0.085);
+  --bm-surface-row-active: rgba(244, 63, 94, 0.17);
+  --bm-accent-azure: #67E8F9;
+  --bm-accent-jade: #34D399;
+  --bm-accent-amber: #F59E0B;
+
+  --bg-base: #1A1116;
+  --bg-app: #1A1116;
+  --bg-surface: rgba(36, 22, 31, 0.90);
+  --bg-card: rgba(46, 28, 39, 0.84);
+  --bg-card-hover: rgba(59, 36, 50, 0.93);
+  --bg-elevated: rgba(39, 24, 34, 0.97);
+  --bg-floating-capsule: rgba(38, 23, 33, 0.90);
+  --bg-glass: rgba(249, 239, 230, 0.065);
+  --bg-glass-hover: rgba(249, 239, 230, 0.115);
+  --bg-hover-square: rgba(244, 63, 94, 0.12);
+  --bg-row-hover: rgba(244, 63, 94, 0.095);
+  --bg-pill: rgba(244, 63, 94, 0.17);
+  --bg-pill-hover: rgba(244, 63, 94, 0.28);
+
+  --primary: #F43F5E;
+  --primary-light: #FB7185;
+  --primary-deep: #E11D48;
+  --primary-soft: rgba(244, 63, 94, 0.18);
+  --cyan: #67E8F9;
+  --mint: #34D399;
+  --coral: #FB923C;
+  --violet: #E879F9;
+  --gold: #F59E0B;
+
+  --grad-kugou-blue: linear-gradient(135deg, #E11D48 0%, #F43F5E 48%, #F59E0B 100%);
+  --grad-kugou-primary: linear-gradient(135deg, #E11D48 0%, #F43F5E 48%, #F59E0B 100%);
+  --grad-kugou-deep: linear-gradient(135deg, #BE123C 0%, #E11D48 52%, #D97706 100%);
+  --grad-aurora-fm: linear-gradient(135deg, #D97706 0%, #F59E0B 50%, #F43F5E 100%);
+  --grad-liked-hero: linear-gradient(135deg, #E11D48 0%, #F43F5E 52%, #F59E0B 100%);
+
+  --song-hover-mist: rgba(244, 63, 94, 0.095);
+  --song-playing-aura: linear-gradient(
+    90deg,
+    rgba(244, 63, 94, 0.23) 0%,
+    rgba(245, 158, 11, 0.12) 56%,
+    transparent 100%
+  );
+
+  --accent-mint: #34D399;
+  --accent-mint-soft: rgba(52, 211, 153, 0.18);
+  --accent-coral: #FB7185;
+  --accent-coral-soft: rgba(251, 113, 133, 0.19);
+  --accent-violet: #E879F9;
+  --accent-violet-soft: rgba(232, 121, 249, 0.18);
+  --accent-gold: #F59E0B;
+  --accent-gold-soft: rgba(245, 158, 11, 0.20);
+
+  --text-primary: #F9EFE6;
+  --text-main: #F9EFE6;
+  --text-secondary: #D4B8C2;
+  --text-sub: #D4B8C2;
+  --text-muted: #9E7B8B;
+
+  --pb-btn-hover-bg: rgba(244, 63, 94, 0.12);
+  --pb-btn-hover-glow: rgba(245, 158, 11, 0.28);
+
+  --shadow-soft: 0 12px 32px rgba(14, 5, 10, 0.46);
+  --shadow-card: 0 18px 42px -10px rgba(14, 5, 10, 0.60), 0 4px 18px rgba(244, 63, 94, 0.09);
+  --shadow-elevated: 0 24px 54px rgba(12, 4, 9, 0.72);
+  --shadow-glow: 0 8px 24px rgba(244, 63, 94, 0.32);
+}
+
+/* =========================================================================
+ * L1 棉纸水彩浸润（清透云宣瓷白 #F6F8FC + 樱粉天青湿水彩 + 晴空鸢尾冰霜玻璃）
+ * ========================================================================= */
+.scheme-watercolor_light,
+.scheme-light,
+[data-theme="watercolor_light"],
+[data-color-scheme="light"] {
+  color-scheme: light;
+  --bm-text-1: #18181B;
+  --bm-text-2: #52525B;
+  --bm-text-3: #71717A;
+  --bm-surface-row-hover: rgba(79, 70, 229, 0.065);
+  --bm-surface-row-active: rgba(79, 70, 229, 0.12);
+  --bm-accent-azure: #0284C7;
+  --bm-accent-jade: #0D9488;
+  --bm-accent-amber: #D97706;
+  --bm-divider: transparent;
+
+  /* L1 云宣透彩冰霜玻璃表面 */
+  --bg-base: #f6f8fc;
+  --bg-app: #f6f8fc;
+  --bg-surface: rgba(255, 255, 255, 0.72);
+  --bg-card: rgba(255, 255, 255, 0.58);
+  --bg-card-hover: rgba(255, 255, 255, 0.85);
+  --bg-elevated: rgba(255, 255, 255, 0.96);
+  --bg-floating-capsule: rgba(255, 255, 255, 0.75);
+  --bg-glass: rgba(255, 255, 255, 0.66);
+  --bg-glass-hover: rgba(255, 255, 255, 0.88);
+  --bg-hover-square: rgba(79, 70, 229, 0.08);
+  --bg-row-hover: rgba(79, 70, 229, 0.07);
+  --bg-pill: rgba(79, 70, 229, 0.11);
+  --bg-pill-hover: rgba(79, 70, 229, 0.18);
+
+  --primary: #4f46e5;
+  --primary-light: #6366f1;
+  --primary-deep: #3730a3;
+  --primary-soft: rgba(79, 70, 229, 0.12);
+  --cyan: #0284c7;
+  --mint: #0d9488;
+  --coral: #ec4899;
+  --violet: #7c3aed;
+  --gold: #d97706;
+
+  /* 晴空鸢尾 × 天青 × 樱粉水彩渐变令牌 */
+  --grad-kugou-blue: linear-gradient(135deg, #4f46e5 0%, #0ea5e9 52%, #ec4899 100%);
+  --grad-kugou-primary: linear-gradient(135deg, #4f46e5 0%, #0ea5e9 52%, #ec4899 100%);
+  --grad-kugou-deep: linear-gradient(135deg, #3730a3 0%, #4f46e5 52%, #0284c7 100%);
+  --grad-coral-heart: linear-gradient(135deg, #ec4899 0%, #fb7185 100%);
+  --grad-aurora-fm: linear-gradient(135deg, #0284c7 0%, #0d9488 52%, #ec4899 100%);
+  --grad-vip-gold: linear-gradient(135deg, #d97706 0%, #fbbf24 100%);
+  --grad-emerald-sq: linear-gradient(135deg, #0f766e 0%, #14b8a6 100%);
+  --grad-liked-hero: linear-gradient(135deg, #4f46e5 0%, #0ea5e9 48%, #ec4899 100%);
+
+  /* 歌曲行无边框四态响应令牌 */
+  --song-hover-mist: rgba(79, 70, 229, 0.07);
+  --song-playing-aura: linear-gradient(
+    90deg,
+    rgba(79, 70, 229, 0.14) 0%,
+    rgba(236, 72, 153, 0.08) 56%,
+    transparent 100%
+  );
+
+  --accent-mint: #0d9488;
+  --accent-mint-soft: rgba(13, 148, 136, 0.15);
+  --accent-coral: #ec4899;
+  --accent-coral-soft: rgba(236, 72, 153, 0.15);
+  --accent-violet: #7c3aed;
+  --accent-violet-soft: rgba(124, 58, 237, 0.15);
+  --accent-gold: #d97706;
+  --accent-gold-soft: rgba(217, 119, 6, 0.16);
+
+  --text-primary: #18181B;
+  --text-main: #18181B;
+  --text-secondary: #52525B;
+  --text-sub: #52525B;
+  --text-muted: #71717A;
+
+  --border-subtle: transparent;
+  --border-card: transparent;
+  --border-accent: transparent;
+  --border-player-top: transparent;
+  --glass-border: transparent;
+  --hairline-border: transparent;
+  --hairline-divider: transparent;
+  --glass-edge: transparent;
+  --glass-edge-strong: transparent;
+  --border-highlight: transparent;
+
+  --pb-btn-hover-bg: rgba(79, 70, 229, 0.09);
+  --pb-btn-hover-glow: rgba(236, 72, 153, 0.18);
+
+  --shadow-soft: 0 10px 28px rgba(79, 70, 229, 0.07);
+  --shadow-card: 0 14px 34px -8px rgba(2, 132, 199, 0.095), 0 4px 14px rgba(236, 72, 153, 0.055);
+  --shadow-elevated: 0 20px 46px rgba(79, 70, 229, 0.14);
+  --shadow-glow: 0 8px 20px rgba(79, 70, 229, 0.22);
+}
+
+/* L2 晨雾燕麦与矿物纸感 (Nordic Oat)：醇厚烘焙燕麦暖纸 (#E8E0D0) + 北欧矿物青玉主调 (#0F766E) */
+.scheme-watercolor_light.light-variant-nordic_oat,
+[data-theme="watercolor_light"][data-light-variant="nordic_oat"] {
+  --bm-text-1: #231D16;
+  --bm-text-2: #5C5245;
+  --bm-text-3: #847766;
+  --bm-surface-row-hover: #E1D8C5;
+  --bm-surface-row-active: #D5CBB4;
+  --bm-accent-azure: #0369A1;
+  --bm-accent-jade: #0F766E;
+  --bm-accent-amber: #B45309;
+
+  --bg-base: #E8E0D0;
+  --bg-app: #E8E0D0;
+  --bg-surface: #F2ECE1;
+  --bg-card: #FAF6EE;
+  --bg-card-hover: #FFFDF9;
+  --bg-elevated: #FFFDF9;
+  --bg-floating-capsule: #F6F1E6;
+  --bg-glass: #E2D9C6;
+  --bg-glass-hover: #D8CEB8;
+  --bg-hover-square: #DFD6C3;
+  --bg-row-hover: #E1D8C5;
+  --bg-pill: rgba(15, 118, 110, 0.13);
+  --bg-pill-hover: rgba(15, 118, 110, 0.22);
+
+  /* 北欧矿物青玉主调（松林深绿 #0F766E）+ 亚光矿物印泥点缀色 */
+  --primary: #0F766E;
+  --primary-light: #0D9488;
+  --primary-deep: #115E59;
+  --primary-soft: rgba(15, 118, 110, 0.13);
+  --cyan: #0369A1;
+  --mint: #0F766E;
+  --coral: #BE123C;
+  --violet: #4338CA;
+  --gold: #B45309;
+
+  --grad-kugou-blue: linear-gradient(135deg, #115E59 0%, #0F766E 54%, #0D9488 100%);
+  --grad-kugou-primary: linear-gradient(135deg, #115E59 0%, #0F766E 54%, #0D9488 100%);
+  --grad-kugou-deep: linear-gradient(135deg, #134E4A 0%, #115E59 55%, #0F766E 100%);
+  --grad-coral-heart: linear-gradient(135deg, #9F1239 0%, #BE123C 100%);
+  --grad-aurora-fm: linear-gradient(135deg, #115E59 0%, #0F766E 54%, #B45309 100%);
+  --grad-vip-gold: linear-gradient(135deg, #B45309 0%, #D97706 100%);
+  --grad-emerald-sq: linear-gradient(135deg, #115E59 0%, #0F766E 100%);
+  --grad-liked-hero: linear-gradient(135deg, #115E59 0%, #0F766E 50%, #BE123C 100%);
+
+  --song-hover-mist: #E1D8C5;
+  --song-playing-aura: linear-gradient(
+    90deg,
+    rgba(15, 118, 110, 0.16) 0%,
+    rgba(180, 83, 9, 0.075) 58%,
+    transparent 100%
+  );
+
+  --accent-mint: #0F766E;
+  --accent-mint-soft: rgba(15, 118, 110, 0.14);
+  --accent-coral: #BE123C;
+  --accent-coral-soft: rgba(190, 18, 60, 0.13);
+  --accent-violet: #4338CA;
+  --accent-violet-soft: rgba(67, 56, 202, 0.13);
+  --accent-gold: #B45309;
+  --accent-gold-soft: rgba(180, 83, 9, 0.15);
+
+  --text-primary: #231D16;
+  --text-main: #231D16;
+  --text-secondary: #5C5245;
+  --text-sub: #5C5245;
+  --text-muted: #847766;
+
+  --pb-btn-hover-bg: #DFD6C3;
+  --pb-btn-hover-glow: rgba(15, 118, 110, 0.18);
+
+  /* 暖褐纸张自然软阴影 */
+  --shadow-soft: 0 6px 18px rgba(42, 33, 22, 0.075);
+  --shadow-card: 0 10px 26px -8px rgba(42, 33, 22, 0.10), 0 2px 6px rgba(42, 33, 22, 0.045);
+  --shadow-elevated: 0 18px 42px rgba(42, 33, 22, 0.15);
+  --shadow-glow: 0 8px 20px rgba(15, 118, 110, 0.22);
+}
+
+/* 全局清除原生滚动条与默认线框 */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  user-select: none;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  border: none;
+  outline: none;
+  outline-color: transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 0px;
+  height: 0px;
+  display: none;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg-base, #121216);
+  color: var(--text-primary);
+  font-family: var(--bm-font-ui, "Segoe UI Variable Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif);
+  font-weight: var(--bm-fw-regular, var(--bm-ui-font-weight, 400));
+  font-synthesis-weight: auto;
+  font-size: var(--bm-fs-subhead, 16.5px);
+  line-height: var(--bm-ui-line-height, 1.48);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 界面信息密度精准作用区间：仅列表行、卡片栅格（绝不改动 TitleBar / PlayerBar / 播放舞台 / 桌面歌词 / 迷你窗体） */
+html[data-ui-density="compact"] .sdp-track-row,
+html[data-ui-density="compact"] .frameless-song-row,
+html[data-ui-density="compact"] .lmv-song-row,
+html[data-ui-density="compact"] .cdv-song-row,
+html[data-ui-density="compact"] .sr-song-entry-wrap {
+  padding-top: var(--bm-density-row-py);
+  padding-bottom: var(--bm-density-row-py);
+  min-height: var(--bm-density-row-h);
+}
+
+html[data-ui-density="spacious"] .sdp-track-row,
+html[data-ui-density="spacious"] .frameless-song-row,
+html[data-ui-density="spacious"] .lmv-song-row,
+html[data-ui-density="spacious"] .cdv-song-row,
+html[data-ui-density="spacious"] .sr-song-entry-wrap {
+  padding-top: var(--bm-density-row-py);
+  padding-bottom: var(--bm-density-row-py);
+  min-height: var(--bm-density-row-h);
+}
+
+html[data-ui-density="compact"] .lib-grid-cards,
+html[data-ui-density="compact"] .discover-grid,
+html[data-ui-density="compact"] .playlist-card-grid,
+html[data-ui-density="spacious"] .lib-grid-cards,
+html[data-ui-density="spacious"] .discover-grid,
+html[data-ui-density="spacious"] .playlist-card-grid {
+  gap: var(--bm-density-card-gap);
+}
+
+html[data-tabular-nums="true"] body {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 遵循 modern-web-guidance (visually-stable-mixed-fonts)：中英混排开启时自动归一化 x-height */
+html[data-mixed-fonts="true"] body {
+  font-size-adjust: from-font;
+}
+
+@supports not (font-size-adjust: from-font) {
+  html[data-mixed-fonts="true"] body {
+    line-height: 1.54;
+  }
+}
+
+html.is-desktop-lyric-win,
+body.is-desktop-lyric-win,
+html.is-desktop-lyric-win #app,
+html.is-mini-player-win,
+body.is-mini-player-win,
+html.is-mini-player-win #app {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  color: var(--text-primary);
+  background: none;
+  border: none;
+  outline: none;
+}
+
+:where(button, [role="button"], a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 82%, #ffffff);
+  outline-offset: 2px;
+}
+
+@keyframes usrLocateHighlightPulse {
+  0% {
+    background: color-mix(in srgb, var(--primary) 30%, transparent);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--primary) 26%, transparent);
+  }
+  55% {
+    background: color-mix(in srgb, var(--primary) 18%, transparent);
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--primary) 16%, transparent);
+  }
+  100% {
+    background: transparent;
+    box-shadow: none;
+  }
+}
+
+.usr-locate-pulse {
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .usr-locate-pulse {
+    animation: usrLocateHighlightPulse 1.2s var(--ease-fluid) both;
+  }
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  color: var(--text-primary);
+}
+
+button {
+  cursor: pointer;
+}
+
+/* ================= 根容器与 4 主题背景画布 ================= */
+/* D1 黑曜石与暗夜极光（纯粹极夜冷色极光束：冰川青蓝 + 极光薄荷青 + 极光蓝靛，无暖红杂色） */
+.app-root {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  color: var(--text-primary);
+  background:
+    radial-gradient(ellipse 68% 54% at 10% 6%, rgba(56, 189, 248, 0.125) 0%, transparent 62%),
+    radial-gradient(ellipse 60% 50% at 90% 12%, rgba(45, 212, 191, 0.095) 0%, transparent 60%),
+    radial-gradient(ellipse 64% 54% at 84% 90%, rgba(94, 106, 210, 0.12) 0%, transparent 62%),
+    radial-gradient(ellipse 52% 46% at 16% 86%, rgba(45, 212, 191, 0.065) 0%, transparent 58%),
+    var(--bg-base);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+/* D2 丝绒暗紫与星云流光（微醺苦巧天鹅绒基底 + 落日玫瑰 × 胆机琥珀 × 兰紫暮光漫射） */
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula,
+[data-theme="abyssal_dark"][data-dark-variant="velvet_nebula"] .app-root {
+  background:
+    radial-gradient(ellipse 70% 58% at 12% 8%, rgba(244, 63, 94, 0.165) 0%, transparent 62%),
+    radial-gradient(ellipse 62% 52% at 88% 14%, rgba(245, 158, 11, 0.135) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 52% at 80% 88%, rgba(232, 121, 249, 0.115) 0%, transparent 60%),
+    radial-gradient(ellipse 54% 48% at 16% 86%, rgba(251, 146, 60, 0.09) 0%, transparent 58%),
+    #1A1116;
+}
+
+/* L1 棉纸水彩浸润（清透云宣瓷白 #F6F8FC + 樱花粉 × 晴空天青 × 晨露薄荷 × 紫藤 6 层湿画法水彩） */
+.app-root.scheme-watercolor_light,
+.app-root.scheme-watercolor_light.light-variant-watercolor {
+  background:
+    radial-gradient(ellipse 70% 58% at 10% 8%, rgba(56, 189, 248, 0.28) 0%, transparent 62%),
+    radial-gradient(ellipse 64% 56% at 90% 12%, rgba(244, 114, 182, 0.26) 0%, transparent 60%),
+    radial-gradient(ellipse 54% 48% at 26% 28%, rgba(45, 212, 191, 0.18) 0%, transparent 58%),
+    radial-gradient(ellipse 56% 50% at 78% 36%, rgba(251, 113, 133, 0.18) 0%, transparent 56%),
+    radial-gradient(ellipse 66% 56% at 16% 88%, rgba(167, 139, 250, 0.22) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 50% at 82% 86%, rgba(56, 189, 248, 0.20) 0%, transparent 58%),
+    #f6f8fc;
+}
+
+/* L2 晨雾燕麦与矿物纸感（醇厚烘焙燕麦暖亚麻 #E8E0D0，零彩光纯净实体纸本） */
+.app-root.scheme-watercolor_light.light-variant-nordic_oat {
+  background:
+    radial-gradient(ellipse 86% 60% at 50% 0%, rgba(255, 252, 245, 0.58) 0%, transparent 74%),
+    linear-gradient(164deg, #eee7d8 0%, #e8e0d0 54%, #dfd5c1 100%);
+}
+
+/* ================= 通用无框软润按钮 ================= */
+.tonal-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 8px 16px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: var(--bg-pill);
+  color: var(--text-primary);
+  font-size: var(--bm-fs-song-title, 15px);
+  font-weight: var(--bm-fw-bold, 700);
+  transition: transform 0.24s var(--ease-fluid), background 0.2s ease;
+}
+
+.tonal-pill-btn.sm {
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: var(--bm-fs-body, 14.5px);
+}
+
+.tonal-pill-btn.primary {
+  background: var(--grad-kugou-blue);
+  color: #ffffff;
+  box-shadow: 0 6px 16px rgba(79, 70, 229, 0.24);
+}
+
+.tonal-pill-btn.emerald {
+  background: var(--accent-mint-soft);
+  color: var(--mint);
+}
+
+.tonal-pill-btn:hover {
+  background: var(--bg-pill-hover);
+  transform: translateY(-1px);
+}
+
+.tonal-pill-btn:active {
+  transform: scale(0.95);
+}
+
+.primary-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px 22px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: var(--grad-kugou-blue);
+  color: #ffffff;
+  font-weight: var(--bm-fw-heavy, 800);
+  font-size: var(--bm-fs-subhead, 16.5px);
+  box-shadow: var(--shadow-glow);
+  transition: transform 0.24s var(--ease-fluid), box-shadow 0.22s ease;
+  text-decoration: none;
+}
+
+.primary-btn:hover {
+  transform: translateY(-1.5px);
+  box-shadow: 0 12px 26px rgba(79, 70, 229, 0.3);
+}
+
+.primary-btn:active {
+  transform: scale(0.96);
+}
+
+:root {
+  interpolate-size: allow-keywords;
+}
+
+img,
+a {
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+html,
+body {
+  overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+.selectable-text,
+code,
+pre {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.full-w {
+  width: 100%;
+}
+
+.mb-10 {
+  margin-bottom: 10px;
+}
+.mb-14 {
+  margin-bottom: 14px;
+}
+.mb-18 {
+  margin-bottom: 18px;
+}
+.mt-14 {
+  margin-top: 14px;
+}

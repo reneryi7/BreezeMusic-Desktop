@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>BreezeMusic · 微风音乐 (Windows 概念版)</title>
+    <script>
+      (function () {
+        try {
+          var raw =
+            localStorage.getItem("bm_color_scheme_kugou_v2") ||
+            localStorage.getItem("breeze_color_scheme") ||
+            "watercolor_light";
+          var isDark =
+            raw === "system"
+              ? window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+              : raw !== "watercolor_light" && raw !== "light";
+          var rawVariant = localStorage.getItem("bm_light_theme_variant_v1") || "watercolor";
+          var lightVariant = rawVariant === "nordic_oat" ? "nordic_oat" : "watercolor";
+          var rawDarkVariant =
+            localStorage.getItem("bm_dark_theme_variant_v1") || "obsidian_aurora";
+          var darkVariant =
+            rawDarkVariant === "velvet_nebula" ? "velvet_nebula" : "obsidian_aurora";
+          var isSubOverlayWindow =
+            window.location.search.indexOf("window=desktop_lyric") !== -1 ||
+            window.location.search.indexOf("window=mini_player") !== -1;
+          var mainBaseBg = isDark
+            ? (darkVariant === "velvet_nebula" ? "#1A1116" : "#0C0E14")
+            : (lightVariant === "nordic_oat" ? "#E8E0D0" : "#F6F8FC");
+          document.documentElement.dataset.theme = isDark ? "abyssal_dark" : "watercolor_light";
+          document.documentElement.dataset.lightVariant = lightVariant;
+          document.documentElement.dataset.darkVariant = darkVariant;
+          document.documentElement.style.colorScheme = isDark ? "dark" : "light";
+          document.documentElement.style.backgroundColor = isSubOverlayWindow ? "transparent" : mainBaseBg;
+
+          var rawMotion = localStorage.getItem("bm_motion_level_v1") || "best";
+          var motionLevel =
+            rawMotion === "none" || rawMotion === "standard" ? rawMotion : "best";
+          document.documentElement.dataset.motionLevel = motionLevel;
+
+          var rawDensity = localStorage.getItem("bm_ui_density_v1") || "standard";
+          var uiDensity =
+            rawDensity === "compact" || rawDensity === "spacious" ? rawDensity : "standard";
+          document.documentElement.dataset.uiDensity = uiDensity;
+
+          var rawTypo = localStorage.getItem("bm_typography_config_v1");
+          if (rawTypo) {
+            var tc = JSON.parse(rawTypo);
+            if (tc && typeof tc === "object") {
+              var uiFam = typeof tc.uiFontFamily === "string" ? tc.uiFontFamily.replace(/["\\;\r\n]/g, "").trim() : "";
+              var bwRaw = Number(tc.uiBaseWeight);
+              var bw = isFinite(bwRaw) ? Math.round(Math.min(900, Math.max(100, bwRaw))) : 400;
+              var latin = tc.latinFallback === "segoe"
+                ? '"Segoe UI Variable Display", "Segoe UI"'
+                : tc.latinFallback === "bahnschrift"
+                ? '"Bahnschrift", "Segoe UI Variable Display"'
+                : tc.latinFallback === "inter"
+                ? '"Inter", "Segoe UI Variable Display"'
+                : tc.latinFallback === "mono"
+                ? '"Cascadia Mono", "Consolas", ui-monospace'
+                : "";
+              var lightPrefix = "";
+              if (bw <= 350) {
+                if (!uiFam || uiFam === "Microsoft YaHei UI" || uiFam === "Microsoft YaHei") {
+                  lightPrefix = '"Microsoft YaHei UI Light", "Microsoft YaHei Light", "Segoe UI Light", ';
+                } else if (uiFam === "DengXian") {
+                  lightPrefix = '"DengXian Light", ';
+                }
+              }
+              var stack = uiFam
+                ? (latin
+                    ? latin + ', ' + lightPrefix + '"' + uiFam + '", "Microsoft YaHei UI", sans-serif'
+                    : lightPrefix + '"' + uiFam + '", "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", sans-serif')
+                : (latin
+                    ? latin + ', ' + lightPrefix + '"PingFang SC", "Microsoft YaHei UI", sans-serif'
+                    : lightPrefix
+                    ? lightPrefix + '"Segoe UI Variable Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif'
+                    : "");
+              if (stack) document.documentElement.style.setProperty("--bm-font-ui", stack);
+              var sc = Number(tc.uiFontScale);
+              if (isFinite(sc) && sc >= 0.75 && sc <= 1.45) {
+                document.documentElement.style.setProperty("--bm-ui-font-scale", String(Number(sc.toFixed(2))));
+              }
+              var clampW = function (v) { return String(Math.round(Math.min(900, Math.max(100, v)))); };
+              document.documentElement.style.setProperty("--bm-ui-font-weight", clampW(bw));
+              document.documentElement.style.setProperty("--bm-fw-regular", clampW(bw));
+              document.documentElement.style.setProperty("--bm-fw-medium", clampW(bw + 100));
+              document.documentElement.style.setProperty("--bm-fw-semibold", clampW(bw + 200));
+              document.documentElement.style.setProperty("--bm-fw-bold", clampW(bw + 300));
+              document.documentElement.style.setProperty("--bm-fw-heavy", clampW(bw + 400));
+              var lh = Number(tc.uiLineHeight);
+              if (isFinite(lh) && lh >= 1.25 && lh <= 1.8) {
+                document.documentElement.style.setProperty("--bm-ui-line-height", String(Number(lh.toFixed(2))));
+              }
+              document.documentElement.dataset.tabularNums = tc.tabularNumbers !== false ? "true" : "false";
+              document.documentElement.dataset.mixedFonts = latin ? "true" : "false";
+            }
+          }
+        } catch (_e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

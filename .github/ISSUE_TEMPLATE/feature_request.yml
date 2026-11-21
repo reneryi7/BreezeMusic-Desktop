@@ -1,0 +1,34 @@
+name: 功能建议 (Feature Request)
+description: 提出新功能想法、交互优化或视觉体验改进建议
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提出改进想法！请简单说明你的使用场景与期望效果。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 需求背景 / 使用场景
+      description: 你在日常听歌或使用桌面端时遇到了什么痛点或不便？
+      placeholder: 例如：在使用桌面歌词或小窗模式时，希望能...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 你期望的交互方式、界面样式或功能表现是什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 补充参考（可选）
+      description: 如有参考截图、安卓端对应功能说明或替代方案，可在此补充
+    validations:
+      required: false

@@ -1,0 +1,49 @@
+﻿/* =========================================================================
+ * BreezeMusic · 微风音乐 (Windows 概念版 v1.0.0 · Skyline Edition)
+ * 模块化样式总入口 (Modular Stylesheet Entry)
+ * ========================================================================= */
+
+@import "./tokens-base.css";
+@import "./views-discover-library.css";
+@import "./views-player-modals.css";
+@import "./skyline-components.css";
+@import "./library-rank-theme-overrides.css";
+@import "./kugou-fluid-redesign.css";
+@import "./settings-redesign.css";
+@import "./motion-craft.css";
+
+/* =========================================================================
+ * 大歌单 (1000+ 首) 与巅峰榜 (TOP500) 原生视口渲染虚拟化加速 (CSS Containment)
+ * 跳过屏幕可视区域外歌曲行的布局与绘制计算，大幅降低长列表滚动掉帧与内存占用
+ * ========================================================================= */
+.sdp-track-row,
+.frameless-song-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 62px;
+}
+
+.sr-song-entry-wrap {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
+}
+
+.nq-song-list-group:not(.is-reordering) .nq-song-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 58px;
+}
+
+.cm-root-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 128px;
+}
+
+@supports not (content-visibility: auto) {
+  .sdp-track-row,
+  .frameless-song-row,
+  .sr-song-entry-wrap,
+  .unified-song-row,
+  .nq-song-list-group:not(.is-reordering) .nq-song-row,
+  .cm-root-card {
+    contain: layout style paint;
+  }
+}

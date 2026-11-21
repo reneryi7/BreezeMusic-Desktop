@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+dist/
+dist-ssr/
+*.local
+.env
+.env.*
+
+# Rust / Tauri build artifacts & binaries
+src-tauri/target/
+src-tauri/gen/
+**/*.exe
+**/*.msi
+**/*.pdb
+
+# Session, User State & Runtime Directories (Never commit local user data)
+session_state.json
+play_history_*.json
+custom_fonts.json
+*.part_dl_*
+*.tmp
+/cache/
+/config/
+/fonts/
+/webview_data/
+/downloads/
+/lyrics/
+
+# Local Agent Workspace Config (Keep locally, do not publish to GitHub)
+.agents/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

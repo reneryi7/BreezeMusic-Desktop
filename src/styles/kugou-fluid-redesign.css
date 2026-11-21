@@ -1,0 +1,2434 @@
+/* ============================================================================
+   BreezeMusic For Windows — 酷狗经典蓝 × 多彩流光 × 彻底去卡片化 × 100% 零边框重构层
+   ============================================================================ */
+
+/* ----------------------------------------------------------------------------
+   1. 100% 零边框铁律 (Global Zero-Border Enforcement)
+   ---------------------------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  border-color: transparent !important;
+  outline-color: transparent !important;
+}
+
+.divider,
+.ctx-divider,
+.rtb-divider,
+.tab-bottom-indicator,
+.sdp-top-bar,
+.subpage-frameless-header .subpage-circle-back-btn {
+  display: none !important;
+}
+
+/* 独立二级页面头部保留标题、分类胶囊与播放全部按钮，仅隐藏冗余左侧返回钮 */
+.subpage-frameless-header {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 4px 6px 14px;
+  flex-wrap: wrap;
+}
+
+/* 去除旧版内发光 1px 描边，保留柔和环境弥散阴影 */
+.skyline-nav-capsule,
+.skyline-search-orb-btn,
+.skyline-search-pill,
+.profile-vip-morph-card,
+.win-Merged-capsule,
+.fixed-bottom-player-bar,
+.queue-drawer,
+.glass-popover,
+.modal-card,
+.context-menu-popover {
+  border: none !important;
+  outline: none !important;
+}
+
+/* ----------------------------------------------------------------------------
+   2. 主视口顶部留白（移除顶部渐隐遮罩，保证滚动内容清晰透亮与悬浮灵动岛兼容）
+   ---------------------------------------------------------------------------- */
+.skyline-stage-viewport:not(.viewport-locked-nowplaying) {
+  padding-top: 72px !important;
+  mask-image: none !important;
+  -webkit-mask-image: none !important;
+}
+
+@media (min-width: 1081px) {
+  /* 榜单/电台左右分栏独立子页：移除视口顶部 72px padding-top，避免 Chromium position:sticky 约束框下推侧栏与调频舱 */
+  .skyline-stage-viewport:not(.viewport-locked-nowplaying):has(.rank-standalone-page, .radio-plaza-page) {
+    padding-top: 0 !important;
+  }
+}
+
+.inflow-top-greeting-row {
+  height: 46px;
+  min-height: 46px;
+  padding: 0;
+  padding-left: 2px;
+  margin-top: -58px;
+  margin-bottom: 14px;
+}
+
+/* ----------------------------------------------------------------------------
+   3. 全局防截断、无原生矩形框的智能毛玻璃气泡提示 (Global Smart Glass Tooltip)
+   ---------------------------------------------------------------------------- */
+button {
+  transition:
+    transform 0.28s var(--ease-jelly),
+    background 0.22s ease,
+    color 0.2s ease,
+    box-shadow 0.25s ease,
+    opacity 0.2s ease;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.9) !important;
+}
+
+/* v3 悬浮气泡使用 fixed 根容器，不修改宿主按钮 position（防止 fixed 悬浮按钮被覆盖为 relative） */
+[data-tip]::after {
+  content: none !important;
+  display: none !important;
+}
+
+.global-smart-tooltip {
+  position: fixed;
+  z-index: 2147483647;
+  padding: 6px 13px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: rgba(20, 20, 27, 0.94);
+  color: #f3f1ed;
+  font-size: var(--bm-fs-caption, 12.5px);
+  font-weight: var(--bm-fw-bold, 700);
+  line-height: 1.35;
+  letter-spacing: 0.015em;
+  white-space: nowrap;
+  max-width: min(360px, calc(100vw - 24px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  user-select: none;
+  opacity: 0;
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.44),
+    0 2px 10px color-mix(in srgb, var(--primary) 24%, transparent);
+  backdrop-filter: blur(24px) saturate(190%);
+  -webkit-backdrop-filter: blur(24px) saturate(190%);
+  transform: translate3d(0, 5px, 0) scale(0.92);
+  will-change: transform, opacity;
+  transition:
+    opacity 0.14s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.2s cubic-bezier(0.22, 1.32, 0.36, 1);
+}
+
+.global-smart-tooltip.is-gliding {
+  transition:
+    left 0.2s cubic-bezier(0.22, 1.24, 0.36, 1),
+    top 0.2s cubic-bezier(0.22, 1.24, 0.36, 1),
+    opacity 0.14s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.2s cubic-bezier(0.22, 1.32, 0.36, 1);
+}
+
+.global-smart-tooltip.is-multiline {
+  white-space: normal;
+  border-radius: var(--bm-r-md, 14px);
+  padding: 7px 14px;
+  max-width: min(340px, calc(100vw - 24px));
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+
+.global-smart-tooltip.place-bottom {
+  transform: translate3d(0, -5px, 0) scale(0.92);
+}
+
+.global-smart-tooltip.is-visible {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.global-smart-tooltip.scheme-watercolor_light,
+.global-smart-tooltip.scheme-light,
+.scheme-watercolor_light .global-smart-tooltip,
+.scheme-light .global-smart-tooltip {
+  background: var(--bg-elevated, rgba(252, 249, 244, 0.96));
+  color: var(--text-primary, #1c1917);
+  box-shadow:
+    0 12px 30px rgba(28, 25, 23, 0.14),
+    0 2px 8px color-mix(in srgb, var(--primary) 16%, transparent);
+}
+
+/* ----------------------------------------------------------------------------
+   4. 顶部居中「灵动岛」果冻展开导航 + 左翼液滴分裂返回球 (TitleBar.vue)
+   ---------------------------------------------------------------------------- */
+.skyline-floating-center {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 120;
+  pointer-events: auto;
+}
+
+/* 左翼液滴分裂返回球 */
+.island-split-back-orb {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--bg-floating-capsule);
+  color: var(--primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-soft);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    background 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.22s ease;
+}
+
+.island-split-back-orb:hover {
+  background: var(--grad-kugou-blue);
+  color: #ffffff;
+  transform: translateX(-2px);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--primary) 32%, transparent);
+}
+
+.island-split-enter-active {
+  transition:
+    opacity 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.32s cubic-bezier(0.22, 1, 0.36, 1),
+    margin-right 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.island-split-leave-active {
+  transition:
+    opacity 0.18s ease,
+    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    margin-right 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.island-split-enter-from,
+.island-split-leave-to {
+  opacity: 0;
+  transform: translateX(24px) scale(0.45);
+  margin-right: -54px;
+}
+
+/* 灵动岛主胶囊：未选中仅显圆润图标，选中平滑展开 2 字 */
+.skyline-nav-capsule.dynamic-island-capsule {
+  height: 46px;
+  padding: 4px 6px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: var(--bg-floating-capsule);
+  box-shadow: var(--shadow-soft);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.skyline-nav-btn.island-tab-btn {
+  height: 38px;
+  padding: 0 12px;
+  border-radius: var(--bm-r-pill, 999px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  color: var(--text-secondary);
+  background: transparent;
+  transition:
+    padding 0.32s cubic-bezier(0.22, 1, 0.36, 1),
+    background 0.22s ease,
+    color 0.2s ease,
+    transform 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.24s ease;
+}
+
+.skyline-nav-btn.island-tab-btn:hover:not(.active) {
+  color: var(--primary);
+  background: var(--bg-pill);
+}
+
+.skyline-nav-btn.island-tab-btn.active {
+  padding: 0 17px;
+  gap: 7px;
+  background: var(--grad-kugou-blue) !important;
+  color: #ffffff !important;
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 34%, transparent);
+}
+
+.island-tab-label-wrap {
+  display: inline-grid;
+  grid-template-columns: 0fr;
+  overflow: hidden;
+  opacity: 0;
+  transition:
+    grid-template-columns 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease;
+}
+
+.skyline-nav-btn.island-tab-btn.active .island-tab-label-wrap {
+  grid-template-columns: 1fr;
+  opacity: 1;
+}
+
+.island-tab-label-inner {
+  min-width: 0;
+  white-space: nowrap;
+  font-size: var(--bm-fs-song-title, 15px);
+  font-weight: var(--bm-fw-heavy, 800);
+  letter-spacing: 0.02em;
+}
+
+/* 右上角纯图标控制舱 */
+.skyline-right-pure-capsule {
+  height: 46px;
+  padding: 4px 7px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: var(--bg-floating-capsule);
+  box-shadow: var(--shadow-soft);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pure-avatar-orb-btn {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--grad-kugou-blue);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 34%, transparent);
+  cursor: pointer;
+}
+
+.pure-avatar-orb-btn img {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.pure-avatar-vip-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--grad-vip-gold);
+  box-shadow: 0 0 8px rgba(255, 184, 0, 0.85);
+}
+
+/* ----------------------------------------------------------------------------
+   5. 底部固定播放栏：顶边全宽流光细轨 + 居中单排圆润播控（底栏主布局已统一至 skyline-components.css）
+   ---------------------------------------------------------------------------- */
+
+/* 顶边 100% 全宽流光进度细轨 */
+.pb-top-edge-timeline {
+  position: absolute;
+  top: -2px;
+  left: 0;
+  right: 0;
+  height: 16px;
+  padding-top: 2px;
+  cursor: pointer;
+  z-index: 105;
+  display: flex;
+  align-items: flex-start;
+}
+
+.pb-top-edge-rail {
+  width: 100%;
+  height: 3px;
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+  position: relative;
+  overflow: visible;
+  transition:
+    height 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    background 0.2s ease;
+}
+
+.pb-top-edge-timeline:hover .pb-top-edge-rail,
+.pb-top-edge-timeline.is-seeking .pb-top-edge-rail {
+  height: 6px;
+  background: color-mix(in srgb, var(--primary) 24%, transparent);
+}
+
+.pb-top-edge-fill-mask {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pb-top-edge-fill {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0 var(--bm-r-pill, 999px) var(--bm-r-pill, 999px) 0;
+  background: var(--grad-kugou-blue);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--primary) 44%, transparent);
+  will-change: transform;
+}
+
+.pb-top-edge-thumb-carrier {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.pb-top-edge-thumb {
+  position: absolute;
+  right: -6px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  outline: 2px solid var(--primary);
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--primary) 48%, transparent);
+  transform: translateY(-50%) scale(0);
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.pb-top-edge-timeline:hover .pb-top-edge-thumb,
+.pb-top-edge-timeline.is-seeking .pb-top-edge-thumb {
+  transform: translateY(-50%) scale(1);
+}
+
+.pb-top-edge-climax-seg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--grad-vip-gold);
+  border-radius: var(--bm-r-pill, 999px);
+  opacity: 0.78;
+  box-shadow: 0 0 8px rgba(255, 184, 0, 0.45);
+  pointer-events: none;
+}
+
+.pb-hover-time-pill {
+  position: absolute;
+  bottom: 18px;
+  transform: translateX(-50%) translateY(4px) scale(0.94);
+  padding: 4px 10px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: var(--bg-elevated);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  color: var(--primary);
+  font-size: var(--bm-fs-caption, 12.5px);
+  font-weight: var(--bm-fw-bold, 700);
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+  pointer-events: none;
+  opacity: 0;
+  transition:
+    opacity 0.16s ease,
+    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  white-space: nowrap;
+}
+
+.pb-top-edge-timeline:hover .pb-hover-time-pill,
+.pb-top-edge-timeline.is-seeking .pb-hover-time-pill {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0) scale(1);
+}
+
+/* 底栏中央单排 3 枚舒展圆润播控图标 */
+.pb-center-single-row {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+}
+
+.pb-hero-play-orb {
+  width: 52px !important;
+  height: 52px !important;
+  border-radius: 50% !important;
+  background: var(--grad-kugou-blue) !important;
+  color: #ffffff !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  box-shadow:
+    0 10px 24px color-mix(in srgb, var(--primary) 36%, transparent),
+    0 4px 12px rgba(0, 0, 0, 0.22) !important;
+  transition:
+    transform 0.24s cubic-bezier(0.22, 1.32, 0.36, 1),
+    box-shadow 0.24s ease !important;
+}
+
+.pb-hero-play-orb:hover {
+  transform: scale(1.07) !important;
+  box-shadow:
+    0 14px 30px color-mix(in srgb, var(--primary) 46%, transparent),
+    0 6px 16px rgba(0, 0, 0, 0.26) !important;
+}
+
+.pb-hero-play-orb:active {
+  transform: scale(0.96) !important;
+}
+
+/* ----------------------------------------------------------------------------
+   6. 彻底去卡片化 (De-Carding) 与克制微抬悬停反馈
+   ---------------------------------------------------------------------------- */
+.playlist-card,
+.album-card,
+.lib-pl-grid-item,
+.artist-wall-card,
+.sr-media-card,
+.album-wall-card {
+  background: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+  padding: 6px !important;
+  border-radius: var(--bm-r-lg, 18px) !important;
+  transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1) !important;
+}
+
+.playlist-card:hover,
+.album-card:hover,
+.lib-pl-grid-item:hover,
+.artist-wall-card:hover,
+.sr-media-card:hover,
+.album-wall-card:hover {
+  background: transparent !important;
+  transform: translateY(-4px) !important;
+}
+
+.playlist-cover-wrap,
+.lib-pl-cover-box,
+.sr-media-cover-wrap,
+.album-cover-wrap {
+  border-radius: var(--bm-r-lg, 18px) !important;
+  overflow: hidden;
+  box-shadow: 0 10px 24px -8px rgba(2, 16, 48, 0.2) !important;
+  transition:
+    box-shadow 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1) !important;
+}
+
+.playlist-card:hover .playlist-cover-wrap,
+.lib-pl-grid-item:hover .lib-pl-cover-box,
+.sr-media-card:hover .sr-media-cover-wrap,
+.album-card:hover .album-cover-wrap {
+  box-shadow: 0 16px 32px -8px color-mix(in srgb, var(--primary) 26%, transparent) !important;
+}
+
+/* 封面右下角播放钮 */
+.cover-play-fab,
+.lib-pl-hover-play {
+  background: var(--grad-kugou-blue) !important;
+  color: #ffffff !important;
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 36%, transparent) !important;
+  transition:
+    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease !important;
+}
+
+/* ----------------------------------------------------------------------------
+   7. 歌曲行无边框四态响应体系 + 轻盈操作浮现
+   ---------------------------------------------------------------------------- */
+.frameless-song-row,
+.sdp-track-row,
+.sr-song-row,
+.ns-song-card,
+.queue-item,
+.album-engraved-row {
+  background: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+  border-radius: var(--bm-r-md, 14px) !important;
+  transition:
+    background 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1) !important;
+}
+
+.frameless-song-row:hover,
+.sdp-track-row:hover,
+.sr-song-row:hover,
+.ns-song-card:hover,
+.queue-item:hover,
+.album-engraved-row:hover {
+  background: var(--song-hover-mist) !important;
+  transform: translateX(2px) !important;
+}
+
+.frameless-song-row:active,
+.sdp-track-row:active,
+.sr-song-row:active,
+.ns-song-card:active,
+.album-engraved-row:active {
+  transform: scale(0.99) !important;
+}
+
+/* 正在播放态：从左向右消隐的微风蓝渐变流光带，绝无边框线 */
+.frameless-song-row.playing,
+.frameless-song-row.active,
+.sdp-track-row.playing,
+.sdp-track-row.active,
+.sr-song-row.playing,
+.sr-song-row.active,
+.ns-song-card.playing,
+.ns-song-card.active,
+.queue-item.active,
+.album-engraved-row.playing {
+  background: var(--song-playing-aura) !important;
+  box-shadow: none !important;
+}
+
+.frameless-song-row.playing .fsr-song-title,
+.sdp-track-row.playing .sdp-track-title,
+.sr-song-row.playing .sr-song-title,
+.ns-song-card.playing .ns-title,
+.queue-item.active .qi-title,
+.album-engraved-row.playing .aer-title {
+  color: var(--primary) !important;
+  font-weight: var(--bm-fw-heavy, 800) !important;
+}
+
+/* 默认态隐藏歌曲行右侧操作图标，仅显示干净时长；悬停时平滑浮现 */
+.frameless-song-row .fsr-hover-actions,
+.sdp-track-row .sdp-row-actions,
+.sr-song-row .sr-row-actions,
+.ns-song-card .ns-actions,
+.album-engraved-row .aer-actions {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(4px);
+  transition:
+    opacity 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.frameless-song-row:hover .fsr-hover-actions,
+.sdp-track-row:hover .sdp-row-actions,
+.sr-song-row:hover .sr-row-actions,
+.ns-song-card:hover .ns-actions,
+.album-engraved-row:hover .aer-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+/* 双列歌曲网格中隐藏冗余专辑列，确保歌名完整舒展 */
+.frameless-songs-grid-2col .fsr-album-col,
+.frameless-songs-grid-2col .sdp-col-album {
+  display: none !important;
+}
+
+/* ----------------------------------------------------------------------------
+   8. 全站三层分级 Tag / Tab 视觉体系
+   - L1 主视图/模式分段器 (.is-segmented-tabs + .bm-seg-glider)
+   - L2 多分类内容导航栏 (.is-immersive-tabs + .immersive-tab-indicator + 边缘渐隐)
+   - L3 排序/筛选柔垫微胶囊 (15% 主题微光衬底，清晰区隔 L1/L2)
+   ---------------------------------------------------------------------------- */
+
+/* ==================== L1 主视图/模式流体滑动胶囊分段器 ==================== */
+html body .is-segmented-tabs {
+  position: relative;
+  isolation: isolate;
+}
+
+html body .vas-mode-tabs.is-segmented-tabs,
+html body .pill-tabs.is-segmented-tabs,
+html body .sr-tabs-group.is-segmented-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  border: none;
+  flex-wrap: nowrap;
+}
+
+html body .np-floating-window .vas-mode-tabs.is-segmented-tabs {
+  background: var(--fm-chip-bg);
+}
+
+html body .scheme-watercolor_light .pill-tabs.is-segmented-tabs,
+html body .scheme-watercolor_light .sr-tabs-group.is-segmented-tabs,
+html[data-theme="watercolor_light"] body .pill-tabs.is-segmented-tabs,
+html[data-theme="watercolor_light"] body .sr-tabs-group.is-segmented-tabs {
+  background: rgba(24, 26, 32, 0.055);
+}
+
+html body .scheme-watercolor_light.light-variant-nordic_oat .pill-tabs.is-segmented-tabs,
+html body .scheme-watercolor_light.light-variant-nordic_oat .sr-tabs-group.is-segmented-tabs,
+html[data-theme="watercolor_light"][data-light-variant="nordic_oat"] body .pill-tabs.is-segmented-tabs,
+html[data-theme="watercolor_light"][data-light-variant="nordic_oat"] body .sr-tabs-group.is-segmented-tabs {
+  background: #e4ddd0;
+}
+
+html body .pill-tabs.full-w.is-segmented-tabs {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  width: 100%;
+}
+
+.bm-seg-glider {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  border-radius: var(--bm-r-pill, 999px);
+  pointer-events: none;
+  opacity: 0;
+  background: var(--grad-kugou-primary, linear-gradient(135deg, var(--primary), var(--primary-light, #818cf8)));
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 30%, transparent);
+  will-change: transform;
+  transition:
+    transform 0.28s cubic-bezier(0.22, 1.18, 0.36, 1),
+    width 0.26s cubic-bezier(0.22, 1.16, 0.36, 1),
+    height 0.22s ease,
+    opacity 0.16s ease;
+}
+
+.np-floating-window .bm-seg-glider {
+  background: linear-gradient(
+    135deg,
+    var(--np-primary, var(--fm-primary, var(--primary))),
+    var(--np-secondary, var(--fm-secondary, var(--primary-light, var(--primary))))
+  );
+  box-shadow: 0 4px 14px var(--np-primary-glow, rgba(0, 0, 0, 0.22));
+}
+
+.nq-popover-window .bm-seg-glider {
+  background: linear-gradient(
+    135deg in oklab,
+    var(--nq-accent-1) 0%,
+    color-mix(in oklab, var(--nq-accent-1) 70%, var(--nq-accent-2)) 100%
+  );
+  box-shadow: 0 4px 14px var(--nq-accent-1-glow);
+}
+
+.np-stage-mode-group .bm-seg-glider {
+  background: linear-gradient(
+    135deg in oklab,
+    var(--np-accent-primary, var(--primary)) 0%,
+    color-mix(
+      in oklab,
+      var(--np-accent-primary, var(--primary)) 72%,
+      var(--np-accent-secondary, var(--cyan))
+    ) 100%
+  );
+  box-shadow: 0 4px 14px var(--np-accent-glow, rgba(0, 0, 0, 0.28));
+}
+
+html body .is-segmented-tabs > button,
+html body .is-segmented-tabs > [role="tab"] {
+  position: relative;
+  z-index: 1;
+  border: none;
+  border-radius: var(--bm-r-pill, 999px);
+  transition:
+    color 0.2s ease,
+    opacity 0.2s ease,
+    transform 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+html body .is-segmented-tabs > button:active,
+html body .is-segmented-tabs > [role="tab"]:active {
+  transform: scale(0.97);
+}
+
+html body .is-segmented-tabs > button:focus-visible,
+html body .is-segmented-tabs > [role="tab"]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+html body .is-segmented-tabs > button.active,
+html body .is-segmented-tabs > button.is-active,
+html body .is-segmented-tabs > button[aria-selected="true"],
+html body .is-segmented-tabs > [role="tab"].active,
+html body .is-segmented-tabs > [role="tab"].is-active,
+html body .is-segmented-tabs > [role="tab"][aria-selected="true"] {
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  color: #ffffff;
+}
+
+html body .np-floating-window .is-segmented-tabs > button.active,
+html body .np-floating-window .is-segmented-tabs > button[aria-selected="true"],
+html body .np-floating-window .is-segmented-tabs > [role="tab"].active,
+html body .np-floating-window .is-segmented-tabs > [role="tab"][aria-selected="true"],
+html body .np-stage-mode-group.is-segmented-tabs > button.active {
+  color: var(--np-on-accent-primary, var(--fm-on-primary, #ffffff)) !important;
+}
+
+html body .nq-popover-window .is-segmented-tabs > button.active,
+html body .nq-popover-window .is-segmented-tabs > button[aria-selected="true"] {
+  color: var(--nq-on-accent-1, #ffffff) !important;
+}
+
+html body .vas-mode-tabs.is-segmented-tabs > button {
+  height: 30px;
+  padding: 0 14px;
+  font-size: var(--bm-fs-caption, 12.5px);
+  font-weight: var(--bm-fw-heavy, 800);
+  color: var(--fm-text-2);
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+html body .vas-mode-tabs.is-segmented-tabs > button:hover:not(.active) {
+  color: var(--fm-text-1);
+}
+
+html body .vas-mode-tabs.is-segmented-tabs > button.active .vas-mode-count {
+  background: color-mix(in srgb, currentColor 18%, transparent);
+  color: inherit;
+}
+
+html body .sr-tabs-group.is-segmented-tabs > button {
+  padding: 7px 15px;
+  font-size: var(--bm-fs-meta, 13.5px);
+  font-weight: var(--bm-fw-bold, 700);
+}
+
+/* ==================== L2 多分类内容导航栏（无底框弹簧流光下划线 + 边缘渐隐） ==================== */
+html body .is-immersive-tabs.is-immersive-tabs {
+  position: relative !important;
+  isolation: isolate;
+  display: inline-flex !important;
+  flex-direction: row !important;
+  align-items: flex-end !important;
+  flex-wrap: nowrap !important;
+  gap: 22px !important;
+  padding: 4px 2px 2px !important;
+  margin-left: 0 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  overflow-x: auto !important;
+  overflow-y: visible !important;
+  scrollbar-width: none !important;
+  max-width: 100% !important;
+}
+
+html body .is-immersive-tabs.is-immersive-tabs::-webkit-scrollbar {
+  display: none !important;
+}
+
+/* 超宽横向滑动边缘柔和渐隐 */
+html body .is-immersive-tabs[data-scroll-fade="right"] {
+  mask-image: linear-gradient(90deg, #000 0%, #000 calc(100% - 28px), transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, #000 0%, #000 calc(100% - 28px), transparent 100%);
+}
+
+html body .is-immersive-tabs[data-scroll-fade="left"] {
+  mask-image: linear-gradient(90deg, transparent 0%, #000 28px, #000 100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 28px, #000 100%);
+}
+
+html body .is-immersive-tabs[data-scroll-fade="both"] {
+  mask-image: linear-gradient(90deg, transparent 0%, #000 24px, #000 calc(100% - 24px), transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 24px, #000 calc(100% - 24px), transparent 100%);
+}
+
+/* 独立页面/模块全行一级分类栏：100% 彻底零边框，仅靠留白与文字高对比区分 */
+html body .is-immersive-tabs.is-immersive-tabs.has-tab-divider {
+  box-shadow: none !important;
+  padding-bottom: 4px !important;
+}
+
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs.has-tab-divider,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs.has-tab-divider,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs.has-tab-divider {
+  box-shadow: none !important;
+}
+
+/* 超宽多标签分类条保留安全横向滚动 */
+html body .radio-plaza-cats.is-immersive-tabs.is-immersive-tabs,
+html body .rom-category-tabs.is-immersive-tabs.is-immersive-tabs,
+html body .sl-board-tabs.is-immersive-tabs.is-immersive-tabs,
+html body .vas-cat-pills.is-immersive-tabs.is-immersive-tabs {
+  display: flex !important;
+  width: auto !important;
+  max-width: 100% !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  padding-bottom: 5px !important;
+  scrollbar-width: none !important;
+}
+
+/* 紧凑工具栏 / 弹窗筛选组 */
+html body .is-immersive-tabs.is-immersive-tabs.is-immersive-compact {
+  gap: 16px !important;
+  padding: 2px 2px 2px !important;
+}
+
+/* 发现页分类主导航适配 */
+html body .app-sliding-tabs.is-immersive-tabs.is-immersive-tabs {
+  gap: 20px !important;
+  padding: 3px 2px 2px !important;
+  margin-left: 6px !important;
+}
+
+/* 窄栏与全宽容器特例 */
+html body .rank-cat-pills.is-immersive-tabs.is-immersive-tabs {
+  display: flex !important;
+  width: 100% !important;
+  justify-content: space-between !important;
+  gap: 10px !important;
+  margin: 0 !important;
+  padding: 2px 2px 2px !important;
+}
+
+html body .rom-category-tabs.is-immersive-tabs.is-immersive-tabs {
+  margin-top: 0 !important;
+  padding-top: 4px !important;
+}
+
+/* 全局底部流光指示条 (.immersive-tab-indicator)：弹簧物理 + 水滴拉伸 + 双色渐变 */
+.immersive-tab-indicator {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 2;
+  height: 3px;
+  width: 20px;
+  border-radius: var(--bm-r-pill, 999px);
+  pointer-events: none;
+  transform-origin: center center;
+  will-change: transform, opacity;
+  transition: opacity 0.16s ease;
+}
+
+/* Tab 标签按钮本体：无底框、无外圈胶囊、零横向位移、柔和缩放选中态 */
+html body .is-immersive-tabs.is-immersive-tabs > button,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"] {
+  appearance: none !important;
+  position: relative !important;
+  z-index: 1 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 4px !important;
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  height: auto !important;
+  margin: 0 !important;
+  padding: 4px 1px 8px !important;
+  border: none !important;
+  border-radius: var(--bm-r-xs, 6px) !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  font-family: inherit !important;
+  font-size: var(--bm-fs-body, 14.5px) !important;
+  font-weight: var(--bm-fw-semibold, 600) !important;
+  line-height: 1.28 !important;
+  letter-spacing: 0.01em !important;
+  white-space: nowrap !important;
+  cursor: pointer !important;
+  color: rgba(238, 243, 250, 0.72) !important;
+  text-shadow: none !important;
+  transform: scale(1) !important;
+  transform-origin: 50% 85% !important;
+  animation: none !important;
+  transition:
+    color 0.2s ease,
+    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    text-shadow 0.2s ease,
+    opacity 0.2s ease !important;
+}
+
+/* 彻底屏蔽旧版胶囊/按钮遗留的 ::before / ::after 静态下划线伪元素，避免与动态 .immersive-tab-indicator 叠加双线 */
+html body .is-immersive-tabs.is-immersive-tabs > button::before,
+html body .is-immersive-tabs.is-immersive-tabs > button::after,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"]::before,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"]::after,
+.app-root .is-immersive-tabs > button::before,
+.app-root .is-immersive-tabs > button::after,
+.app-root .is-immersive-tabs > [role="tab"]::before,
+.app-root .is-immersive-tabs > [role="tab"]::after {
+  content: none !important;
+  display: none !important;
+}
+
+html body .is-immersive-tabs.is-immersive-compact.is-immersive-tabs > button,
+html body .is-immersive-tabs.is-immersive-compact.is-immersive-tabs > [role="tab"] {
+  padding: 3px 1px 7px !important;
+  font-size: var(--bm-fs-meta, 13.5px) !important;
+}
+
+html body .app-sliding-tabs.is-immersive-tabs.is-immersive-tabs > button,
+html body .app-sliding-tabs.is-immersive-tabs.is-immersive-tabs > [role="tab"] {
+  padding: 3px 1px 7px !important;
+  font-size: var(--bm-fs-body, 14.5px) !important;
+}
+
+html body .is-immersive-tabs.is-immersive-tabs > button:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"]:hover:not(.active):not(.is-active):not([aria-selected="true"]) {
+  color: rgba(238, 243, 250, 0.94) !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+
+html body .is-immersive-tabs.is-immersive-tabs > button.active,
+html body .is-immersive-tabs.is-immersive-tabs > button.is-active,
+html body .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"],
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"].active,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"].is-active,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"][aria-selected="true"] {
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: #eef3fa !important;
+  transform: scale(1.04) !important;
+  text-shadow: 0 0 0.45px currentColor !important;
+}
+
+html body .is-immersive-tabs.is-immersive-tabs > button:focus-visible,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"]:focus-visible {
+  outline: 2px solid var(--tab-accent, var(--primary)) !important;
+  outline-offset: 2px !important;
+  box-shadow: none !important;
+}
+
+/* 浅色主题中性高对比文本色彩（自适应 L1 暖炭墨 / L2 燕麦褐墨，含 Teleport 至 body 的全局弹窗） */
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs > button,
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs > [role="tab"],
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs > button,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs > [role="tab"],
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs > button,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs > [role="tab"] {
+  color: var(--fm-text-2, var(--bm-text-2, #57534e)) !important;
+}
+
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs > button:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs > [role="tab"]:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs > button:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs > [role="tab"]:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs > button:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs > [role="tab"]:hover:not(.active):not(.is-active):not([aria-selected="true"]) {
+  color: var(--fm-text-1, var(--bm-text-1, #1c1917)) !important;
+}
+
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs > button.active,
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs > button.is-active,
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"],
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs > [role="tab"].active,
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs > [role="tab"].is-active,
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs > [role="tab"][aria-selected="true"],
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs > button.active,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs > button.is-active,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"],
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs > [role="tab"].active,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs > [role="tab"].is-active,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs > [role="tab"][aria-selected="true"],
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs > button.active,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs > button.is-active,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"],
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs > [role="tab"].active,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs > [role="tab"].is-active,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs > [role="tab"][aria-selected="true"] {
+  color: var(--fm-text-1, var(--bm-text-1, #1c1917)) !important;
+  text-shadow: 0 0 0.35px currentColor !important;
+}
+
+/* 仅深色悬浮层 / 深色舞台 / 深色桌面歌词窗：浅色全局主题下依旧保持深色玻璃高对比文字 */
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button,
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"],
+html body .scheme-watercolor_light .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button,
+html body .scheme-watercolor_light .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"],
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button,
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"],
+html body .dl-shell:not(.is-light-shell) .is-immersive-tabs.is-immersive-tabs > button,
+html body .dl-shell:not(.is-light-shell) .is-immersive-tabs.is-immersive-tabs > [role="tab"] {
+  color: rgba(238, 243, 250, 0.72) !important;
+}
+
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"]:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html body .scheme-watercolor_light .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html body .scheme-watercolor_light .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"]:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"]:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html body .dl-shell:not(.is-light-shell) .is-immersive-tabs.is-immersive-tabs > button:hover:not(.active):not(.is-active):not([aria-selected="true"]),
+html body .dl-shell:not(.is-light-shell) .is-immersive-tabs.is-immersive-tabs > [role="tab"]:hover:not(.active):not(.is-active):not([aria-selected="true"]) {
+  color: rgba(238, 243, 250, 0.94) !important;
+}
+
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button.active,
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button.is-active,
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"],
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"].active,
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"].is-active,
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"][aria-selected="true"],
+html body .scheme-watercolor_light .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button.active,
+html body .scheme-watercolor_light .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button.is-active,
+html body .scheme-watercolor_light .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"],
+html body .scheme-watercolor_light .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"].active,
+html body .scheme-watercolor_light .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"].is-active,
+html body .scheme-watercolor_light .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"][aria-selected="true"],
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button.active,
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button.is-active,
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"],
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"].active,
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"].is-active,
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs > [role="tab"][aria-selected="true"],
+html body .dl-shell:not(.is-light-shell) .is-immersive-tabs.is-immersive-tabs > button.active,
+html body .dl-shell:not(.is-light-shell) .is-immersive-tabs.is-immersive-tabs > button.is-active,
+html body .dl-shell:not(.is-light-shell) .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"],
+html body .dl-shell:not(.is-light-shell) .is-immersive-tabs.is-immersive-tabs > [role="tab"].active,
+html body .dl-shell:not(.is-light-shell) .is-immersive-tabs.is-immersive-tabs > [role="tab"].is-active,
+html body .dl-shell:not(.is-light-shell) .is-immersive-tabs.is-immersive-tabs > [role="tab"][aria-selected="true"] {
+  color: #eef3fa !important;
+  text-shadow: 0 0 0.45px currentColor !important;
+}
+
+/* 按钮内部非计数/非状态点子文本：继承当前主题高对比前景色 */
+html body .is-immersive-tabs.is-immersive-tabs > button > span:not(.tab-count-badge):not(.tab-num):not(.tab-badge):not(.tab-count):not(.rom-cat-count):not(.rpc-cat-count):not(.vas-cat-num):not(.vas-mode-live-dot),
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"] > span:not(.tab-count-badge):not(.tab-num):not(.tab-badge):not(.tab-count):not(.rom-cat-count):not(.rpc-cat-count):not(.vas-cat-num):not(.vas-mode-live-dot) {
+  color: inherit !important;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+}
+
+/* 计数角标：纯净数字角标，选中时高亮该 Tag 对应的 accentColor，非激活柔和静音 */
+html body .is-immersive-tabs.is-immersive-tabs .tab-count-badge,
+html body .is-immersive-tabs.is-immersive-tabs .tab-num,
+html body .is-immersive-tabs.is-immersive-tabs .tab-badge,
+html body .is-immersive-tabs.is-immersive-tabs .tab-count,
+html body .is-immersive-tabs.is-immersive-tabs .rom-cat-count,
+html body .is-immersive-tabs.is-immersive-tabs .rpc-cat-count,
+html body .is-immersive-tabs.is-immersive-tabs .vas-cat-num {
+  display: inline-block !important;
+  margin-left: 3px !important;
+  padding: 0 !important;
+  min-width: 0 !important;
+  height: auto !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+  font-size: var(--bm-fs-micro, 11px) !important;
+  font-weight: var(--bm-fw-bold, 700) !important;
+  font-variant-numeric: tabular-nums !important;
+  line-height: 1 !important;
+  color: rgba(238, 243, 250, 0.46) !important;
+  transition: color 0.2s ease !important;
+}
+
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs .tab-count-badge,
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs .tab-num,
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs .tab-badge,
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs .tab-count,
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs .rom-cat-count,
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs .rpc-cat-count,
+html body .scheme-watercolor_light .is-immersive-tabs.is-immersive-tabs .vas-cat-num,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs .tab-count-badge,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs .tab-num,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs .tab-badge,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs .tab-count,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs .rom-cat-count,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs .rpc-cat-count,
+html body .scheme-light .is-immersive-tabs.is-immersive-tabs .vas-cat-num,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs .tab-count-badge,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs .tab-num,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs .tab-badge,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs .tab-count,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs .rom-cat-count,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs .rpc-cat-count,
+html[data-theme="watercolor_light"] body .is-immersive-tabs.is-immersive-tabs .vas-cat-num {
+  color: var(--fm-text-3, var(--bm-text-3, rgba(35, 29, 22, 0.54))) !important;
+}
+
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs .tab-count-badge,
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs .tab-num,
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs .tab-badge,
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs .tab-count,
+html body .is-dark-surface .is-immersive-tabs.is-immersive-tabs .vas-cat-num,
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs .tab-count-badge,
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs .tab-num,
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs .tab-badge,
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs .tab-count,
+html[data-theme="watercolor_light"] body .is-dark-surface .is-immersive-tabs.is-immersive-tabs .vas-cat-num {
+  color: rgba(238, 243, 250, 0.52) !important;
+}
+
+html body .is-immersive-tabs.is-immersive-tabs > button.active .tab-count-badge,
+html body .is-immersive-tabs.is-immersive-tabs > button.is-active .tab-count-badge,
+html body .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"] .tab-count-badge,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"].active .tab-count-badge,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"].is-active .tab-count-badge,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"][aria-selected="true"] .tab-count-badge,
+html body .is-immersive-tabs.is-immersive-tabs > button.active .tab-num,
+html body .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"] .tab-num,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"].active .tab-num,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"][aria-selected="true"] .tab-num,
+html body .is-immersive-tabs.is-immersive-tabs > button.active .tab-badge,
+html body .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"] .tab-badge,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"].active .tab-badge,
+html body .is-immersive-tabs.is-immersive-tabs > [role="tab"][aria-selected="true"] .tab-badge,
+html body .is-immersive-tabs.is-immersive-tabs > button.active .tab-count,
+html body .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"] .tab-count,
+html body .is-immersive-tabs.is-immersive-tabs > button.active .rom-cat-count,
+html body .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"] .rom-cat-count,
+html body .is-immersive-tabs.is-immersive-tabs > button.active .rpc-cat-count,
+html body .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"] .rpc-cat-count,
+html body .is-immersive-tabs.is-immersive-tabs > button.active .vas-cat-num,
+html body .is-immersive-tabs.is-immersive-tabs > button[aria-selected="true"] .vas-cat-num {
+  color: var(--tab-accent, var(--primary)) !important;
+  opacity: 1 !important;
+}
+
+/* ==================== L3 轻量排序与微筛选柔垫微胶囊 ==================== */
+html body .sdp-sort-pills,
+html body .rank-range-pills,
+html body .cm-sort-capsule,
+html body .cm-owner-filter-capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  flex-wrap: wrap;
+}
+
+html body .sdp-sort-pills > button,
+html body .rank-range-pills > button,
+html body .cm-sort-capsule > button,
+html body .cm-owner-filter-capsule > button {
+  height: 28px;
+  padding: 0 11px;
+  border: none;
+  border-radius: var(--bm-r-pill, 999px);
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+  color: var(--text-secondary);
+  font-size: var(--bm-fs-caption, 12.5px);
+  font-weight: var(--bm-fw-bold, 700);
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease,
+    transform 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+html body .sdp-sort-pills > button:hover:not(.active),
+html body .rank-range-pills > button:hover:not(.active),
+html body .cm-sort-capsule > button:hover:not(.active),
+html body .cm-owner-filter-capsule > button:hover:not(.active) {
+  background: color-mix(in srgb, var(--text-primary) 9%, transparent);
+  color: var(--text-primary);
+}
+
+html body .sdp-sort-pills > button:active,
+html body .rank-range-pills > button:active,
+html body .cm-sort-capsule > button:active,
+html body .cm-owner-filter-capsule > button:active {
+  transform: scale(0.96);
+}
+
+html body .sdp-sort-pills > button.active,
+html body .rank-range-pills > button.active {
+  background: color-mix(in srgb, var(--primary) 16%, transparent) !important;
+  color: var(--primary) !important;
+  box-shadow: none !important;
+  font-weight: var(--bm-fw-heavy, 800);
+}
+
+html body .cm-sort-capsule > button,
+html body .cm-owner-filter-capsule > button {
+  background: var(--fm-chip-bg);
+  color: var(--fm-text-2);
+}
+
+html body .cm-sort-capsule > button:hover:not(.active),
+html body .cm-owner-filter-capsule > button:hover:not(.active) {
+  background: var(--fm-chip-hover);
+  color: var(--fm-text-1);
+}
+
+html body .cm-sort-capsule > button.active,
+html body .cm-owner-filter-capsule > button.active {
+  background: color-mix(in srgb, var(--cm-accent, var(--primary)) 18%, transparent) !important;
+  color: var(--cm-accent, var(--primary)) !important;
+  font-weight: var(--bm-fw-heavy, 800);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html body .is-immersive-tabs.is-immersive-tabs > button,
+  html body .is-immersive-tabs.is-immersive-tabs > [role="tab"],
+  .immersive-tab-indicator,
+  .bm-seg-glider,
+  html body .is-segmented-tabs > button,
+  html body .is-segmented-tabs > [role="tab"] {
+    transition: none !important;
+  }
+}
+
+/* 标题 Tag / Tab 内容区域：方向感知水平平滑切换动画 (cubic-bezier(0.22, 1, 0.36, 1)) */
+.tag-content-morph-enter-active {
+  transition:
+    opacity 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.tag-content-morph-leave-active {
+  transition:
+    opacity 0.14s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.tag-content-morph-enter-from {
+  opacity: 0;
+  transform: translate3d(calc(var(--tag-slide-dir, 1) * 16px), 0, 0);
+}
+
+.tag-content-morph-leave-to {
+  opacity: 0;
+  transform: translate3d(calc(var(--tag-slide-dir, 1) * -10px), 0, 0);
+}
+
+/* 日推 / 猜你喜欢展开歌单列表与首页下半部分切换过渡 */
+.hero-songlist-enter-enter-active {
+  transition:
+    opacity 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.hero-songlist-enter-leave-active {
+  transition:
+    opacity 0.14s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.hero-songlist-enter-enter-from {
+  opacity: 0;
+  transform: translate3d(0, 10px, 0);
+}
+
+.hero-songlist-enter-leave-to {
+  opacity: 0;
+  transform: translate3d(0, -6px, 0);
+}
+
+/* ----------------------------------------------------------------------------
+   8.5 进出独立页面：统一临界阻尼弹簧过渡 cubic-bezier(0.22, 1, 0.36, 1) (260ms~320ms)
+   ---------------------------------------------------------------------------- */
+@keyframes standaloneSecondaryGlideUp {
+  0% {
+    transform: translate3d(0, 8px, 0);
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/* 二级独立子页面钻入 (Drill-In) */
+.subpage-drill-in-enter-active {
+  transition:
+    opacity 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.subpage-drill-in-leave-active {
+  transition:
+    opacity 0.14s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.subpage-drill-in-enter-from {
+  opacity: 0;
+  transform: translate3d(0, 10px, 0);
+}
+
+.subpage-drill-in-leave-to {
+  opacity: 0;
+  transform: translate3d(0, -6px, 0);
+}
+
+/* 二级独立子页面返回上级 (Drill-Out) */
+.subpage-drill-out-enter-active {
+  transition:
+    opacity 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.subpage-drill-out-leave-active {
+  transition:
+    opacity 0.14s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.subpage-drill-out-enter-from {
+  opacity: 0;
+  transform: translate3d(0, -8px, 0);
+}
+
+.subpage-drill-out-leave-to {
+  opacity: 0;
+  transform: translate3d(0, 10px, 0);
+}
+
+/* 独立页进入时的次级内容区微视差顺滑承托（仅做 8px 纵向阻尼滑入，绝不闪跳） */
+.subpage-drill-in-enter-active .ns-frameless-timeline,
+.subpage-drill-in-enter-active .rank-fullwidth-tracks,
+.subpage-drill-in-enter-active .rp-stations-section,
+.subpage-drill-in-enter-active .rp-stream-section,
+.subpage-drill-in-enter-active .sr-content-stage,
+.view-depth-push-enter-active .sdp-right-tracks-pane,
+.view-depth-push-enter-active .sdp-content-body,
+.view-depth-push-enter-active .artist-body-stage,
+.view-depth-push-enter-active .album-tracks-stage {
+  animation: standaloneSecondaryGlideUp 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ----------------------------------------------------------------------------
+   9. 重点设计：播放页严格受控单行双栏画廊舞台 + 100% 无框沉浸播控
+   ---------------------------------------------------------------------------- */
+.np-tablet-landscape-columns {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+  grid-template-rows: minmax(0, 1fr) !important;
+  align-items: center !important;
+  gap: clamp(28px, 3.6vw, 64px) !important;
+  width: 100% !important;
+  max-width: 1560px !important;
+  margin: 0 auto !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  padding: clamp(24px, 3vh, 44px) clamp(32px, 4vw, 72px) !important;
+}
+
+/* 左半屏下方播控区 100% 剥离外层卡片框 */
+.np-bottom-control-dock,
+.np-frameless-control-zone {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+  border: none !important;
+  padding: 8px 0 0 !important;
+}
+
+/* 播放页内部所有胶囊、按钮、弹层菜单与浮窗：100% 无框化 (Zero-Border Tonal Hierarchy) */
+.np-immersive-root button,
+.np-immersive-root .np-top-left-back-btn,
+.np-immersive-root .np-center-mode-capsule,
+.np-immersive-root .np-stage-mode-group,
+.np-immersive-root .np-stage-mode-pill,
+.np-immersive-root .np-ambience-trigger,
+.np-immersive-root .np-ambience-twin-orbs,
+.np-immersive-root .np-ambience-popover,
+.np-immersive-root .np-ambience-option,
+.np-immersive-root .np-cover-action-strip,
+.np-immersive-root .np-quality-spec-pill,
+.np-immersive-root .np-meta-icon-btn,
+.np-immersive-root .np-studio-console-deck,
+.np-immersive-root .np-transport-aux-btn,
+.np-immersive-root .np-transport-skip-btn,
+.np-immersive-root .np-hero-play-btn,
+.np-immersive-root .np-utility-icon-btn,
+.np-immersive-root .np-lyric-floating-toolbar,
+.np-immersive-root .np-lyric-tool-btn,
+.np-immersive-root .np-pure-lyric-bottom-dock {
+  border: none !important;
+  outline: none !important;
+}
+
+/* KRC 逐字果冻上浮 + 流光辉光 */
+.np-krc-word.is-singing-word {
+  display: inline-block;
+  transform: translateY(-2.5px) scale(1.05);
+  filter: drop-shadow(0 4px 12px var(--np-lyric-glow, var(--np-accent-glow, rgba(0, 198, 255, 0.45))));
+  transition: transform 0.16s var(--ease-jelly);
+}
+
+/* ----------------------------------------------------------------------------
+   10. 三级语义化路由切换动画 & FLIP 跨屏飞入封面门户
+   ---------------------------------------------------------------------------- */
+.view-slide-left-enter-active,
+.view-slide-right-enter-active {
+  transition:
+    opacity 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.view-slide-left-leave-active,
+.view-slide-right-leave-active {
+  transition:
+    opacity 0.14s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.view-depth-push-enter-active,
+.view-depth-pop-enter-active {
+  transition:
+    opacity 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.view-depth-push-leave-active,
+.view-depth-pop-leave-active {
+  transition:
+    opacity 0.14s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.view-slide-left-enter-from {
+  opacity: 0;
+  transform: translate3d(16px, 0, 0);
+}
+.view-slide-left-leave-to {
+  opacity: 0;
+  transform: translate3d(-12px, 0, 0);
+}
+
+.view-slide-right-enter-from {
+  opacity: 0;
+  transform: translate3d(-16px, 0, 0);
+}
+.view-slide-right-leave-to {
+  opacity: 0;
+  transform: translate3d(12px, 0, 0);
+}
+
+.view-depth-push-enter-from {
+  opacity: 0;
+  transform: translate3d(0, 10px, 0);
+}
+.view-depth-push-leave-to {
+  opacity: 0;
+  transform: translate3d(0, -6px, 0);
+}
+
+/* 普通动效档位下的极简淡入切换 */
+.view-fade-fast-enter-active {
+  transition: opacity 0.14s ease-out;
+}
+.view-fade-fast-leave-active {
+  transition: opacity 0.09s ease-in;
+}
+.view-fade-fast-enter-from,
+.view-fade-fast-leave-to {
+  opacity: 0;
+}
+
+.view-depth-pop-enter-from {
+  opacity: 0;
+  transform: translate3d(0, -8px, 0);
+}
+.view-depth-pop-leave-to {
+  opacity: 0;
+  transform: translate3d(0, 10px, 0);
+}
+
+/* ============================================================================
+   播放页全屏常驻预热浮层与底层主视口双层景深联动过渡
+   (Zero-Unmount Warm Stage Cross-Dissolve + Parametric Bézier Arc FLIP)
+   ============================================================================ */
+
+/* 1. 底层主工作区：进入播放页时向后柔和景深微缩退让，退出播放页时从景深处丝滑复位（进出场时长精确缩减 30%，纯 GPU 合成，零全屏高斯模糊卡顿、零黑屏断层） */
+.skyline-workspace {
+  transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+  transform-origin: 50% 50%;
+  opacity: 1;
+  transition:
+    transform 0.308s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+.skyline-workspace.is-np-open {
+  transform: translate3d(0, 0, 0) scale3d(0.972, 0.972, 1);
+  opacity: 0.78;
+  pointer-events: none !important;
+  transition:
+    transform 0.322s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.294s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 1.5 底部播放控制栏：进出播放页时双向丝滑升降联动（进出场过渡时长精确缩减 30%） */
+.fixed-bottom-player-bar {
+  transform: translate3d(0, 0, 0);
+  opacity: 1;
+  transition:
+    transform 0.266s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.224s cubic-bezier(0.22, 1, 0.36, 1) !important;
+  will-change: transform, opacity;
+}
+
+.fixed-bottom-player-bar.player-bar-hidden {
+  transform: translate3d(0, 108%, 0) !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transition:
+    transform 0.294s cubic-bezier(0.26, 0.9, 0.32, 1),
+    opacity 0.224s cubic-bezier(0.26, 0.9, 0.32, 1) !important;
+}
+
+/* 2. 独立全屏常驻播放舞台容器：常驻 DOM 零销毁，全幅氛围交叉融叠 + 轻盈景深浮升（进出场过渡时长精确缩减 30%） */
+.np-stage-overlay-shell {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 60;
+  background-color: var(--np-bg-primary, var(--np-nebula-abyss, #05070c));
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  overflow: hidden;
+  contain: layout style paint;
+  transform-origin: 50% 56%;
+  transform: translate3d(0, 14px, 0) scale3d(0.988, 0.988, 1);
+  border-radius: 0px;
+  transition:
+    transform 0.294s cubic-bezier(0.26, 0.9, 0.32, 1),
+    opacity 0.266s cubic-bezier(0.26, 0.9, 0.32, 1),
+    visibility 0s linear 0.308s;
+  will-change: transform, opacity;
+}
+
+.np-stage-overlay-shell.is-open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  contain: layout style;
+  /* 静止打开态撤除合成层 transform/will-change，根治 Windows 高 DPI 亚像素光栅化发糊 */
+  transform: none;
+  will-change: auto;
+  border-radius: 0px;
+  transition:
+    transform 0.308s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0s linear 0s;
+}
+
+.np-stage-overlay-shell.is-closing {
+  visibility: visible;
+  pointer-events: none;
+  contain: layout style;
+}
+
+/* 3. 播放页内部元素同步微视差承托（进出场过渡时长精确缩减 30%） */
+.np-stage-overlay-shell .np-ambient-backdrop {
+  transform: scale3d(1.02, 1.02, 1);
+  transition: transform 0.364s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.np-stage-overlay-shell.is-open .np-ambient-backdrop {
+  transform: none;
+  will-change: auto;
+}
+
+.np-stage-overlay-shell .np-top-left-back-btn {
+  transform: translate3d(0, -6px, 0) scale3d(0.96, 0.96, 1);
+  transition: transform 0.294s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.np-stage-overlay-shell.is-open .np-top-left-back-btn {
+  transform: none;
+}
+
+.np-stage-overlay-shell:not(.is-open) .np-skyline-bar {
+  opacity: 0 !important;
+  transform: translate3d(0, -14px, 0) scale(0.96) !important;
+  pointer-events: none !important;
+}
+
+.np-stage-overlay-shell .np-cover-side-actions,
+.np-stage-overlay-shell .np-cover-action-strip {
+  transform: translate3d(6px, 6px, 0) scale(0.96);
+  transition: transform 0.294s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.np-stage-overlay-shell.is-open .np-cover-side-actions,
+.np-stage-overlay-shell.is-open .np-cover-action-strip {
+  transform: none;
+  will-change: auto;
+}
+
+.np-stage-overlay-shell .np-console-stack {
+  transform: translate3d(0, 10px, 0);
+  transition: transform 0.308s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.np-stage-overlay-shell.is-open .np-console-stack {
+  transform: none;
+  will-change: auto;
+  filter: none !important;
+}
+
+.np-stage-overlay-shell .np-right-stage {
+  transform: translate3d(0, 12px, 0);
+  transition: transform 0.308s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.np-stage-overlay-shell.is-open .np-right-stage {
+  transform: none;
+  will-change: auto;
+  filter: none !important;
+}
+
+/* 4. 参数化二次贝塞尔同轨原路返回封面门户 (.flip-flying-cover-portal 常驻 DOM，由 rAF 逐帧驱动 GPU 复合变换) */
+.flip-flying-cover-portal {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform-origin: 0 0;
+  will-change: transform, opacity;
+}
+
+.flip-flying-cover-portal.is-active {
+  visibility: visible;
+}
+
+.flip-flying-cover-inner {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  transform-origin: 0 0;
+  will-change: transform;
+  backface-visibility: hidden;
+}
+
+.flip-flying-cover-inner img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.flip-flying-cover-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 42px;
+  color: rgba(255, 255, 255, 0.85);
+  background: var(--grad-kugou-primary, linear-gradient(135deg, var(--np-accent-primary, #7c6af6), var(--np-accent-secondary, #fb7185)));
+}
+
+/* 全局安全锚点隐身规则（严禁写入 Vue <style scoped> 的 :global() 前缀中，仅隐藏首尾交接锚点自身，杜绝 .app-root 黑屏） */
+.app-root.is-np-cover-flying #playerbar-flip-cover-anchor,
+.app-root.is-np-cover-flying .np-gallery-card,
+.app-root.is-np-cover-flying .np-gallery-contour-glow,
+.app-root.is-np-cover-flying .np-gallery-rim-bevel,
+.app-root.is-np-cover-flying .np-vinyl-label-art {
+  opacity: 0 !important;
+  transition: none !important;
+}
+
+/* ----------------------------------------------------------------------------
+   11. 浅色主题 (scheme-watercolor_light) 调音台与组件对比度适配（100% 彻底零边框）
+   ---------------------------------------------------------------------------- */
+.scheme-watercolor_light .tuner-studio-root,
+.scheme-light .tuner-studio-root {
+  color: var(--text-primary, #1c1917) !important;
+}
+
+.scheme-watercolor_light .studio-command-bar,
+.scheme-watercolor_light .studio-peq-workstation,
+.scheme-watercolor_light .sam-card,
+.scheme-light .studio-command-bar,
+.scheme-light .studio-peq-workstation,
+.scheme-light .sam-card {
+  background: var(--bg-card, rgba(255, 253, 249, 0.72)) !important;
+  box-shadow: var(--shadow-card, 0 12px 32px rgba(28, 25, 23, 0.08)) !important;
+  color: var(--text-primary, #1c1917) !important;
+}
+
+.scheme-watercolor_light .scb-title,
+.scheme-watercolor_light .spw-title,
+.scheme-watercolor_light .sam-title,
+.scheme-watercolor_light .svd-title,
+.scheme-watercolor_light .svd-card-title,
+.scheme-watercolor_light .spw-bi-val,
+.scheme-light .scb-title,
+.scheme-light .spw-title,
+.scheme-light .sam-title,
+.scheme-light .svd-title,
+.scheme-light .svd-card-title,
+.scheme-light .spw-bi-val {
+  color: var(--text-primary, #1c1917) !important;
+}
+
+.scheme-watercolor_light .scb-sub,
+.scheme-watercolor_light .spw-sub,
+.scheme-watercolor_light .sam-sub,
+.scheme-watercolor_light .sam-desc,
+.scheme-watercolor_light .spw-freq-label,
+.scheme-watercolor_light .spw-gain-label,
+.scheme-watercolor_light .spw-bi-label,
+.scheme-watercolor_light .mbs-label,
+.scheme-watercolor_light .svd-card-desc,
+.scheme-light .scb-sub,
+.scheme-light .spw-sub,
+.scheme-light .sam-sub,
+.scheme-light .sam-desc,
+.scheme-light .spw-freq-label,
+.scheme-light .spw-gain-label,
+.scheme-light .spw-bi-label,
+.scheme-light .mbs-label,
+.scheme-light .svd-card-desc {
+  color: var(--text-secondary, #57534e) !important;
+}
+
+.scheme-watercolor_light .scb-viper-trigger-pill,
+.scheme-watercolor_light .scb-action-btn,
+.scheme-watercolor_light .spw-preset-select,
+.scheme-watercolor_light .spw-tool-btn,
+.scheme-watercolor_light .spw-band-inspector,
+.scheme-watercolor_light .spw-fader-col,
+.scheme-watercolor_light .mbs-control,
+.scheme-watercolor_light .sam-select,
+.scheme-watercolor_light .sam-pill-btn,
+.scheme-light .scb-viper-trigger-pill,
+.scheme-light .scb-action-btn,
+.scheme-light .spw-preset-select,
+.scheme-light .spw-tool-btn,
+.scheme-light .spw-band-inspector,
+.scheme-light .spw-fader-col,
+.scheme-light .mbs-control,
+.scheme-light .sam-select,
+.scheme-light .sam-pill-btn {
+  background: var(--bg-surface, rgba(252, 249, 244, 0.82)) !important;
+  box-shadow: 0 4px 12px rgba(28, 25, 23, 0.05) !important;
+  color: var(--text-primary, #1c1917) !important;
+}
+
+.scheme-watercolor_light.light-variant-nordic_oat .scb-viper-trigger-pill,
+.scheme-watercolor_light.light-variant-nordic_oat .scb-action-btn,
+.scheme-watercolor_light.light-variant-nordic_oat .spw-preset-select,
+.scheme-watercolor_light.light-variant-nordic_oat .spw-tool-btn,
+.scheme-watercolor_light.light-variant-nordic_oat .spw-band-inspector,
+.scheme-watercolor_light.light-variant-nordic_oat .spw-fader-col,
+.scheme-watercolor_light.light-variant-nordic_oat .mbs-control,
+.scheme-watercolor_light.light-variant-nordic_oat .sam-select,
+.scheme-watercolor_light.light-variant-nordic_oat .sam-pill-btn {
+  background: #EAE3D7 !important;
+  box-shadow: none !important;
+}
+
+.scheme-watercolor_light .studio-viper-drawer,
+.scheme-watercolor_light .studio-viper-modal,
+.scheme-light .studio-viper-drawer,
+.scheme-light .studio-viper-modal {
+  background: var(--bg-elevated, rgba(252, 249, 244, 0.97)) !important;
+  color: var(--text-primary, #1c1917) !important;
+  box-shadow: 0 24px 60px rgba(28, 25, 23, 0.16) !important;
+}
+
+.scheme-watercolor_light .svd-card,
+.scheme-light .svd-card {
+  background: var(--bg-card, rgba(255, 253, 249, 0.78)) !important;
+  color: var(--text-primary, #1c1917) !important;
+  box-shadow: 0 6px 18px rgba(28, 25, 23, 0.06) !important;
+}
+
+.scheme-watercolor_light .svd-card.active,
+.scheme-light .svd-card.active {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--primary) 16%, transparent),
+    color-mix(in srgb, var(--mint) 12%, transparent)
+  ) !important;
+  box-shadow: 0 10px 26px color-mix(in srgb, var(--primary) 18%, transparent) !important;
+}
+
+/* ----------------------------------------------------------------------------
+   12. 全局「左定右流 (.sdp-two-pane-layout)」详情页基础公共样式
+   ---------------------------------------------------------------------------- */
+.app-root .sdp-two-pane-layout {
+  display: grid;
+  grid-template-columns: minmax(288px, 310px) minmax(0, 1fr);
+  gap: clamp(20px, 2.2vw, 32px);
+  align-items: start;
+  width: 100%;
+  min-width: 0;
+}
+
+.app-root .sdp-left-hero-card,
+.app-root .sdp-left-sticky-pane {
+  position: sticky;
+  top: 76px;
+  max-height: calc(100vh - 178px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-width: 0;
+  scrollbar-width: none;
+}
+
+.app-root .sdp-right-tracks-pane {
+  min-width: 0;
+}
+
+@media (max-width: 960px) {
+  .app-root .sdp-two-pane-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+  }
+
+  .app-root .sdp-left-hero-card,
+  .app-root .sdp-left-sticky-pane {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
+/* ----------------------------------------------------------------------------
+   13. 全局右键上下文菜单 (.song-context-menu) 磨砂通透质感、零线框分组与弹簧动画
+   ---------------------------------------------------------------------------- */
+.app-root .song-context-menu {
+  position: fixed;
+  width: 244px;
+  padding: 8px;
+  border-radius: var(--bm-r-lg, 18px);
+  background: rgba(22, 22, 29, 0.94);
+  backdrop-filter: blur(32px) saturate(190%);
+  -webkit-backdrop-filter: blur(32px) saturate(190%);
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.58);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 200;
+  transform-origin: top left;
+}
+
+.app-root.dark-variant-velvet_nebula .song-context-menu {
+  background: rgba(39, 24, 34, 0.96);
+  box-shadow: 0 22px 56px rgba(14, 5, 10, 0.70);
+}
+
+.app-root.scheme-watercolor_light .song-context-menu,
+.app-root.scheme-light .song-context-menu {
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 20px 46px rgba(79, 70, 229, 0.14);
+}
+
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .song-context-menu {
+  background: #FAF6EE;
+  backdrop-filter: none;
+  box-shadow: 0 18px 42px rgba(42, 33, 22, 0.15);
+}
+
+.app-root .scm-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 8px;
+}
+
+.app-root .scm-cover {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--bm-r-sm, 10px);
+  object-fit: cover;
+  flex-shrink: 0;
+  box-shadow: 0 4px 12px rgba(2, 8, 22, 0.24);
+}
+
+.app-root .scm-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-root .scm-title {
+  font-size: var(--bm-fs-meta, 13.5px) !important;
+  font-weight: var(--bm-fw-heavy, 800);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-root .scm-artist {
+  font-size: var(--bm-fs-caption, 12.5px) !important;
+  font-weight: var(--bm-fw-medium, 500);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+
+.app-root .scm-divider {
+  height: 6px;
+  margin: 0;
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.app-root .scm-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px !important;
+  border-radius: var(--bm-r-sm, 10px);
+  font-size: var(--bm-fs-meta, 13.5px) !important;
+  font-weight: var(--bm-fw-semibold, 600);
+  color: var(--text-primary);
+  text-align: left;
+  background: transparent;
+  transition:
+    background 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    color 0.18s ease,
+    transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.app-root .scm-item-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-root .scm-item:hover {
+  background: var(--bg-pill);
+  color: var(--primary);
+}
+
+.app-root .scm-item.is-danger {
+  color: var(--coral);
+}
+
+.app-root .scm-item.is-danger:hover {
+  background: var(--accent-coral-soft, rgba(251, 113, 133, 0.16));
+  color: var(--coral);
+}
+
+.app-root .scm-item.highlight {
+  color: var(--primary);
+}
+
+.app-root .scm-item.highlight:hover {
+  background: var(--primary-soft);
+}
+
+/* 弹出弹簧动画（临界阻尼，无生硬抖动） */
+.pop-spring-enter-active {
+  transition:
+    opacity 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.pop-spring-leave-active {
+  transition:
+    opacity 0.14s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.pop-spring-enter-from,
+.pop-spring-leave-to {
+  opacity: 0;
+  transform: translateY(6px) scale(0.96);
+}
+
+/* ----------------------------------------------------------------------------
+   14. 双色调软垫实心徽章体系 (Zero-Border Tonal Pills：Hi-Res 流金 / SQ 薄荷 / VIP 玫瑰流金)
+       彻底移除 1px 描边，改用饱和软垫填充 + L1 柔光漫射 / L2 哑光矿物实感区分
+   ---------------------------------------------------------------------------- */
+.app-root .mini-badge,
+.app-root .fs-badge,
+.app-root .s-badge,
+.app-root .q-tag,
+.app-root .pb-vip-pill {
+  height: 19px;
+  padding: 0 7px;
+  border-radius: var(--bm-r-xs, 6px);
+  font-size: var(--bm-fs-micro, 11px);
+  font-weight: var(--bm-fw-heavy, 800);
+  line-height: 1;
+  letter-spacing: 0.015em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  flex-shrink: 0;
+  box-shadow: none;
+}
+
+/* Hi-Res：流金琥珀软垫标 */
+.mini-badge.hires,
+.fs-badge.hires,
+.s-badge.hires,
+.q-tag.hires,
+.app-root .mini-badge.hires,
+.app-root .fs-badge.hires,
+.app-root .s-badge.hires,
+.app-root .q-tag.hires {
+  background: rgba(245, 158, 11, 0.22) !important;
+  color: #fbbf24 !important;
+  box-shadow: 0 3px 10px -2px rgba(245, 158, 11, 0.22);
+}
+
+.scheme-watercolor_light .mini-badge.hires,
+.scheme-light .mini-badge.hires,
+.scheme-watercolor_light .fs-badge.hires,
+.scheme-light .fs-badge.hires,
+.scheme-watercolor_light .s-badge.hires,
+.scheme-light .s-badge.hires,
+.scheme-watercolor_light .q-tag.hires,
+.scheme-light .q-tag.hires {
+  background: rgba(245, 158, 11, 0.22) !important;
+  color: #b45309 !important;
+  box-shadow: 0 3px 10px -2px rgba(217, 119, 6, 0.16);
+}
+
+.scheme-watercolor_light.light-variant-nordic_oat .mini-badge.hires,
+.scheme-watercolor_light.light-variant-nordic_oat .fs-badge.hires,
+.scheme-watercolor_light.light-variant-nordic_oat .s-badge.hires,
+.scheme-watercolor_light.light-variant-nordic_oat .q-tag.hires {
+  background: rgba(180, 83, 9, 0.15) !important;
+  color: #92400e !important;
+  box-shadow: none;
+}
+
+/* SQ：薄荷青玉软垫标 */
+.mini-badge.sq,
+.fs-badge.sq,
+.s-badge.sq,
+.q-tag.sq,
+.app-root .mini-badge.sq,
+.app-root .fs-badge.sq,
+.app-root .s-badge.sq,
+.app-root .q-tag.sq {
+  background: rgba(45, 212, 191, 0.20) !important;
+  color: #2dd4bf !important;
+  box-shadow: 0 3px 10px -2px rgba(45, 212, 191, 0.20);
+}
+
+.scheme-watercolor_light .mini-badge.sq,
+.scheme-light .mini-badge.sq,
+.scheme-watercolor_light .fs-badge.sq,
+.scheme-light .fs-badge.sq,
+.scheme-watercolor_light .s-badge.sq,
+.scheme-light .s-badge.sq,
+.scheme-watercolor_light .q-tag.sq,
+.scheme-light .q-tag.sq {
+  background: rgba(13, 148, 136, 0.19) !important;
+  color: #0f766e !important;
+  box-shadow: 0 3px 10px -2px rgba(13, 148, 136, 0.15);
+}
+
+.scheme-watercolor_light.light-variant-nordic_oat .mini-badge.sq,
+.scheme-watercolor_light.light-variant-nordic_oat .fs-badge.sq,
+.scheme-watercolor_light.light-variant-nordic_oat .s-badge.sq,
+.scheme-watercolor_light.light-variant-nordic_oat .q-tag.sq {
+  background: rgba(15, 118, 110, 0.14) !important;
+  color: #115e59 !important;
+  box-shadow: none;
+}
+
+/* HQ（320K 高品质）：晴空钴蓝软垫标，四主题对比度均 >= 4.5:1 */
+.mini-badge.hq,
+.fs-badge.hq,
+.s-badge.hq,
+.q-tag.hq,
+.app-root .mini-badge.hq,
+.app-root .fs-badge.hq,
+.app-root .s-badge.hq,
+.app-root .q-tag.hq {
+  background: rgba(96, 165, 250, 0.20) !important;
+  color: #7cc4fa !important;
+  box-shadow: 0 3px 10px -2px rgba(96, 165, 250, 0.18);
+}
+
+.scheme-abyssal_dark.dark-variant-velvet_nebula .mini-badge.hq,
+.scheme-abyssal_dark.dark-variant-velvet_nebula .fs-badge.hq,
+.scheme-abyssal_dark.dark-variant-velvet_nebula .s-badge.hq,
+.scheme-abyssal_dark.dark-variant-velvet_nebula .q-tag.hq {
+  background: rgba(244, 162, 134, 0.18) !important;
+  color: #f3b89a !important;
+  box-shadow: none;
+}
+
+.scheme-watercolor_light .mini-badge.hq,
+.scheme-light .mini-badge.hq,
+.scheme-watercolor_light .fs-badge.hq,
+.scheme-light .fs-badge.hq,
+.scheme-watercolor_light .s-badge.hq,
+.scheme-light .s-badge.hq,
+.scheme-watercolor_light .q-tag.hq,
+.scheme-light .q-tag.hq {
+  background: rgba(79, 70, 229, 0.13) !important;
+  color: #4338ca !important;
+  box-shadow: 0 3px 10px -2px rgba(79, 70, 229, 0.12);
+}
+
+.scheme-watercolor_light.light-variant-nordic_oat .mini-badge.hq,
+.scheme-watercolor_light.light-variant-nordic_oat .fs-badge.hq,
+.scheme-watercolor_light.light-variant-nordic_oat .s-badge.hq,
+.scheme-watercolor_light.light-variant-nordic_oat .q-tag.hq {
+  background: rgba(146, 108, 67, 0.14) !important;
+  color: #7c5229 !important;
+  box-shadow: none;
+}
+
+/* VIP：尊享玫瑰流金渐变软垫标 */
+.pb-vip-pill,
+.mini-badge.vip,
+.fs-badge.vip,
+.s-badge.vip,
+.q-tag.vip,
+.app-root .pb-vip-pill,
+.app-root .mini-badge.vip,
+.app-root .fs-badge.vip,
+.app-root .s-badge.vip,
+.app-root .q-tag.vip {
+  background: linear-gradient(
+    135deg,
+    rgba(244, 63, 94, 0.24) 0%,
+    rgba(245, 158, 11, 0.26) 100%
+  ) !important;
+  color: #fbbf24 !important;
+  box-shadow: 0 3px 10px -2px rgba(245, 158, 11, 0.22);
+}
+
+.scheme-watercolor_light .pb-vip-pill,
+.scheme-light .pb-vip-pill,
+.scheme-watercolor_light .mini-badge.vip,
+.scheme-light .mini-badge.vip,
+.scheme-watercolor_light .fs-badge.vip,
+.scheme-light .fs-badge.vip,
+.scheme-watercolor_light .s-badge.vip,
+.scheme-light .s-badge.vip,
+.scheme-watercolor_light .q-tag.vip,
+.scheme-light .q-tag.vip {
+  background: linear-gradient(
+    135deg,
+    rgba(225, 29, 72, 0.17) 0%,
+    rgba(217, 119, 6, 0.21) 100%
+  ) !important;
+  color: #be123c !important;
+  box-shadow: 0 3px 10px -2px rgba(225, 29, 72, 0.15);
+}
+
+.scheme-watercolor_light.light-variant-nordic_oat .pb-vip-pill,
+.scheme-watercolor_light.light-variant-nordic_oat .mini-badge.vip,
+.scheme-watercolor_light.light-variant-nordic_oat .fs-badge.vip,
+.scheme-watercolor_light.light-variant-nordic_oat .s-badge.vip,
+.scheme-watercolor_light.light-variant-nordic_oat .q-tag.vip {
+  background: linear-gradient(
+    135deg,
+    rgba(190, 18, 60, 0.14) 0%,
+    rgba(180, 83, 9, 0.16) 100%
+  ) !important;
+  color: #9f1239 !important;
+  box-shadow: none;
+}
+
+/* ============================================================================
+   15. 表面材质与块面层阶默认特化引擎
+       - D1 / L1：高透冰霜亚克力毛玻璃 + 流体彩晕折射
+       - D2 / L2：温润实体丝绒 / 手抄暖纸三阶块面衬底 + 细腻微肌理
+   ============================================================================ */
+
+/* 15.1 D2 丝绒与 L2 燕麦纸感：环境微肌理层（零指针拦截，营造真实纸本与丝绒触感） */
+.app-root.dark-variant-velvet_nebula::after,
+.app-root.scheme-watercolor_light.light-variant-nordic_oat::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(128, 110, 95, 0.16) 0.75px, transparent 0.75px);
+  background-size: 14px 14px;
+  opacity: 0.24;
+}
+
+.app-root.dark-variant-velvet_nebula::after {
+  background-image: radial-gradient(rgba(249, 239, 230, 0.12) 0.75px, transparent 0.75px);
+  background-size: 16px 16px;
+  opacity: 0.18;
+}
+
+/* 15.2 L1 & D1：高透冰霜玻璃卡片悬停折射与通透漫射 */
+.app-root.scheme-watercolor_light:not(.light-variant-nordic_oat) .playlist-card:hover,
+.app-root.scheme-watercolor_light:not(.light-variant-nordic_oat) .album-card:hover,
+.app-root.scheme-watercolor_light:not(.light-variant-nordic_oat) .lib-pl-grid-item:hover,
+.app-root.scheme-watercolor_light:not(.light-variant-nordic_oat) .sr-media-card:hover,
+.app-root.scheme-watercolor_light:not(.light-variant-nordic_oat) .album-wall-card:hover {
+  background: rgba(255, 255, 255, 0.62) !important;
+  backdrop-filter: blur(20px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+  box-shadow: 0 14px 32px -10px rgba(2, 132, 199, 0.14) !important;
+}
+
+.app-root.scheme-abyssal_dark:not(.dark-variant-velvet_nebula) .playlist-card:hover,
+.app-root.scheme-abyssal_dark:not(.dark-variant-velvet_nebula) .album-card:hover,
+.app-root.scheme-abyssal_dark:not(.dark-variant-velvet_nebula) .lib-pl-grid-item:hover,
+.app-root.scheme-abyssal_dark:not(.dark-variant-velvet_nebula) .sr-media-card:hover,
+.app-root.scheme-abyssal_dark:not(.dark-variant-velvet_nebula) .album-wall-card:hover {
+  background: rgba(24, 32, 48, 0.58) !important;
+  backdrop-filter: blur(20px) saturate(175%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(175%) !important;
+  box-shadow: 0 16px 34px -10px rgba(2, 8, 20, 0.56) !important;
+}
+
+/* 15.3 L2 晨雾燕麦：三阶实体手抄暖纸块面建筑（#E8E0D0 画布 -> #F2ECE1 容器 -> #FAF6EE 实体卡片） */
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .playlist-card,
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .album-card,
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .lib-pl-grid-item,
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .sr-media-card,
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .album-wall-card {
+  background: #FAF6EE !important;
+  padding: 10px !important;
+  box-shadow:
+    0 8px 20px -10px rgba(42, 33, 22, 0.11),
+    0 2px 5px -1px rgba(42, 33, 22, 0.05) !important;
+}
+
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .playlist-card:hover,
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .album-card:hover,
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .lib-pl-grid-item:hover,
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .sr-media-card:hover,
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .album-wall-card:hover {
+  background: #FFFDF9 !important;
+  box-shadow:
+    0 14px 28px -10px rgba(42, 33, 22, 0.16),
+    0 4px 10px -2px rgba(15, 118, 110, 0.10) !important;
+}
+
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .lib-pl-row-item,
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .ns-song-card {
+  background: #F3EDE0 !important;
+  box-shadow: 0 3px 10px -4px rgba(42, 33, 22, 0.06) !important;
+}
+
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .lib-pl-row-item:hover,
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .ns-song-card:hover {
+  background: #FAF6EE !important;
+}
+
+.app-root.scheme-watercolor_light.light-variant-nordic_oat .library-left-frameless-region {
+  background: #F2ECE1 !important;
+  border-radius: var(--bm-r-xl, 24px) !important;
+  padding: 12px !important;
+  margin: 0 !important;
+  box-shadow: 0 8px 22px -10px rgba(42, 33, 22, 0.08) !important;
+}
+
+/* 15.4 D2 微醺丝绒：哑光苦巧天鹅绒实体卡片与酒廊包裹层次 */
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .playlist-card,
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .album-card,
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .lib-pl-grid-item,
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .sr-media-card,
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .album-wall-card {
+  background: rgba(44, 26, 37, 0.76) !important;
+  padding: 10px !important;
+  box-shadow:
+    0 10px 24px -10px rgba(12, 4, 9, 0.56),
+    0 2px 10px rgba(244, 63, 94, 0.06) !important;
+}
+
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .playlist-card:hover,
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .album-card:hover,
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .lib-pl-grid-item:hover,
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .sr-media-card:hover,
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .album-wall-card:hover {
+  background: rgba(58, 34, 48, 0.90) !important;
+  box-shadow:
+    0 16px 32px -10px rgba(12, 4, 9, 0.68),
+    0 4px 16px rgba(244, 63, 94, 0.14) !important;
+}
+
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .lib-pl-row-item,
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .ns-song-card {
+  background: rgba(38, 22, 32, 0.62) !important;
+}
+
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .lib-pl-row-item:hover,
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .ns-song-card:hover {
+  background: rgba(54, 31, 45, 0.82) !important;
+}
+
+.app-root.scheme-abyssal_dark.dark-variant-velvet_nebula .library-left-frameless-region {
+  background: rgba(34, 20, 29, 0.72) !important;
+  border-radius: var(--bm-r-xl, 24px) !important;
+  padding: 12px !important;
+  margin: 0 !important;
+  box-shadow: 0 10px 26px -10px rgba(12, 4, 9, 0.48) !important;
+}

@@ -1,0 +1,955 @@
+/* =========================================================================
+ * BreezeMusic For Windows v1.0.0 — 全站物理动效与微交互工艺层 (Motion Craft)
+ * =========================================================================
+ * 双轨物理语言：
+ *   1. 宏观层（页面 / 抽屉 / 弹窗 / 滚动）：Apple / macOS 高阻尼流体克制
+ *   2. 微观层（红心 / 播控 / 开关 / Toast / 计数）：CSS linear() 真物理 Q 弹微触感
+ * 严守准则：
+ *   - 100% 无框设计（绝不引入可见边框或零模糊伪描边）
+ *   - 全 GPU 合成层属性（transform / opacity / clip-path）
+ *   - 弹簧 linear() 曲线绝不用于 opacity（仅用于 transform/scale/translate/rotate）
+ *   - 三档动效（best / standard / none）与系统 prefers-reduced-motion 无缝自动降级
+ * ========================================================================= */
+
+:root {
+  /* 宏观流体曲线（无过冲，临界高阻尼） */
+  --ease-apple-fluid: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-apple-decel: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-apple-exit: cubic-bezier(0.4, 0, 1, 1);
+
+  /* 微观 Q 弹物理曲线：先声明标准 cubic-bezier 回退，再覆盖为 CSS linear() 真物理弹簧 */
+  --ease-spring-tactile: cubic-bezier(0.22, 1.28, 0.36, 1);
+  --ease-spring-snappy: cubic-bezier(0.24, 1.36, 0.34, 1);
+  --ease-spring-playful: cubic-bezier(0.22, 1.48, 0.36, 1);
+
+  --bm-dur-micro: 180ms;
+  --bm-dur-fast: 240ms;
+  --bm-dur-normal: 340ms;
+  --bm-dur-spring: 440ms;
+  --bm-dur-modal-in: 300ms;
+  --bm-dur-modal-out: 170ms;
+}
+
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    /* 轻阻尼质感回弹（约 4% 过冲，用于开关、胶囊、菜单、按钮松手） */
+    --ease-spring-tactile: linear(
+      0, 0.009, 0.035 2.1%, 0.141 4.4%, 0.723 12.9%, 0.938 16.7%,
+      1.017 19.2%, 1.041 21.6%, 1.036 25%, 1.012 31.8%, 0.998 38.6%,
+      0.996 44.5%, 1 60%, 1
+    );
+    /* 灵动 Q 弹（约 9% 过冲，用于点赞红心、播控切歌回弹、队列落袋徽章、Toast 灵动岛） */
+    --ease-spring-snappy: linear(
+      0, 0.009, 0.037 1.8%, 0.148 3.9%, 0.742 11.4%, 0.968 15%,
+      1.064 17.8%, 1.092 20.4%, 1.076 23.8%, 1.015 30.2%, 0.985 36.2%,
+      0.984 41.2%, 1.002 51.8%, 1.003 60%, 1
+    );
+    /* 俏皮弹跃（约 13% 过冲，用于 VIP 日历点亮、评论点赞倾斜弹跳、播放圆钮弹出） */
+    --ease-spring-playful: linear(
+      0, 0.011, 0.044 1.8%, 0.171 3.8%, 0.804 10.6%, 1.048 14.1%,
+      1.128 17.1%, 1.119 20.1%, 1.048 25.1%, 0.976 31.2%, 0.966 36.1%,
+      0.999 45.4%, 1.008 52.8%, 0.999 66%, 1
+    );
+  }
+}
+
+/* =========================================================================
+ * 1. View Transitions 全屏主题圆形光圈切换（仅 best 档位生效）
+ * ========================================================================= */
+html.bm-vt-theme-circular::view-transition-old(root),
+html.bm-vt-theme-circular::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+html.bm-vt-theme-circular::view-transition-old(root) {
+  z-index: 1;
+}
+
+html.bm-vt-theme-circular::view-transition-new(root) {
+  z-index: 9999;
+}
+
+/* =========================================================================
+ * 2. 播控与微观生命力（播放光环 / 方向推弹 / 心跳脉冲 / 队列落袋 / 缓冲流光 / 静音微振）
+ * ========================================================================= */
+
+/* 播放中主圆钮克制环境柔光脉动（无硬边框） */
+@keyframes bm-play-btn-breathe {
+  0%, 100% {
+    box-shadow:
+      0 8px 22px color-mix(in srgb, var(--primary) 42%, transparent),
+      0 0 0 0 transparent;
+  }
+  50% {
+    box-shadow:
+      0 10px 28px color-mix(in srgb, var(--primary) 58%, transparent),
+      0 0 22px color-mix(in srgb, var(--cyan, var(--primary)) 32%, transparent);
+  }
+}
+
+.pb-hero-play-orb.is-playing-live,
+.pb-play-hero-circle.is-playing-live {
+  animation: bm-play-btn-breathe 3.6s ease-in-out infinite;
+}
+
+/* 播放/暂停图标形态旋切 */
+.bm-icon-morph-enter-active {
+  transition:
+    transform 0.28s var(--ease-spring-snappy),
+    opacity 0.16s ease-out;
+}
+.bm-icon-morph-leave-active {
+  transition:
+    transform 0.13s var(--ease-apple-exit),
+    opacity 0.11s ease-in;
+}
+.bm-icon-morph-enter-from {
+  opacity: 0;
+  transform: scale(0.68) rotate(-24deg);
+}
+.bm-icon-morph-leave-to {
+  opacity: 0;
+  transform: scale(0.72) rotate(20deg);
+}
+
+/* 日月主题图标 180° 旋切 */
+.bm-theme-icon-swap-enter-active {
+  transition:
+    transform 0.36s var(--ease-spring-tactile),
+    opacity 0.18s ease-out;
+}
+.bm-theme-icon-swap-leave-active {
+  transition:
+    transform 0.16s var(--ease-apple-exit),
+    opacity 0.12s ease-in;
+}
+.bm-theme-icon-swap-enter-from {
+  opacity: 0;
+  transform: rotate(-135deg) scale(0.55);
+}
+.bm-theme-icon-swap-leave-to {
+  opacity: 0;
+  transform: rotate(135deg) scale(0.55);
+}
+
+/* 切歌方向推弹反馈 */
+@keyframes bm-nudge-left {
+  0% { transform: translateX(0) scale(1); }
+  32% { transform: translateX(-4.5px) scale(0.92); }
+  68% { transform: translateX(1.5px) scale(1.04); }
+  100% { transform: translateX(0) scale(1); }
+}
+
+@keyframes bm-nudge-right {
+  0% { transform: translateX(0) scale(1); }
+  32% { transform: translateX(4.5px) scale(0.92); }
+  68% { transform: translateX(-1.5px) scale(1.04); }
+  100% { transform: translateX(0) scale(1); }
+}
+
+.bm-nudge-left {
+  animation: bm-nudge-left 360ms var(--ease-spring-snappy) both;
+}
+
+.bm-nudge-right {
+  animation: bm-nudge-right 360ms var(--ease-spring-snappy) both;
+}
+
+/* 底栏切歌元信息方向性滑切（绝不包裹或改动封面 FLIP 锚点） */
+.bm-track-slide-next-enter-active,
+.bm-track-slide-prev-enter-active {
+  transition:
+    transform 0.28s var(--ease-apple-fluid),
+    opacity 0.22s ease-out;
+}
+.bm-track-slide-next-leave-active,
+.bm-track-slide-prev-leave-active {
+  transition:
+    transform 0.16s var(--ease-apple-exit),
+    opacity 0.14s ease-in;
+}
+.bm-track-slide-next-enter-from {
+  opacity: 0;
+  transform: translate3d(14px, 0, 0);
+}
+.bm-track-slide-next-leave-to {
+  opacity: 0;
+  transform: translate3d(-12px, 0, 0);
+}
+.bm-track-slide-prev-enter-from {
+  opacity: 0;
+  transform: translate3d(-14px, 0, 0);
+}
+.bm-track-slide-prev-leave-to {
+  opacity: 0;
+  transform: translate3d(12px, 0, 0);
+}
+
+/* 红心 Q 弹三帧脉冲 */
+@keyframes bm-heart-pop-beat {
+  0% { transform: scale(1); }
+  28% { transform: scale(1.34); }
+  58% { transform: scale(0.88); }
+  82% { transform: scale(1.1); }
+  100% { transform: scale(1); }
+}
+
+.bm-heart-pop {
+  animation: bm-heart-pop-beat 460ms var(--ease-spring-snappy) both;
+}
+
+/* 播放模式与静音微反馈 */
+@keyframes bm-mode-spin-pop {
+  0% { transform: scale(0.86) rotate(-28deg); }
+  65% { transform: scale(1.14) rotate(8deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
+
+.bm-mode-spin-pop {
+  animation: bm-mode-spin-pop 360ms var(--ease-spring-snappy) both;
+}
+
+@keyframes bm-mute-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-3px) rotate(-6deg); }
+  45% { transform: translateX(3px) rotate(6deg); }
+  70% { transform: translateX(-2px) rotate(-3deg); }
+}
+
+.bm-mute-shake {
+  animation: bm-mute-shake 340ms var(--ease-apple-fluid) both;
+}
+
+/* 队列落袋弹性接球脉冲（无边框柔光） */
+@keyframes bm-queue-catch {
+  0% { transform: scale(1); }
+  30% { transform: scale(1.16) translateY(-2px); }
+  62% { transform: scale(0.95) translateY(0); }
+  100% { transform: scale(1); }
+}
+
+.bm-queue-catch-pulse {
+  animation: bm-queue-catch 440ms var(--ease-spring-playful) both;
+  box-shadow: 0 0 18px color-mix(in srgb, var(--primary) 42%, transparent) !important;
+}
+
+/* 音频缓冲中进度条流光扫过 */
+@keyframes bm-buffer-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(220%); }
+}
+
+.pb-top-edge-timeline.is-buffering .pb-top-edge-rail::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 44%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--primary-light, #818cf8) 68%, #ffffff) 50%,
+    transparent 100%
+  );
+  animation: bm-buffer-shimmer 1.15s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* 磁性进度条悬停丝滑膨胀 */
+.pb-top-edge-timeline .pb-top-edge-rail {
+  transition: height 0.22s var(--ease-spring-tactile), background-color 0.2s ease;
+}
+
+.pb-top-edge-timeline .pb-top-edge-thumb {
+  transition:
+    transform 0.24s var(--ease-spring-snappy),
+    opacity 0.18s ease-out;
+}
+
+/* =========================================================================
+ * 3. 全站升级版 3 柱音频律动条（播放平滑律动，暂停柔滑落平至基线）
+ * ========================================================================= */
+@keyframes bm-eq-bar-bounce {
+  0%, 100% { transform: scaleY(0.26); }
+  38% { transform: scaleY(1); }
+  68% { transform: scaleY(0.48); }
+}
+
+.mini-eq-bars i {
+  transform-origin: center bottom;
+  transition: transform 0.28s var(--ease-apple-fluid), opacity 0.24s ease;
+  animation: bm-eq-bar-bounce 0.82s ease-in-out infinite;
+}
+
+.mini-eq-bars i:nth-child(1) {
+  animation-duration: 0.78s;
+  animation-delay: -0.12s;
+}
+
+.mini-eq-bars i:nth-child(2) {
+  animation-duration: 0.62s;
+  animation-delay: -0.44s;
+}
+
+.mini-eq-bars i:nth-child(3) {
+  animation-duration: 0.88s;
+  animation-delay: -0.26s;
+}
+
+.mini-eq-bars.paused i {
+  animation: none !important;
+  transform: scaleY(0.24) !important;
+  opacity: 0.62;
+}
+
+/* =========================================================================
+ * 4. 灵动岛式全局 Toast + 动态 SVG 对勾描边
+ * ========================================================================= */
+@keyframes bm-svg-check-draw {
+  from {
+    stroke-dashoffset: 24;
+    opacity: 0.35;
+  }
+  to {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+.bm-toast-check-svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--mint, #2dd4bf);
+}
+
+.bm-toast-check-path {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 0;
+  animation: bm-svg-check-draw 0.38s var(--ease-apple-fluid) both;
+}
+
+/* 升级全局 Toast 弹出曲线为灵动岛舒展弹入（专用于居中 .toast-banner，不干扰其他 pop-spring 元素） */
+.bm-toast-island-enter-active {
+  transition:
+    transform 0.38s var(--ease-spring-snappy),
+    opacity 0.2s ease-out !important;
+}
+
+.bm-toast-island-leave-active {
+  transition:
+    transform 0.18s var(--ease-apple-exit),
+    opacity 0.16s ease-in !important;
+}
+
+.bm-toast-island-enter-from {
+  opacity: 0;
+  transform: translate3d(-50%, -14px, 0) scale(0.82, 0.88) !important;
+}
+
+.bm-toast-island-leave-to {
+  opacity: 0;
+  transform: translate3d(-50%, -8px, 0) scale(0.92, 0.94) !important;
+}
+
+/* 卡片悬浮内嵌播放圆钮弹性浮现 */
+.lib-pl-play-btn,
+.rc-play-btn,
+.rcc-play-circle-btn {
+  transition:
+    transform 0.32s var(--ease-spring-playful),
+    opacity 0.2s ease-out,
+    background-color 0.2s ease,
+    box-shadow 0.24s ease !important;
+}
+
+/* =========================================================================
+ * 5. 克制型 3D 视差微倾封面表面（v-tilt 指令驱动）
+ * ========================================================================= */
+.bm-tilt-surface {
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 0.34s var(--ease-apple-fluid);
+  will-change: transform;
+}
+
+.bm-tilt-surface.bm-tilting {
+  transition: transform 0.08s linear;
+  transform: perspective(760px) rotateX(var(--bm-tilt-rx, 0deg)) rotateY(var(--bm-tilt-ry, 0deg)) translateZ(4px);
+}
+
+/* 极克制的玻璃掠光层（仅深色 D1/D2 与 L1 水彩启用；L2 燕麦暖纸完全禁用以保纸感） */
+.bm-tilt-surface::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(
+    circle at var(--bm-tilt-gx, 50%) var(--bm-tilt-gy, 50%),
+    rgba(255, 255, 255, 0.095) 0%,
+    transparent 68%
+  );
+  transition: opacity 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 4;
+}
+
+.bm-tilt-surface.bm-tilting::after {
+  opacity: 1;
+}
+
+/* L2 晨雾燕麦：彻底零镜面反光，还原手抄纸本质感 */
+html[data-theme="watercolor_light"][data-light-variant="nordic_oat"] .bm-tilt-surface::after,
+.scheme-watercolor_light.light-variant-nordic_oat .bm-tilt-surface::after {
+  display: none !important;
+}
+
+/* =========================================================================
+ * 6. 视口自适应列表与卡片级联进场（原版 bm-stagger-rise 质感，歌曲列表完整覆盖窗口可见范围）
+ * ========================================================================= */
+@keyframes bm-stagger-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0) scale(0.988);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .bm-stagger-item:nth-child(-n + 14),
+  .bm-vp-stagger-item {
+    animation: bm-stagger-rise 0.34s var(--ease-apple-fluid) both;
+    animation-delay: calc(var(--bm-stagger-idx, 0) * 22ms);
+  }
+
+  /* 严格采用字面时间值探测 sibling-index()，避免在 @supports 内引用 var() 导致误判为 true */
+  @supports (animation-delay: calc(sibling-index() * 0.1s)) {
+    .bm-stagger-item:nth-child(-n + 14),
+    .bm-vp-stagger-item {
+      animation-delay: calc((sibling-index() - 1) * 22ms);
+    }
+  }
+}
+
+/* 歌曲行悬浮 & 键盘聚焦操作按钮微错峰显影（同步覆盖 .row-icon-btn 与 .usr-action-btn） */
+.unified-song-row:hover .usr-hover-actions .row-icon-btn,
+.unified-song-row:focus-within .usr-hover-actions .row-icon-btn,
+.unified-song-row:hover .usr-hover-actions .usr-action-btn,
+.unified-song-row:focus-within .usr-hover-actions .usr-action-btn {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.unified-song-row .usr-hover-actions .row-icon-btn,
+.unified-song-row .usr-hover-actions .usr-action-btn {
+  transition:
+    transform 0.22s var(--ease-spring-tactile),
+    opacity 0.18s ease-out,
+    background-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.unified-song-row:hover .usr-hover-actions > :nth-child(2),
+.unified-song-row:focus-within .usr-hover-actions > :nth-child(2) {
+  transition-delay: 22ms;
+}
+
+.unified-song-row:hover .usr-hover-actions > :nth-child(3),
+.unified-song-row:focus-within .usr-hover-actions > :nth-child(3) {
+  transition-delay: 44ms;
+}
+
+.unified-song-row:hover .usr-hover-actions > :nth-child(4),
+.unified-song-row:focus-within .usr-hover-actions > :nth-child(4) {
+  transition-delay: 66ms;
+}
+
+/* 全局统一加载旋转类（消除跨组件 .is-spinning / .spin-anim 不一致与未定义缺陷） */
+@keyframes bm-icon-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.is-spinning,
+.spin-anim {
+  display: inline-flex;
+  animation: bm-icon-spin 0.85s linear infinite;
+}
+
+/* 定位歌曲柔光涟漪扫过（无硬边框） */
+@keyframes bm-locate-soft-pulse {
+  0% {
+    background-color: color-mix(in srgb, var(--primary) 0%, transparent);
+    box-shadow: 0 0 0 0 transparent;
+  }
+  26% {
+    background-color: color-mix(in srgb, var(--primary) 26%, transparent);
+    box-shadow: 0 8px 26px -6px color-mix(in srgb, var(--primary) 42%, transparent);
+  }
+  60% {
+    background-color: color-mix(in srgb, var(--primary) 16%, transparent);
+    box-shadow: 0 4px 18px -6px color-mix(in srgb, var(--primary) 28%, transparent);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.usr-locate-pulse {
+  animation: bm-locate-soft-pulse 1.18s var(--ease-apple-fluid) both !important;
+}
+
+/* =========================================================================
+ * 7. 滚动驱动吸顶柔影工艺（Scroll-Driven Animations + @supports 守卫）
+ * ========================================================================= */
+@keyframes bm-sticky-toolbar-elevate {
+  from {
+    box-shadow: 0 0 0 transparent;
+    transform: translateZ(0) scale(1);
+  }
+  to {
+    box-shadow: 0 14px 32px -12px rgba(2, 6, 16, 0.34);
+    transform: translateZ(0) scale(0.996);
+  }
+}
+
+@supports ((animation-timeline: scroll()) and (animation-range: 0% 100%)) {
+  .sdp-tracks-toolbar {
+    animation: bm-sticky-toolbar-elevate linear both;
+    animation-timeline: scroll(nearest block);
+    animation-range: 0px 140px;
+  }
+}
+
+/* =========================================================================
+ * 8. 触点锚定浮窗、原生 Top-Layer <dialog> 与全局弹窗出入场、列表平滑重排
+ * ========================================================================= */
+
+/* 底部浮窗（音质 / 音效 / 音量）从触发按钮自然拔起 */
+.pb-quality-popover,
+.pb-fx-preset-popover,
+.pb-wide-volume-popover {
+  transform-origin: bottom center;
+}
+
+.fade-pop-enter-active {
+  transition:
+    transform 0.3s var(--ease-spring-tactile),
+    opacity 0.18s ease-out !important;
+}
+
+.fade-pop-leave-active {
+  transition:
+    transform 0.15s var(--ease-apple-exit),
+    opacity 0.13s ease-in !important;
+}
+
+.fade-pop-enter-from {
+  opacity: 0 !important;
+  transform: translate3d(0, 10px, 0) scale(0.93) !important;
+}
+
+.fade-pop-leave-to {
+  opacity: 0 !important;
+  transform: translate3d(0, 6px, 0) scale(0.96) !important;
+}
+
+/* 右键菜单从点击角落弹簧绽放（组件内动态写入 transform-origin） */
+.bm-ctx-spring-enter-active {
+  transition:
+    transform 0.28s var(--ease-spring-tactile),
+    opacity 0.15s ease-out;
+}
+.bm-ctx-spring-leave-active {
+  transition:
+    transform 0.13s var(--ease-apple-exit),
+    opacity 0.11s ease-in;
+}
+.bm-ctx-spring-enter-from {
+  opacity: 0;
+  transform: scale(0.91);
+}
+.bm-ctx-spring-leave-to {
+  opacity: 0;
+  transform: scale(0.95);
+}
+
+/* 全局模态弹窗统一高质感渐入缩放 */
+.fade-enter-active {
+  transition: opacity 0.24s ease-out;
+}
+.fade-leave-active {
+  transition: opacity 0.16s ease-in;
+}
+.fade-enter-active > .glass-popover,
+.fade-enter-active > .vip-modal-card,
+.fade-enter-active > .fp-studio-shell,
+.fade-enter-active > .confirm-dialog-card,
+.fade-enter-active > .login-modal-card,
+.fade-enter-active > .add-playlist-modal,
+.fade-enter-active > .comments-modal-card,
+.fade-enter-active > .compact-dialog {
+  transition:
+    transform 0.32s var(--ease-apple-fluid),
+    opacity 0.22s ease-out;
+}
+.fade-leave-active > .glass-popover,
+.fade-leave-active > .vip-modal-card,
+.fade-leave-active > .fp-studio-shell,
+.fade-leave-active > .confirm-dialog-card,
+.fade-leave-active > .login-modal-card,
+.fade-leave-active > .add-playlist-modal,
+.fade-leave-active > .comments-modal-card,
+.fade-leave-active > .compact-dialog {
+  transition:
+    transform 0.16s var(--ease-apple-exit),
+    opacity 0.14s ease-in;
+}
+.fade-enter-from > .glass-popover,
+.fade-enter-from > .vip-modal-card,
+.fade-enter-from > .fp-studio-shell,
+.fade-enter-from > .confirm-dialog-card,
+.fade-enter-from > .login-modal-card,
+.fade-enter-from > .add-playlist-modal,
+.fade-enter-from > .comments-modal-card,
+.fade-enter-from > .compact-dialog {
+  opacity: 0;
+  transform: translate3d(0, 14px, 0) scale(0.955);
+}
+.fade-leave-to > .glass-popover,
+.fade-leave-to > .vip-modal-card,
+.fade-leave-to > .fp-studio-shell,
+.fade-leave-to > .confirm-dialog-card,
+.fade-leave-to > .login-modal-card,
+.fade-leave-to > .add-playlist-modal,
+.fade-leave-to > .comments-modal-card,
+.fade-leave-to > .compact-dialog {
+  opacity: 0;
+  transform: translate3d(0, 8px, 0) scale(0.975);
+}
+
+/* 原生 Top-Layer <dialog>（如 FontPickerModal）现代化平滑进退场 */
+dialog.bm-top-layer-dialog {
+  opacity: 0;
+  transform: translate3d(0, 14px, 0) scale(0.955);
+  transition:
+    opacity 0.24s ease-out,
+    transform 0.32s var(--ease-apple-fluid),
+    overlay 0.24s ease-out,
+    display 0.24s ease-out;
+  transition-behavior: allow-discrete;
+}
+
+dialog.bm-top-layer-dialog[open] {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+@starting-style {
+  dialog.bm-top-layer-dialog[open] {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale(0.955);
+  }
+}
+
+dialog.bm-top-layer-dialog::backdrop {
+  opacity: 0;
+  transition:
+    opacity 0.24s ease-out,
+    overlay 0.24s ease-out,
+    display 0.24s ease-out;
+  transition-behavior: allow-discrete;
+}
+
+dialog.bm-top-layer-dialog[open]::backdrop {
+  opacity: 1;
+}
+
+@starting-style {
+  dialog.bm-top-layer-dialog[open]::backdrop {
+    opacity: 0;
+  }
+}
+
+/* 列表增删与重排平滑让位（下载队列、播放队列） */
+.bm-list-reflow-move {
+  transition: transform 0.3s var(--ease-apple-fluid);
+}
+
+.bm-list-reflow-enter-active {
+  transition:
+    transform 0.28s var(--ease-apple-fluid),
+    opacity 0.22s ease-out;
+}
+
+.bm-list-reflow-leave-active {
+  transition:
+    transform 0.18s var(--ease-apple-exit),
+    opacity 0.16s ease-in;
+}
+
+.bm-list-reflow-enter-from {
+  opacity: 0;
+  transform: translate3d(0, -8px, 0) scale(0.97);
+}
+
+.bm-list-reflow-leave-to {
+  opacity: 0;
+  transform: translate3d(16px, 0, 0) scale(0.96);
+}
+
+/* =========================================================================
+ * 9. 特色工坊彩蛋动效（专注舱呼吸光环 / 评论点赞倾弹 / VIP 皇冠流光与日历弹跃）
+ * ========================================================================= */
+
+/* 专注舱 4 秒周期温和呼吸光环 */
+@keyframes bm-focus-breathe {
+  0%, 100% {
+    transform: scale(0.96);
+    opacity: 0.44;
+  }
+  45% {
+    transform: scale(1.07);
+    opacity: 0.88;
+  }
+}
+
+.focus-breathe-aura {
+  animation: bm-focus-breathe 4s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+}
+
+/* 环境音激活图标微妙生动呼吸 */
+@keyframes bm-ambient-sway {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-2px) rotate(4deg); }
+}
+
+.fp-ambient-card.active .fp-amb-icon {
+  animation: bm-ambient-sway 2.8s ease-in-out infinite;
+}
+
+/* 评论点赞倾斜弹跳 */
+@keyframes bm-cmt-like-bounce {
+  0% { transform: scale(1) rotate(0deg); }
+  30% { transform: scale(1.32) rotate(-14deg); }
+  62% { transform: scale(0.92) rotate(5deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
+
+.cm-like-btn.is-bouncing svg,
+.cm-like-btn.is-bouncing .plump-icon,
+.ctb-action-btn.is-bouncing svg,
+.ctb-action-btn.is-bouncing .plump-icon {
+  animation: bm-cmt-like-bounce 440ms var(--ease-spring-playful) both;
+}
+
+/* VIP 签到皇冠流光与今日日历格子点亮弹跃 */
+@keyframes bm-vip-crown-shine {
+  0% { transform: scale(1) rotate(0deg); filter: brightness(1); }
+  35% { transform: scale(1.18) rotate(-8deg); filter: brightness(1.35); }
+  70% { transform: scale(0.96) rotate(4deg); filter: brightness(1.12); }
+  100% { transform: scale(1) rotate(0deg); filter: brightness(1); }
+}
+
+.vip-icon-orb.is-celebrating {
+  animation: bm-vip-crown-shine 640ms var(--ease-spring-playful) both;
+}
+
+@keyframes bm-vip-cal-pop {
+  0% { transform: scale(0.75); }
+  52% { transform: scale(1.22); }
+  100% { transform: scale(1); }
+}
+
+.cal-day-cell.today.claimed.is-fresh-claim {
+  animation: bm-vip-cal-pop 520ms var(--ease-spring-playful) both;
+}
+
+/* 全局开关 .plump-switch 弹性滑块对齐 */
+.plump-switch .plump-slider::before {
+  transition:
+    transform 0.34s var(--ease-spring-tactile),
+    width 0.16s ease !important;
+}
+
+/* =========================================================================
+ * 10. 三档自动降级策略（standard 轻量平缓 / none & prefers-reduced-motion 静态无位移）
+ * ========================================================================= */
+html[data-motion-level="standard"] {
+  --ease-spring-tactile: cubic-bezier(0.25, 0.8, 0.25, 1);
+  --ease-spring-snappy: cubic-bezier(0.25, 0.8, 0.25, 1);
+  --ease-spring-playful: cubic-bezier(0.25, 0.8, 0.25, 1);
+  --ease-apple-fluid: cubic-bezier(0.25, 0.8, 0.25, 1);
+  --bm-dur-spring: 220ms;
+  --bm-dur-modal-in: 190ms;
+}
+
+html[data-motion-level="standard"] .bm-stagger-item:nth-child(-n + 14),
+html[data-motion-level="standard"] .bm-vp-stagger-item {
+  animation-delay: 0ms !important;
+  animation-duration: 0.18s;
+}
+
+html[data-motion-level="standard"] .pb-hero-play-orb.is-playing-live,
+html[data-motion-level="standard"] .pb-play-hero-circle.is-playing-live,
+html[data-motion-level="standard"] .focus-breathe-aura,
+html[data-motion-level="standard"] .fp-ambient-card.active .fp-amb-icon {
+  animation: none !important;
+}
+
+html[data-motion-level="standard"] .bm-tilt-surface::after {
+  display: none !important;
+}
+
+/* none 档位 & 系统 prefers-reduced-motion: reduce：
+ * 遵循无障碍规范，不粗暴使用 0.001ms 破坏回调，而是精准关闭位移动画/循环动画/粒子/滚轴，
+ * 同时保留清晰的色彩悬停与即时终态展现 */
+html[data-motion-level="none"] {
+  scroll-behavior: auto;
+  --ease-apple-fluid: linear;
+  --ease-spring-tactile: linear;
+  --ease-spring-snappy: linear;
+  --ease-spring-playful: linear;
+}
+
+html[data-motion-level="none"] .bm-stagger-item,
+html[data-motion-level="none"] .bm-vp-stagger-item,
+html[data-motion-level="none"] .pb-hero-play-orb.is-playing-live,
+html[data-motion-level="none"] .pb-play-hero-circle.is-playing-live,
+html[data-motion-level="none"] .pb-top-edge-timeline.is-buffering .pb-top-edge-rail::after,
+html[data-motion-level="none"] .mini-eq-bars i,
+html[data-motion-level="none"] .focus-breathe-aura,
+html[data-motion-level="none"] .fp-ambient-card.active .fp-amb-icon,
+html[data-motion-level="none"] .bm-nudge-left,
+html[data-motion-level="none"] .bm-nudge-right,
+html[data-motion-level="none"] .bm-heart-pop,
+html[data-motion-level="none"] .bm-mode-spin-pop,
+html[data-motion-level="none"] .bm-mute-shake,
+html[data-motion-level="none"] .bm-queue-catch-pulse,
+html[data-motion-level="none"] .bm-toast-check-path,
+html[data-motion-level="none"] .vip-icon-orb.is-celebrating,
+html[data-motion-level="none"] .cal-day-cell.is-fresh-claim,
+html[data-motion-level="none"] .usr-locate-pulse,
+html[data-motion-level="none"] .inflow-greeting-dot,
+html[data-motion-level="none"] .sdp-tracks-toolbar {
+  animation: none !important;
+}
+
+html[data-motion-level="none"] .mini-eq-bars:not(.paused) i:nth-child(1) {
+  transform: scaleY(0.56);
+}
+html[data-motion-level="none"] .mini-eq-bars:not(.paused) i:nth-child(2) {
+  transform: scaleY(0.92);
+}
+html[data-motion-level="none"] .mini-eq-bars:not(.paused) i:nth-child(3) {
+  transform: scaleY(0.68);
+}
+
+html[data-motion-level="none"] .bm-tilt-surface,
+html[data-motion-level="none"] .bm-tilt-surface.bm-tilting {
+  transform: none !important;
+  transition: none !important;
+}
+
+html[data-motion-level="none"] .bm-tilt-surface::after {
+  display: none !important;
+}
+
+html[data-motion-level="none"] .bm-toast-island-enter-active,
+html[data-motion-level="none"] .bm-toast-island-leave-active,
+html[data-motion-level="none"] .pop-spring-enter-active,
+html[data-motion-level="none"] .pop-spring-leave-active,
+html[data-motion-level="none"] .fade-pop-enter-active,
+html[data-motion-level="none"] .fade-pop-leave-active,
+html[data-motion-level="none"] .bm-ctx-spring-enter-active,
+html[data-motion-level="none"] .bm-ctx-spring-leave-active,
+html[data-motion-level="none"] .bm-icon-morph-enter-active,
+html[data-motion-level="none"] .bm-icon-morph-leave-active,
+html[data-motion-level="none"] .bm-theme-icon-swap-enter-active,
+html[data-motion-level="none"] .bm-theme-icon-swap-leave-active,
+html[data-motion-level="none"] .bm-track-slide-next-enter-active,
+html[data-motion-level="none"] .bm-track-slide-next-leave-active,
+html[data-motion-level="none"] .bm-track-slide-prev-enter-active,
+html[data-motion-level="none"] .bm-track-slide-prev-leave-active,
+html[data-motion-level="none"] .bm-list-reflow-move,
+html[data-motion-level="none"] .bm-list-reflow-enter-active,
+html[data-motion-level="none"] .bm-list-reflow-leave-active,
+html[data-motion-level="none"] dialog.bm-top-layer-dialog,
+html[data-motion-level="none"] dialog.bm-top-layer-dialog::backdrop,
+html[data-motion-level="none"] .fade-enter-active,
+html[data-motion-level="none"] .fade-leave-active,
+html[data-motion-level="none"] .fade-enter-active > *,
+html[data-motion-level="none"] .fade-leave-active > * {
+  transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .bm-stagger-item,
+  .bm-vp-stagger-item,
+  .pb-hero-play-orb.is-playing-live,
+  .pb-play-hero-circle.is-playing-live,
+  .pb-top-edge-timeline.is-buffering .pb-top-edge-rail::after,
+  .mini-eq-bars i,
+  .focus-breathe-aura,
+  .fp-ambient-card.active .fp-amb-icon,
+  .bm-nudge-left,
+  .bm-nudge-right,
+  .bm-heart-pop,
+  .bm-mode-spin-pop,
+  .bm-mute-shake,
+  .bm-queue-catch-pulse,
+  .bm-toast-check-path,
+  .vip-icon-orb.is-celebrating,
+  .cal-day-cell.is-fresh-claim,
+  .usr-locate-pulse,
+  .sdp-tracks-toolbar {
+    animation: none !important;
+  }
+  .bm-tilt-surface,
+  .bm-tilt-surface.bm-tilting {
+    transform: none !important;
+    transition: none !important;
+  }
+  .bm-tilt-surface::after {
+    display: none !important;
+  }
+  dialog.bm-top-layer-dialog,
+  dialog.bm-top-layer-dialog::backdrop,
+  .bm-list-reflow-move {
+    transition: none !important;
+  }
+}
+
+/* =========================================================================
+ * 后台节能隔离：窗口不可见或被沉浸播放页完全遮盖时，暂停后台无限循环 CSS 动画
+ * （绝不影响独立沉浸播放页本身）
+ * ========================================================================= */
+html.bm-window-hidden *,
+html.bm-window-hidden *::before,
+html.bm-window-hidden *::after {
+  animation-play-state: paused !important;
+}
+
+.app-root.is-now-playing-open .aurora-blob,
+.app-root.is-now-playing-open .aurora-bg *,
+.app-root.is-now-playing-open .aurora-bg *::before,
+.app-root.is-now-playing-open .aurora-bg *::after,
+.app-root.is-now-playing-open .skyline-workspace *,
+.app-root.is-now-playing-open .skyline-workspace *::before,
+.app-root.is-now-playing-open .skyline-workspace *::after {
+  animation-play-state: paused !important;
+}
