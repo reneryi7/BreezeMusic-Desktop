@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <clipPath id="bm-fav-sq">
+      <path d="M512 40 C732 40 842 40 913 111 C984 182 984 292 984 512 C984 732 984 842 913 913 C842 984 732 984 512 984 C292 984 182 984 111 913 C40 842 40 732 40 512 C40 292 40 182 111 111 C182 40 292 40 512 40 Z" />
+    </clipPath>
+    <linearGradient id="bm-fav-bg" x1="64" y1="56" x2="960" y2="968" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3B2FCF" />
+      <stop offset="40%" stop-color="#535CE0" />
+      <stop offset="76%" stop-color="#22A7F0" />
+      <stop offset="100%" stop-color="#2DD4BF" />
+    </linearGradient>
+    <radialGradient id="bm-fav-sheen" cx="270" cy="140" r="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.30" />
+      <stop offset="52%" stop-color="#A5B4FC" stop-opacity="0.06" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="bm-fav-rib" x1="110" y1="670" x2="920" y2="410" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A5F3FC" stop-opacity="0.32" />
+      <stop offset="30%" stop-color="#CCFBF1" stop-opacity="0.82" />
+      <stop offset="70%" stop-color="#7DF9E6" stop-opacity="0.86" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.34" />
+    </linearGradient>
+    <linearGradient id="bm-fav-note" x1="300" y1="180" x2="740" y2="830" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="70%" stop-color="#F7FBFF" />
+      <stop offset="100%" stop-color="#DCF2FF" />
+    </linearGradient>
+    <mask id="bm-fav-hole">
+      <rect width="1024" height="1024" fill="white" />
+      <circle cx="432" cy="648" r="68" fill="black" />
+    </mask>
+  </defs>
+  <g clip-path="url(#bm-fav-sq)">
+    <rect x="40" y="40" width="944" height="944" fill="url(#bm-fav-bg)" />
+    <rect x="40" y="40" width="944" height="944" fill="url(#bm-fav-sheen)" />
+    <path d="M98 672 C236 468 404 466 534 548 C662 628 792 598 926 404 C816 654 656 706 514 618 C382 536 238 548 98 672 Z" fill="url(#bm-fav-rib)" />
+    <g mask="url(#bm-fav-hole)">
+      <path d="M524 202 C524 176 546 158 574 162 C688 176 778 242 820 350 C829 373 812 420 790 428 C776 433 766 420 764 401 C750 348 698 326 604 328 L604 648 C604 745 527 820 432 820 C337 820 260 745 260 648 C260 551 337 476 432 476 C472 476 504 489 524 510 Z" fill="url(#bm-fav-note)" />
+    </g>
+  </g>
+</svg>

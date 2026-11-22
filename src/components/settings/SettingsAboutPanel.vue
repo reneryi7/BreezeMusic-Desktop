@@ -2,6 +2,7 @@
 import { ref } from "vue";
 import { useAppStore } from "../../stores/appStore";
 import { APP_VERSION_TAG } from "../../utils/settingsCatalog";
+import BreezeBrandLogo from "../BreezeBrandLogo.vue";
 import PlumpIcon from "../PlumpIcon.vue";
 import SettingsCard from "./SettingsCard.vue";
 import SettingsRow from "./SettingsRow.vue";
@@ -92,7 +93,7 @@ function handleDisableUnlockedFeature(enabled: boolean) {
     >
       <div class="bms-about-brand-left">
         <div class="bms-about-orb">
-          <PlumpIcon name="music" :size="30" color="#ffffff" />
+          <BreezeBrandLogo :size="68" />
         </div>
         <div class="bms-about-copy">
           <div class="bms-about-title-row">
@@ -240,15 +241,15 @@ function handleDisableUnlockedFeature(enabled: boolean) {
 }
 
 .bms-about-orb {
-  width: 64px;
-  height: 64px;
+  width: 68px;
+  height: 68px;
   border-radius: 20px;
-  background: var(--grad-kugou-primary);
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  box-shadow: 0 14px 28px -8px color-mix(in srgb, var(--primary) 56%, transparent);
+  filter: drop-shadow(0 12px 22px color-mix(in srgb, var(--primary) 34%, transparent));
 }
 
 .bms-about-copy {

@@ -12,6 +12,20 @@
 
 ---
 
+## [1.0.1] - 2026-11-23
+
+**BreezeMusic Desktop `v1.0.1`** 全面焕新桌面端品牌图标、系统托盘小尺寸光学清晰度与应用内品牌标识体验。
+
+### 新增 (Added)
+- **专属纯矢量品牌徽标与 Favicon**：新增 [BreezeBrandLogo.vue](src/components/BreezeBrandLogo.vue) 矢量品牌组件升级「设置 → 关于微风音乐」视觉卡，并补齐 `public/favicon.svg` 与 `index.html` 图标声明。
+
+### 优化 (Changed)
+- **全新「微风浮雕」极简双色桌面图标**：承袭安卓端 BreezeMusic「微风丝带 + 黑胶空心风翼音符」家族基因，全面替换早期占位图标为晴空鸢尾靛 × 冰川天青 × 薄荷青玉无框极光超椭圆图标，对齐全软件 100% Zero-Border 与 `PlumpIcon` 软润美学。
+- **Windows 全尺度 7 帧 ICO 与系统托盘清晰度特化**：重写 `src-tauri/icons/icon.ico`（严格遵循 Tauri 2.0 `32×32` 置首规范，完整内嵌 `32 / 16 / 24 / 48 / 64 / 128 / 256` 七档分辨率），并为 `16×16`、`24×24` 及 `32×32` 托盘与任务栏尺寸制作独立光学清晰度特化母版，小尺寸下黑胶中孔与微风弧带依然清晰锐利。
+- **NSIS 安装程序自定义图标同步**：在 `src-tauri/tauri.conf.json` 中显式配置 `bundle.windows.nsis.installerIcon = "icons/icon.ico"`，使安装程序 `.exe` 文件本身与主应用视觉完全统一。
+
+---
+
 ## [1.0.0] - 2026-11-22
 
 **BreezeMusic Desktop（微风音乐 Windows 桌面版）** 首个正式版本发布。
@@ -36,5 +50,6 @@
   - 基于 Rust + Tauri 2.0 实现端侧协议通信、本地 Range 音频流代理 (`AudioStreamProxy`) 与 FLAC/MP3/OGG 元数据及封面处理。
   - 采用 Windows DPAPI + AES-256-CBC / HMAC-SHA256 本地凭证加密存储、`zeroize` 内存清零、代理反 SSRF 校验及多窗体 IPC 权限守卫。
 
-[Unreleased]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/reneryi7/BreezeMusic-Desktop/releases/tag/v1.0.0

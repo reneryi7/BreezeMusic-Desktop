@@ -1,6 +1,6 @@
 import type { SettingsSectionId } from "../types";
 
-export const APP_VERSION = "1.0.0";
+export const APP_VERSION = "1.0.1";
 export const APP_VERSION_TAG = `v${APP_VERSION}`;
 
 export interface SettingsNavItem {
@@ -518,6 +518,6 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     sectionTitle: "关于微风音乐",
     title: `BreezeMusic ${APP_VERSION_TAG}、项目渊源与引擎架构`,
     description: `查看当前软件版本 ${APP_VERSION_TAG}、安卓微风音乐 Windows 重构说明、Rust/Tauri/WebAudio 引擎与数据目录`,
-    keywords: ["关于", "版本", "v1.0.0", "1.0.0", "开源", "安卓", "tauri", "数据目录", "架构"],
+    keywords: ["关于", "版本", APP_VERSION_TAG, APP_VERSION, "开源", "安卓", "tauri", "数据目录", "架构"],
   },
 ];

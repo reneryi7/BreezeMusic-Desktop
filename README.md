@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.0.0-4F46E5?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.0.1-4F46E5?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11%20(x64)-0078D4?style=flat-square" alt="Platform" />
   <img src="https://img.shields.io/badge/Core-Rust%20%2B%20Tauri%202.0-EA580C?style=flat-square" alt="Tauri 2.0" />
   <img src="https://img.shields.io/badge/UI-Vue%203%20%2B%20100%25%20Zero--Border-10B981?style=flat-square" alt="Vue 3" />
@@ -84,8 +84,8 @@
 
 | 安装包类型 | 文件名示例 | 适用场景 |
 | :--- | :--- | :--- |
-| **NSIS 安装包（推荐）** | `BreezeMusic_1.0.0_x64-setup.exe` | 体积更小，支持单用户或全体用户安装与自定义路径 |
-| **MSI 安装包** | `BreezeMusic_1.0.0_x64_en-US.msi` | 标准 Windows Installer 格式，适合系统级安装与静默部署 |
+| **NSIS 安装包（推荐）** | `BreezeMusic_1.0.1_x64-setup.exe` | 体积更小，支持单用户或全体用户安装与自定义路径 |
+| **MSI 安装包** | `BreezeMusic_1.0.1_x64_en-US.msi` | 标准 Windows Installer 格式，适合系统级安装与静默部署 |
 
 > [!TIP]
 > **关于 Windows Defender SmartScreen 提示**
@@ -138,6 +138,7 @@ BreezeMusic-Desktop/
 ├── .github/
 │   └── ISSUE_TEMPLATE/             # Bug 反馈与功能建议表单模板
 ├── index.html                      # 首屏入口与防闪烁主题/排版/动效预加载脚本
+├── public/                         # 静态 Favicon 图标资源
 ├── package.json                    # 前端依赖、脚本与版本定义
 ├── vite.config.ts                  # Vite 构建配置
 ├── tsconfig.json                   # TypeScript 编译配置
@@ -169,7 +170,7 @@ BreezeMusic-Desktop/
 
 ## 六、使用小贴士
 
-* **关于实验性离线拓展模块**：为保持界面默认纯净合规，客户端默认隐藏所有离线下载入口。如个人本地学习测试确需使用离线缓存与内嵌标签/封面功能，可前往 **「设置 → 关于微风音乐」**，连续点击版本号徽章（`v1.0.0`）**5 次** 解锁「下载管理」入口；解锁后可在同一页面的「项目说明与本地安全」卡片中随时一键关闭并重新隐藏。
+* **关于实验性离线拓展模块**：为保持界面默认纯净合规，客户端默认隐藏所有离线下载入口。如个人本地学习测试确需使用离线缓存与内嵌标签/封面功能，可前往 **「设置 → 关于微风音乐」**，连续点击版本号徽章（`v1.0.1`）**5 次** 解锁「下载管理」入口；解锁后可在同一页面的「项目说明与本地安全」卡片中随时一键关闭并重新隐藏。
 * **版本更新记录**：所有历史版本的完整变更明细均同步维护在 [CHANGELOG.md](CHANGELOG.md) 中，并与 [GitHub Releases](https://github.com/reneryi7/BreezeMusic-Desktop/releases) 保持一致。
 
 ---
