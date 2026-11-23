@@ -31,6 +31,6 @@ This project incorporates or references open-source research and libraries from 
 * **Reqwest** — Apache-2.0 OR MIT License
 * **lofty** — Apache-2.0 OR MIT License (audio metadata & tag engine)
 * **RustCrypto crates (`aes`, `cbc`, `md-5`, `sha2`, `rsa`, `zeroize`)** — Apache-2.0 OR MIT License
-* **webview2-com / windows-core** — Apache-2.0 OR MIT License
+* **webview2-com / windows / windows-core (`windows-rs`)** — MIT OR Apache-2.0 License
 
 Full dependency trees and exact resolved versions are recorded in `package-lock.json` and `src-tauri/Cargo.lock`.

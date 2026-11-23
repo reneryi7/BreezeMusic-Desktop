@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.0.1-4F46E5?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.1.0-4F46E5?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11%20(x64)-0078D4?style=flat-square" alt="Platform" />
   <img src="https://img.shields.io/badge/Core-Rust%20%2B%20Tauri%202.0-EA580C?style=flat-square" alt="Tauri 2.0" />
   <img src="https://img.shields.io/badge/UI-Vue%203%20%2B%20100%25%20Zero--Border-10B981?style=flat-square" alt="Vue 3" />
@@ -52,13 +52,14 @@
 * **听觉工程细节**：采用 **50 dB Weber-Fechner 对数听觉音量曲线**（彻底解决低音量区间调节过陡问题），支持 `0–8s` 双 Deck 跨曲无缝淡变、本地 HTTP Range 音频流代理 (`AudioStreamProxy`) 与真实音频流采样率/位深探测。
 
 ### 4. 完整音乐生态、本地曲库与心流专注舱
-* **探索发现与在线生态**：横向可展开「每日推荐 / 私人 FM」沉浸双卡舞台、新歌速递、官方巅峰排行榜、随心听电台广场、综合搜索、歌手/专辑/歌单详情及歌单双向同步。
+* **探索发现、在线生态与双端分享解析**：横向可展开「每日推荐 / 私人 FM」沉浸双卡舞台、新歌速递、官方巅峰排行榜、随心听电台广场、综合搜索、歌手/专辑/歌单详情及歌单双向同步；支持酷狗标准版 / 概念版 / 双端直达单曲与歌单分享口令生成、原生剪贴板自动识别、搜索框口令直达与分批快速导入歌单。
 * **云盘音乐管理**：独立云盘视图，支持空间配额环形统计、Hi-Res / SQ / HQ 音质分层筛选、关键词检索、排序与批量加入歌单/管理。
 * **独立本地音乐中心**：支持多目录添加、启动自动扫描、递归子目录、短音频/小文件过滤、自动去重、内嵌标签与文件名优先级切换以及元数据缓存重建。
 * **心流专注舱 (`Focus Pod`)**：集番茄钟、倒计时、自由正计时于一体，内置 **雨声 / 黑胶底噪 / 篝火 / 海浪** 4 通道实时程序化环境白噪音混音器与多套场景预设。
 
 ### 5. 三窗体桌面协同、排版中心与本地安全加固
-* **三窗体联动**：无边框主窗口 + 独立透明硬件穿透桌面悬浮歌词窗 + 四边磁吸停靠 Mini 灵动岛小窗，并支持 Win32 `RegisterHotKey` 系统级自定义全局热键。
+* **三窗体联动与 GPU 空间过渡**：无边框主窗口 + 独立透明硬件穿透桌面悬浮歌词窗 + 四边磁吸停靠 Mini 灵动岛小窗（配备 D3D11 + DirectComposition GPU 空间势能过渡动效、全屏视频/游戏自动礼让、Win32 原生单实例跨进程唤醒与系统级自定义全局热键）。
+* **极低后台功耗与零 VDOM 抖动**：前后台电源协调器在隐藏至托盘/最小化/切入小窗时瞬停视觉渲染与定时刷新（100% 保持音频连续播放），配合零 VDOM 重绘 KRC 逐字歌词引擎，兼顾高刷流畅度与低 CPU/GPU 占用。
 * **全局多窗口字体排版中心**：自动扫描本机系统字体并支持导入 `.ttf / .otf / .woff2 / .ttc` 本地字体（`.ttc` 自动拆包），支持 `75%–145%` 全局字号缩放、五级联动派生字重、行距与等宽数字对齐。
 * **可检索 Master-Detail 设置中心**：覆盖外观、排版、常规窗口、播放音质、歌词、本地音乐、快捷键、存储网络与关于页，支持中英文关键词实时搜索定位。
 * **本地隐私与安全架构**：使用 **Windows DPAPI + AES-256-CBC / HMAC-SHA256** 加密持久化账号会话凭证（支持多账号无缝切换与右上角头像悬浮面板），敏感内存使用 `zeroize` 即用即清零；支持封面代理反 SSRF 校验与全量 IPC 窗口权限守卫。
@@ -84,8 +85,8 @@
 
 | 安装包类型 | 文件名示例 | 适用场景 |
 | :--- | :--- | :--- |
-| **NSIS 安装包（推荐）** | `BreezeMusic_1.0.1_x64-setup.exe` | 体积更小，支持单用户或全体用户安装与自定义路径 |
-| **MSI 安装包** | `BreezeMusic_1.0.1_x64_en-US.msi` | 标准 Windows Installer 格式，适合系统级安装与静默部署 |
+| **NSIS 安装包（推荐）** | `BreezeMusic_1.1.0_x64-setup.exe` | 体积更小，支持单用户或全体用户安装与自定义路径 |
+| **MSI 安装包** | `BreezeMusic_1.1.0_x64_en-US.msi` | 标准 Windows Installer 格式，适合系统级安装与静默部署 |
 
 > [!TIP]
 > **关于 Windows Defender SmartScreen 提示**
@@ -160,7 +161,9 @@ BreezeMusic-Desktop/
 │   └── src/
 │       ├── main.rs                 # Windows 桌面入口
 │       ├── lib.rs                  # Tauri IPC 命令注册、系统托盘、全局热键与多窗体调度
-│       └── kugou/                  # 纯 Rust 协议签名、传输网关、音频代理、KRC 解密、DPAPI 凭证存储与标签引擎
+│       ├── single_instance.rs      # Win32 原生会话级单实例守卫与跨进程焦点唤醒
+│       ├── window_transition.rs    # D3D11 + DirectComposition 主窗/小窗 GPU 空间过渡引擎
+│       └── kugou/                  # 纯 Rust 协议签名、传输网关、音频代理、KRC 解密、分享解析、DPAPI 凭证存储与标签引擎
 ├── CHANGELOG.md                    # 版本更新日志 (Keep a Changelog)
 ├── THIRD_PARTY_NOTICES.md          # 第三方开源组件与上游协议致谢声明
 └── LICENSE                         # GNU General Public License v3.0
@@ -170,7 +173,7 @@ BreezeMusic-Desktop/
 
 ## 六、使用小贴士
 
-* **关于实验性离线拓展模块**：为保持界面默认纯净合规，客户端默认隐藏所有离线下载入口。如个人本地学习测试确需使用离线缓存与内嵌标签/封面功能，可前往 **「设置 → 关于微风音乐」**，连续点击版本号徽章（`v1.0.1`）**5 次** 解锁「下载管理」入口；解锁后可在同一页面的「项目说明与本地安全」卡片中随时一键关闭并重新隐藏。
+* **关于实验性离线拓展模块**：为保持界面默认纯净合规，客户端默认隐藏所有离线下载入口。如个人本地学习测试确需使用离线缓存与内嵌标签/封面功能，可前往 **「设置 → 关于微风音乐」**，连续点击版本号徽章（`v1.1.0`）**5 次** 解锁「下载管理」入口；解锁后可在同一页面的「项目说明与本地安全」卡片中随时一键关闭并重新隐藏。
 * **版本更新记录**：所有历史版本的完整变更明细均同步维护在 [CHANGELOG.md](CHANGELOG.md) 中，并与 [GitHub Releases](https://github.com/reneryi7/BreezeMusic-Desktop/releases) 保持一致。
 
 ---
