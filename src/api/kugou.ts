@@ -1309,9 +1309,22 @@ export const kugouClient = {
     return invoke<CacheDiskStats>("clear_cache_category_cmd", { category });
   },
 
-  /** 切换主窗口精简 Mini 迷你置顶播控条模式 */
-  setMiniPlayerMode(mini: boolean): Promise<boolean> {
-    return invoke<boolean>("set_mini_player_mode_cmd", { mini });
+  /** 切换主窗口精简 Mini 迷你置顶播控条模式（携带当前有效动效档位以协同原生 GPU 空间过渡） */
+  setMiniPlayerMode(mini: boolean, motionLevel?: string): Promise<boolean> {
+    return invoke<boolean>("set_mini_player_mode_cmd", {
+      mini,
+      motionLevel: motionLevel ?? null,
+    });
+  },
+
+  /** 同步全局有效动效档位到原生窗口过渡引擎 */
+  syncMotionLevel(level: string): Promise<boolean> {
+    return invoke<boolean>("sync_motion_level_cmd", { level });
+  },
+
+  /** 使用原生无闪烁管线将主窗口隐藏至系统托盘（避免最大化恢复白边） */
+  hideMainToTray(): Promise<boolean> {
+    return invoke<boolean>("hide_main_to_tray_cmd");
   },
 
   /** 控制独立桌面歌词窗口显隐、置顶穿透与尺寸 */

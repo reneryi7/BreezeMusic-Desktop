@@ -49,6 +49,7 @@ interface MiniStateSyncPayload {
   resolvedColorScheme?: string;
   lightThemeVariant?: string;
   darkThemeVariant?: string;
+  motionLevel?: string;
   coverAccentPrimary?: string;
   coverAccentSecondary?: string;
   song?: {
@@ -166,8 +167,24 @@ function hideMiniTip() {
   }
 }
 
+interface MiniTransitionPayload {
+  phase?: "entering" | "visible" | "exiting" | "hidden";
+  offsetX?: number;
+  offsetY?: number;
+  dockEdge?: string;
+  motionLevel?: string;
+  instant?: boolean;
+  transitionGen?: number;
+}
+
 // Standalone synced reactive state
-const isMiniWindowVisible = ref<boolean>(true);
+const isMiniWindowVisible = ref<boolean>(!isStandalone.value);
+const stagePhase = ref<"hidden" | "entering" | "visible" | "exiting">(
+  isStandalone.value ? "entering" : "visible"
+);
+const stageMotionOffset = ref<{ x: number; y: number }>({ x: 0, y: -14 });
+const stageMotionLevel = ref<"best" | "standard" | "none">("best");
+const stageInstant = ref<boolean>(false);
 const remoteSnapshot = ref<MiniStateSyncPayload | null>(null);
 const livePositionMs = ref(0);
 let anchorPosMs = 0;
@@ -175,7 +192,11 @@ let anchorPerfMs = typeof performance !== "undefined" ? performance.now() : 0;
 let lastStateSeq = -1;
 let lastStateSentAtMs = 0;
 let lastHandshakeReqAt = 0;
+let lastTransitionGen = 0;
 let rafId: number | null = null;
+let stageRevealRaf1: number | null = null;
+let stageRevealRaf2: number | null = null;
+let stageRevealFallbackTimer: number | null = null;
 let collapseTimer: number | null = null;
 let volumeHoverCloseTimer: number | null = null;
 let optimisticTimer: number | null = null;
@@ -237,12 +258,134 @@ function hydrateFromStorageSnapshots() {
   }
 }
 
+function normalizeMiniMotionLevel(raw: unknown): "best" | "standard" | "none" {
+  const s = String(raw || "").trim().toLowerCase();
+  if (s === "none" || s === "off" || s === "reduced") return "none";
+  if (s === "standard" || s === "normal") return "standard";
+  return "best";
+}
+
+function clearStageRevealSchedules() {
+  if (stageRevealRaf1 !== null) {
+    cancelAnimationFrame(stageRevealRaf1);
+    stageRevealRaf1 = null;
+  }
+  if (stageRevealRaf2 !== null) {
+    cancelAnimationFrame(stageRevealRaf2);
+    stageRevealRaf2 = null;
+  }
+  if (stageRevealFallbackTimer !== null) {
+    window.clearTimeout(stageRevealFallbackTimer);
+    stageRevealFallbackTimer = null;
+  }
+}
+
+function applyMiniStageTransition(payload: MiniTransitionPayload | null | undefined) {
+  if (!payload || typeof payload !== "object") return;
+  const gen = Number(payload.transitionGen) || 0;
+  if (gen > 0 && gen < lastTransitionGen) return;
+  if (gen > lastTransitionGen) lastTransitionGen = gen;
+
+  if (payload.motionLevel) {
+    const lv = normalizeMiniMotionLevel(payload.motionLevel);
+    stageMotionLevel.value = lv;
+    if (isStandalone.value && typeof document !== "undefined") {
+      document.documentElement.dataset.motionLevel = lv;
+    }
+  }
+
+  if (Number.isFinite(payload.offsetX) || Number.isFinite(payload.offsetY)) {
+    const ox = Number(payload.offsetX) || 0;
+    const oy = Number(payload.offsetY) || 0;
+    stageMotionOffset.value = {
+      x: Math.max(-28, Math.min(28, Number(ox.toFixed(1)))),
+      y: Math.max(-28, Math.min(28, Number(oy.toFixed(1)))),
+    };
+  }
+
+  const phase = payload.phase;
+  const reducedSys =
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const noMotion =
+    Boolean(payload.instant) || stageMotionLevel.value === "none" || reducedSys;
+
+  clearStageRevealSchedules();
+
+  if (phase === "entering") {
+    isMiniWindowVisible.value = true;
+    hideMiniTip();
+    isVolumeOpen.value = false;
+    stageInstant.value = true;
+    stagePhase.value = noMotion ? "visible" : "entering";
+    if (!noMotion) {
+      stageRevealFallbackTimer = window.setTimeout(() => {
+        stageRevealFallbackTimer = null;
+        if (isMiniWindowVisible.value && stagePhase.value === "entering") {
+          stageInstant.value = false;
+          stagePhase.value = "visible";
+        }
+      }, 240);
+    }
+    return;
+  }
+
+  if (phase === "visible") {
+    isMiniWindowVisible.value = true;
+    if (noMotion) {
+      stageInstant.value = true;
+      stagePhase.value = "visible";
+      stageRevealRaf1 = requestAnimationFrame(() => {
+        stageRevealRaf1 = null;
+        stageInstant.value = false;
+      });
+      return;
+    }
+    if (stagePhase.value !== "entering") {
+      stageInstant.value = true;
+      stagePhase.value = "entering";
+    }
+    // 双帧锁相：先确保浏览器提交 entering 起始帧，再解除 instant 并弹性浮现
+    stageRevealRaf1 = requestAnimationFrame(() => {
+      stageRevealRaf1 = null;
+      stageRevealRaf2 = requestAnimationFrame(() => {
+        stageRevealRaf2 = null;
+        if (isMiniWindowVisible.value) {
+          stageInstant.value = false;
+          stagePhase.value = "visible";
+        }
+      });
+    });
+    return;
+  }
+
+  if (phase === "exiting") {
+    hideMiniTip();
+    isVolumeOpen.value = false;
+    isHoveringShell.value = false;
+    stageInstant.value = noMotion;
+    stagePhase.value = "exiting";
+    return;
+  }
+
+  if (phase === "hidden") {
+    hideMiniTip();
+    isVolumeOpen.value = false;
+    isHoveringShell.value = false;
+    isMiniWindowVisible.value = false;
+    stageInstant.value = true;
+    stagePhase.value = "hidden";
+  }
+}
+
 function applyDocumentThemeClasses(scheme: string, lightVar: string, darkVar: string) {
   if (!isStandalone.value || typeof document === "undefined") return;
   const root = document.documentElement;
   root.dataset.theme = scheme === "watercolor_light" ? "watercolor_light" : "abyssal_dark";
   root.dataset.lightVariant = lightVar === "nordic_oat" ? "nordic_oat" : "watercolor";
   root.dataset.darkVariant = darkVar === "velvet_nebula" ? "velvet_nebula" : "obsidian_aurora";
+  root.dataset.motionLevel = stageMotionLevel.value;
 }
 
 function requestFullSync() {
@@ -379,6 +522,18 @@ function applySyncPayload(
   }
   if (!fromStorage && typeof data.visible === "boolean") {
     isMiniWindowVisible.value = data.visible;
+    if (data.visible && stagePhase.value === "entering" && stageRevealFallbackTimer === null) {
+      stageRevealFallbackTimer = window.setTimeout(() => {
+        stageRevealFallbackTimer = null;
+        if (isMiniWindowVisible.value && stagePhase.value === "entering") {
+          stageInstant.value = false;
+          stagePhase.value = "visible";
+        }
+      }, 220);
+    }
+  }
+  if (data.motionLevel) {
+    stageMotionLevel.value = normalizeMiniMotionLevel(data.motionLevel);
   }
   remoteSnapshot.value = data;
   applyDocumentThemeClasses(
@@ -748,6 +903,8 @@ const rootDynamicStyle = computed(() => {
     "--mini-accent2-rgb": `${r2}, ${g2}, ${b2}`,
     "--mini-progress-pct": `${progressPercent.value.toFixed(2)}%`,
     "--mini-volume-pct": `${volumePercent.value}%`,
+    "--mini-stage-ox": `${stageMotionOffset.value.x}px`,
+    "--mini-stage-oy": `${stageMotionOffset.value.y}px`,
   } as Record<string, string>;
 });
 
@@ -882,7 +1039,17 @@ function sendToggleDesktopLyric() {
 }
 function sendRestoreMain() {
   if (visualMode.value !== "card") return;
+  if (isStandalone.value && (stagePhase.value === "exiting" || stagePhase.value === "hidden")) {
+    return;
+  }
   hideMiniTip();
+  isVolumeOpen.value = false;
+  isHoveringShell.value = false;
+  if (isStandalone.value && stageMotionLevel.value !== "none") {
+    clearStageRevealSchedules();
+    stageInstant.value = false;
+    stagePhase.value = "exiting";
+  }
   dispatchMiniCommand({ type: "CMD_RESTORE_MAIN" });
 }
 function onCardActionClick(action: () => void) {
@@ -1379,6 +1546,14 @@ onMounted(async () => {
       }).catch(() => null);
       if (unlistenSync) unlisteners.push(unlistenSync);
 
+      const unlistenTransition = await listen<MiniTransitionPayload>(
+        "bm-mini-player-transition",
+        (ev) => {
+          applyMiniStageTransition(ev.payload);
+        }
+      ).catch(() => null);
+      if (unlistenTransition) unlisteners.push(unlistenTransition);
+
       const unlistenVis = await listen<{ visible?: boolean }>(
         "bm-mini-player-visibility",
         (ev) => {
@@ -1387,6 +1562,9 @@ onMounted(async () => {
           syncClockLoopDemand();
           if (vis) {
             scheduleHandshakeWaves();
+            if (stagePhase.value === "hidden" || stagePhase.value === "exiting") {
+              applyMiniStageTransition({ phase: "entering" });
+            }
             if (dockEdge.value !== "none" && !isIslandExpanded.value) {
               invoke("snap_mini_player_to_edge_cmd", { edge: dockEdge.value }).catch(() => {});
             } else if (dockEdge.value !== "none" && isIslandExpanded.value) {
@@ -1395,6 +1573,9 @@ onMounted(async () => {
           } else {
             isHoveringShell.value = false;
             hideMiniTip();
+            if (stagePhase.value === "visible") {
+              applyMiniStageTransition({ phase: "exiting" });
+            }
           }
         }
       ).catch(() => null);
@@ -1435,6 +1616,7 @@ onBeforeUnmount(() => {
     miniTypoChannel = null;
   }
   stopClockLoop();
+  clearStageRevealSchedules();
   if (collapseTimer !== null) window.clearTimeout(collapseTimer);
   if (volumeHoverCloseTimer !== null) window.clearTimeout(volumeHoverCloseTimer);
   if (optimisticTimer !== null) window.clearTimeout(optimisticTimer);
@@ -1475,12 +1657,15 @@ onBeforeUnmount(() => {
       `dark-variant-${darkThemeVariant}`,
       `dock-${dockEdge}`,
       `mode-${visualMode}`,
+      `stage-phase-${stagePhase}`,
+      `motion-${stageMotionLevel}`,
       {
         'is-standalone': isStandalone,
         'is-preview': !isStandalone,
         'is-expanded': isIslandExpanded,
         'is-dragging': isPointerDragging,
         'is-playing': isPlaying,
+        'is-stage-instant': stageInstant,
       },
     ]"
     :style="rootDynamicStyle"
@@ -2056,6 +2241,108 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   padding: 0;
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+  transform-origin: center center;
+  will-change: transform, opacity;
+  /* 弹簧曲线仅用于 transform，opacity 独立使用单调平滑曲线，杜绝透明度闪烁 */
+  transition:
+    transform 340ms var(--ease-spring-tactile, cubic-bezier(0.22, 1.18, 0.36, 1)),
+    opacity 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 独立窗口级空间势能入场起势态（与主窗口 GPU 收缩舞台 58ms 甜点衔接） */
+.bm-mini-stage.is-standalone.stage-phase-entering .bm-mini-shell-anchor,
+.bm-mini-stage.is-standalone.stage-phase-hidden .bm-mini-shell-anchor {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 退出小窗释能收束态（130ms 利落滑向主窗口方向淡出，与主窗口 GPU 展开并行） */
+.bm-mini-stage.is-standalone.stage-phase-exiting .bm-mini-shell-anchor {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 115ms cubic-bezier(0.36, 0, 0.8, 1);
+}
+
+/* 空间位移与缩放严格在 prefers-reduced-motion: no-preference 下启用，无障碍减弱动效自动收敛为纯柔滑淡入淡出 */
+@media (prefers-reduced-motion: no-preference) {
+  .bm-mini-stage.is-standalone.stage-phase-entering .bm-mini-shell-anchor,
+  .bm-mini-stage.is-standalone.stage-phase-hidden .bm-mini-shell-anchor {
+    transform: translate3d(var(--mini-stage-ox, 0px), var(--mini-stage-oy, -14px), 0) scale(0.84);
+  }
+
+  .bm-mini-stage.is-standalone.dock-top.mode-pill-h.stage-phase-entering .bm-mini-shell-anchor,
+  .bm-mini-stage.is-standalone.dock-top.mode-pill-h.stage-phase-hidden .bm-mini-shell-anchor {
+    transform: translate3d(calc(var(--mini-stage-ox, 0px) * 0.35), -22px, 0) scale(0.88);
+  }
+
+  .bm-mini-stage.is-standalone.dock-bottom.mode-pill-h.stage-phase-entering .bm-mini-shell-anchor,
+  .bm-mini-stage.is-standalone.dock-bottom.mode-pill-h.stage-phase-hidden .bm-mini-shell-anchor {
+    transform: translate3d(calc(var(--mini-stage-ox, 0px) * 0.35), 22px, 0) scale(0.88);
+  }
+
+  .bm-mini-stage.is-standalone.dock-left.mode-ear-v.stage-phase-entering .bm-mini-shell-anchor,
+  .bm-mini-stage.is-standalone.dock-left.mode-ear-v.stage-phase-hidden .bm-mini-shell-anchor {
+    transform: translate3d(-22px, calc(var(--mini-stage-oy, 0px) * 0.35), 0) scale(0.86);
+  }
+
+  .bm-mini-stage.is-standalone.dock-right.mode-ear-v.stage-phase-entering .bm-mini-shell-anchor,
+  .bm-mini-stage.is-standalone.dock-right.mode-ear-v.stage-phase-hidden .bm-mini-shell-anchor {
+    transform: translate3d(22px, calc(var(--mini-stage-oy, 0px) * 0.35), 0) scale(0.86);
+  }
+
+  .bm-mini-stage.is-standalone.stage-phase-exiting .bm-mini-shell-anchor {
+    transform: translate3d(
+        calc(var(--mini-stage-ox, 0px) * 0.72),
+        calc(var(--mini-stage-oy, 12px) * 0.72),
+        0
+      )
+      scale(0.87);
+    transition:
+      transform 130ms cubic-bezier(0.36, 0, 0.72, 1),
+      opacity 115ms cubic-bezier(0.36, 0, 0.8, 1);
+  }
+
+  .bm-mini-stage.is-standalone.dock-top.mode-pill-h.stage-phase-exiting .bm-mini-shell-anchor {
+    transform: translate3d(0, -16px, 0) scale(0.9);
+  }
+
+  .bm-mini-stage.is-standalone.dock-bottom.mode-pill-h.stage-phase-exiting .bm-mini-shell-anchor {
+    transform: translate3d(0, 16px, 0) scale(0.9);
+  }
+
+  .bm-mini-stage.is-standalone.dock-left.mode-ear-v.stage-phase-exiting .bm-mini-shell-anchor {
+    transform: translate3d(-16px, 0, 0) scale(0.9);
+  }
+
+  .bm-mini-stage.is-standalone.dock-right.mode-ear-v.stage-phase-exiting .bm-mini-shell-anchor {
+    transform: translate3d(16px, 0, 0) scale(0.9);
+  }
+}
+
+/* standard 动效档位：克制收敛版过渡 */
+.bm-mini-stage.is-standalone.motion-standard .bm-mini-shell-anchor {
+  transition:
+    transform 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 150ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 锁相首帧或 none 动效档位：零过渡直切，始终保证最终态完全可见 */
+.bm-mini-stage.is-standalone.is-stage-instant .bm-mini-shell-anchor,
+.bm-mini-stage.is-standalone.motion-none .bm-mini-shell-anchor {
+  transition: none !important;
+}
+
+.bm-mini-stage.is-standalone.motion-none.stage-phase-visible .bm-mini-shell-anchor {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bm-mini-stage.is-standalone .bm-mini-shell-anchor {
+    transition: opacity 110ms ease-out;
+  }
 }
 
 .bm-mini-stage.is-preview .bm-mini-shell-anchor {

@@ -201,6 +201,7 @@ import {
   loadPersistedUiDensity,
   normalizeMotionLevel,
   normalizeUiDensity,
+  resolveEffectiveMotionLevel,
 } from "../utils/motionRuntime";
 import { createLibraryAndDetailModule } from "./modules/useLibraryAndDetailModule";
 import { createSearchModule } from "./modules/useSearchModule";
@@ -721,12 +722,33 @@ export const useAppStore = defineStore("breezeApp", () => {
   const uiDensity = ref<UiDensityMode>(loadPersistedUiDensity());
   applyMotionLevelToDocument(motionLevel.value);
   applyUiDensityToDocument(uiDensity.value);
+  if (
+    !isStandaloneSubWindow &&
+    typeof window !== "undefined" &&
+    ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+  ) {
+    void kugouClient
+      .syncMotionLevel(resolveEffectiveMotionLevel(motionLevel.value))
+      .catch(() => {});
+  }
 
   function setMotionLevel(level: MotionLevel) {
     const next = normalizeMotionLevel(level);
     motionLevel.value = next;
     applyMotionLevelToDocument(next);
     broadcastMotionAndDensity(next, uiDensity.value);
+    if (
+      !isStandaloneSubWindow &&
+      typeof window !== "undefined" &&
+      ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+    ) {
+      void kugouClient
+        .syncMotionLevel(resolveEffectiveMotionLevel(next))
+        .catch(() => {});
+    }
+    if (isMiniPlayerMode.value) {
+      broadcastMiniPlayerState();
+    }
   }
 
   function setUiDensity(density: UiDensityMode) {
@@ -2299,6 +2321,7 @@ export const useAppStore = defineStore("breezeApp", () => {
         resolvedColorScheme: String(resolvedColorScheme.value || "abyssal_dark"),
         lightThemeVariant: String(lightThemeVariant.value || "watercolor"),
         darkThemeVariant: String(darkThemeVariant.value || "obsidian_aurora"),
+        motionLevel: resolveEffectiveMotionLevel(motionLevel.value),
         coverAccentPrimary: String(pal.dominantAccent || "#7c6af6"),
         coverAccentSecondary: String(pal.secondaryAccent || "#2dd4bf"),
         song: currentSong.value
@@ -3146,20 +3169,33 @@ export const useAppStore = defineStore("breezeApp", () => {
     }
   }
 
+  let miniOverlayCleanupTimer: ReturnType<typeof setTimeout> | null = null;
+
   async function toggleMiniPlayerMode(forceState?: boolean) {
     const next = forceState !== undefined ? forceState : !isMiniPlayerMode.value;
+    const effectiveMotion = resolveEffectiveMotionLevel(motionLevel.value);
+    if (miniOverlayCleanupTimer !== null) {
+      clearTimeout(miniOverlayCleanupTimer);
+      miniOverlayCleanupTimer = null;
+    }
     isMiniPlayerMode.value = next;
     if (next) {
-      isNowPlayingOpen.value = false;
-      isQueueOpen.value = false;
-      isSearchPaletteOpen.value = false;
+      // 先广播最新播放态/主题/封面双色，再交由原生 GPU 空间舞台接管当前画面；
+      // 绝不在截帧前关闭浮窗，避免切换瞬间先闪跳再收束。
       broadcastMiniPlayerState();
       broadcastMiniPlayerPosition();
     }
-    await kugouClient.setMiniPlayerMode(next).catch(() => {});
+    await kugouClient.setMiniPlayerMode(next, effectiveMotion).catch(() => {});
     if (next) {
       broadcastMiniPlayerState();
-      setTimeout(() => broadcastMiniPlayerState(), 100);
+      miniOverlayCleanupTimer = setTimeout(() => {
+        miniOverlayCleanupTimer = null;
+        if (isMiniPlayerMode.value) {
+          isQueueOpen.value = false;
+          isSearchPaletteOpen.value = false;
+        }
+      }, effectiveMotion === "none" ? 0 : 150);
+      setTimeout(() => broadcastMiniPlayerState(), 110);
       setTimeout(() => broadcastMiniPlayerState(), 320);
     } else if (!hasTauriBridge) {
       broadcastMiniPlayerState(true);

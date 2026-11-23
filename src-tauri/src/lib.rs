@@ -1,4 +1,6 @@
 pub mod kugou;
+pub mod single_instance;
+pub mod window_transition;
 
 use kugou::api::KugouApiService;
 use kugou::fonts::{CustomFontBinaryPayload, CustomFontRecord, InstalledFontsPayload};
@@ -221,8 +223,18 @@ pub struct AppState {
     pub mini_snap_anim_gen: Arc<AtomicU64>,
     /// 标记 Mini 灵动岛当前是否正为同屏全屏独占应用（全屏视频/游戏）静默礼让
     pub mini_yielded_for_fullscreen: Arc<AtomicBool>,
-    /// 记录主窗口隐藏（进入 Mini 模式或最小化至托盘）前是否处于最大化状态，防止恢复时 Win32/WebView2 错位出现底部白边
+    /// 标记 Mini 独立子窗口前端已完成首次挂载就绪（预热后进入小窗 0ms 冷启动延迟）
+    pub mini_player_ready: Arc<AtomicBool>,
+    /// 标记 Mini 独立子窗口当前是否处于短暂（~128ms）退场淡出窗口期（期间不触发幽灵窗强杀，结束后必校验彻底隐藏）
+    pub mini_exiting_anim: Arc<AtomicBool>,
+    /// 记录主窗口隐藏（进入 Mini 模式或最小化至托盘）前是否处于最大化状态
     pub main_was_maximized: Arc<AtomicBool>,
+    /// 主窗口 <-> Mini / 托盘空间过渡动画递增世代令牌（防快速连按竞态与状态撕裂）
+    pub main_transition_gen: Arc<AtomicU64>,
+    /// 同步自前端的动效档位（"best" | "standard" | "none"）
+    pub motion_level: Arc<std::sync::Mutex<String>>,
+    /// 同步自前端的封面双主色 RGB（用于跨主题兜底卡面无缝流光过渡）
+    pub cover_accent_rgb: Arc<std::sync::Mutex<((u8, u8, u8), (u8, u8, u8))>>,
     /// 记录主窗口当前是否已将 WebView2 内存目标切换为 LOW，避免重复 COM 调用
     pub main_low_memory_active: Arc<AtomicBool>,
     /// Win32 全局热键与穿透检测线程 ID，用于在状态改变时零延迟唤醒 MsgWaitForMultipleObjectsEx
@@ -400,6 +412,7 @@ pub(crate) struct PhysRect {
     pub bottom: i32,
 }
 
+#[cfg(test)]
 impl PhysRect {
     pub(crate) fn width(self) -> i32 {
         (self.right - self.left).max(0)
@@ -462,6 +475,7 @@ pub(crate) fn compute_mini_dock_or_clamped_pos(
 }
 
 /// 纯几何辅助：检测最大化无边框主窗口的客户区是否偏离显示器工作区（允许自动隐藏任务栏 1px 容差）或 WebView2 Bounds 未铺满客户区
+#[cfg(test)]
 pub(crate) fn maximized_client_needs_reconcile(
     client_screen: PhysRect,
     work_area: PhysRect,
@@ -525,8 +539,13 @@ static MAIN_BG_COLORREF: std::sync::atomic::AtomicU32 =
 #[cfg(target_os = "windows")]
 const MAIN_NC_SUBCLASS_ID: usize = 0x424D_4E43;
 
-/// 使用当前主题背景色精确覆盖主窗口非客户区（先 ExcludeClipRect 保护客户区 WebView2），
-/// 彻底消灭 Windows 内核在「最大化隐藏 -> 重新显示」或自动隐藏任务栏 1px 留边时绘制的纯白非客户区底边。
+/// 记录主窗口上一次非客户区/尺寸消息是否处于最大化态，用于「最大化 -> 还原默认窗口」瞬间主动触发一次原生 DWM 边框重绘
+#[cfg(target_os = "windows")]
+static MAIN_LAST_ZOOMED_NC: AtomicBool = AtomicBool::new(false);
+
+/// 仅在主窗口处于最大化态（IsZoomed != 0）时使用当前主题背景色覆盖非客户区（先 ExcludeClipRect 保护客户区 WebView2），
+/// 彻底消灭最大化恢复或自动隐藏任务栏 1px 留边时的纯白底边；
+/// 严禁对非最大化（默认窗口）执行 GDI 非客户区涂色，完整保留 Windows 11 原生 DWM 圆角与透明缩放阴影边，杜绝左右/底边出现异常色带！
 #[cfg(target_os = "windows")]
 fn paint_main_window_non_client_area(hwnd: isize) {
     if hwnd == 0 {
@@ -548,6 +567,7 @@ fn paint_main_window_non_client_area(hwnd: isize) {
     }
     #[link(name = "user32")]
     extern "system" {
+        fn IsZoomed(hwnd: isize) -> i32;
         fn GetWindowDC(hwnd: isize) -> isize;
         fn ReleaseDC(hwnd: isize, hdc: isize) -> i32;
         fn GetWindowRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
@@ -563,6 +583,11 @@ fn paint_main_window_non_client_area(hwnd: isize) {
     }
 
     unsafe {
+        // 核心铁律：非最大化默认窗口的 left/right/bottom 存在 8~12px DWM 透明阴影与缩放热区，
+        // 绝不能用 GDI FillRect 涂色覆盖！
+        if IsZoomed(hwnd) == 0 {
+            return;
+        }
         let hdc = GetWindowDC(hwnd);
         if hdc == 0 {
             return;
@@ -628,8 +653,15 @@ unsafe extern "system" fn main_window_nc_subclass_proc(
     }
     #[link(name = "user32")]
     extern "system" {
+        fn IsZoomed(hwnd: isize) -> i32;
         fn GetClientRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
         fn FillRect(hdc: isize, lprc: *const WinRect, hbr: isize) -> i32;
+        fn RedrawWindow(
+            hwnd: isize,
+            lprc_update: *const WinRect,
+            hrgn_update: isize,
+            flags: u32,
+        ) -> i32;
     }
     #[link(name = "gdi32")]
     extern "system" {
@@ -644,16 +676,30 @@ unsafe extern "system" fn main_window_nc_subclass_proc(
     const WM_NCDESTROY: u32 = 0x0082;
     const WM_NCPAINT: u32 = 0x0085;
     const WM_NCACTIVATE: u32 = 0x0086;
+    const RDW_INVALIDATE: u32 = 0x0001;
+    const RDW_FRAME: u32 = 0x0400;
 
     match msg {
         WM_NCPAINT => {
-            paint_main_window_non_client_area(hwnd);
-            return 0;
+            // 核心铁律（Windows 11 DWM 实测验证）：
+            // 无论窗口当前是否最大化，WM_NCPAINT 都必须先原样透传给 DefSubclassProc / DefWindowProcW！
+            // 一旦在任何状态（哪怕仅最大化态）直接 return 0 吞掉 WM_NCPAINT，Win32/DWM 会永久撤销该 HWND 的
+            // 透明阴影扩展帧（DWMWA_EXTENDED_FRAME_BOUNDS 从 ~7px 归零），导致随后还原为默认窗口大小时
+            // 左右/底边永久退化为 Windows 7 Aero Basic 蓝灰粗边框！
+            // 先透传让 DWM 维持完整帧状态，再仅于最大化态补刷主题底色覆盖 1px 自动隐藏任务栏底边，二者兼得。
+            let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+            if IsZoomed(hwnd) != 0 {
+                paint_main_window_non_client_area(hwnd);
+            }
+            return res;
         }
         WM_NCACTIVATE => {
-            // 传入 lparam = -1 阻止 DefWindowProcW 重绘经典白色非客户区边框，同时完整保留 tao 对 wparam 焦点激活态的追踪
-            let res = DefSubclassProc(hwnd, msg, wparam, -1);
-            paint_main_window_non_client_area(hwnd);
+            // 始终原样透传 (wparam, lparam) 给 DefSubclassProc 维护原生 DWM 焦点与帧状态（绝不篡改 lparam = -1），
+            // 最大化态返回后再补刷主题背景色杜绝底边漏白。
+            let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+            if IsZoomed(hwnd) != 0 {
+                paint_main_window_non_client_area(hwnd);
+            }
             return res;
         }
         WM_ERASEBKGND => {
@@ -672,10 +718,23 @@ unsafe extern "system" fn main_window_nc_subclass_proc(
         }
         WM_SHOWWINDOW | WM_WINDOWPOSCHANGED | WM_SIZE => {
             let res = DefSubclassProc(hwnd, msg, wparam, lparam);
-            paint_main_window_non_client_area(hwnd);
+            let zoomed_now = IsZoomed(hwnd) != 0;
+            let was_zoomed = MAIN_LAST_ZOOMED_NC.swap(zoomed_now, Ordering::Relaxed);
+            if zoomed_now {
+                paint_main_window_non_client_area(hwnd);
+            } else if was_zoomed {
+                // 从最大化切回默认窗口尺寸的瞬间，主动刷新一次非客户区框架，确保 DWM 清除旧缓存、呈现无瑕圆角与柔影
+                let _ = RedrawWindow(
+                    hwnd,
+                    std::ptr::null(),
+                    0,
+                    RDW_FRAME | RDW_INVALIDATE,
+                );
+            }
             return res;
         }
         WM_NCDESTROY => {
+            MAIN_LAST_ZOOMED_NC.store(false, Ordering::Relaxed);
             let _ = RemoveWindowSubclass(
                 hwnd,
                 Some(main_window_nc_subclass_proc),
@@ -766,16 +825,13 @@ fn is_hwnd_zoomed(win: &tauri::WebviewWindow) -> bool {
     extern "system" {
         fn IsZoomed(hwnd: isize) -> i32;
     }
-    if win.is_maximized().unwrap_or(false) {
-        return true;
-    }
     if let Ok(raw_hwnd) = win.hwnd() {
         let hwnd = raw_hwnd.0 as isize;
         if hwnd != 0 {
             return unsafe { IsZoomed(hwnd) != 0 };
         }
     }
-    false
+    win.is_maximized().unwrap_or(false)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -816,321 +872,615 @@ fn apply_main_window_bg_color(win: &tauri::WebviewWindow, r: u8, g: u8, b: u8) {
     }
 }
 
-/// 强制核验并修复 Windows 无边框主窗口最大化后的 DWM 客户区与 WebView2 Bounds，
-/// 彻底根治「最大化 -> Mini -> 返回主窗口」后因 tao 异步 show() 与 WM_NCCALCSIZE 错位导致的底部白线。
-#[cfg(target_os = "windows")]
-fn reconcile_main_window_frame_and_bounds(
-    win: &tauri::WebviewWindow,
-    expect_maximized: bool,
-    allow_cycle_reset: bool,
-    force_visible_frame_sync: bool,
-) {
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct WinPoint {
-        x: i32,
-        y: i32,
+fn parse_hex_color_rgb(hex: &str) -> Option<(u8, u8, u8)> {
+    let clean = hex.trim().trim_start_matches('#');
+    if clean.len() == 6 {
+        let r = u8::from_str_radix(&clean[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&clean[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&clean[4..6], 16).ok()?;
+        return Some((r, g, b));
     }
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct WinRect {
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
+    if clean.len() == 3 {
+        let r = u8::from_str_radix(&clean[0..1], 16).ok()? * 17;
+        let g = u8::from_str_radix(&clean[1..2], 16).ok()? * 17;
+        let b = u8::from_str_radix(&clean[2..3], 16).ok()? * 17;
+        return Some((r, g, b));
     }
-    #[repr(C)]
-    #[derive(Default)]
-    struct WinWindowPlacement {
-        length: u32,
-        flags: u32,
-        show_cmd: u32,
-        pt_min_position: WinPoint,
-        pt_max_position: WinPoint,
-        rc_normal_position: WinRect,
-    }
-    #[repr(C)]
-    #[derive(Default)]
-    struct WinMonitorInfo {
-        cb_size: u32,
-        rc_monitor: WinRect,
-        rc_work: WinRect,
-        dw_flags: u32,
-    }
+    None
+}
 
-    #[link(name = "user32")]
-    extern "system" {
-        fn ShowWindow(hwnd: isize, n_cmd_show: i32) -> i32;
-        fn SetWindowPos(
-            hwnd: isize,
-            hwnd_insert_after: isize,
-            x: i32,
-            y: i32,
-            cx: i32,
-            cy: i32,
-            u_flags: u32,
-        ) -> i32;
-        fn GetClientRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
-        fn ClientToScreen(hwnd: isize, lp_point: *mut WinPoint) -> i32;
-        fn GetWindowPlacement(hwnd: isize, lpwndpl: *mut WinWindowPlacement) -> i32;
-        fn MonitorFromWindow(hwnd: isize, dw_flags: u32) -> isize;
-        fn GetMonitorInfoW(h_monitor: isize, lpmi: *mut WinMonitorInfo) -> i32;
-        fn SendMessageW(hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
-        fn RedrawWindow(
-            hwnd: isize,
-            lprc_update: *const WinRect,
-            hrgn_update: isize,
-            flags: u32,
-        ) -> i32;
+fn current_motion_style(state: &AppState, override_level: Option<&str>) -> window_transition::TransitionMotionStyle {
+    if let Some(raw) = override_level {
+        return window_transition::TransitionMotionStyle::from_level_str(raw);
     }
+    let raw = state
+        .motion_level
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_else(|| "best".to_string());
+    window_transition::TransitionMotionStyle::from_level_str(&raw)
+}
 
-    const SW_SHOWMAXIMIZED: i32 = 3;
-    const SW_RESTORE: i32 = 9;
-    const MONITOR_DEFAULTTONEAREST: u32 = 2;
-    const WM_SETREDRAW: u32 = 0x000B;
-    const SWP_NOSIZE: u32 = 0x0001;
-    const SWP_NOMOVE: u32 = 0x0002;
-    const SWP_NOZORDER: u32 = 0x0004;
-    const SWP_NOACTIVATE: u32 = 0x0010;
-    const SWP_FRAMECHANGED: u32 = 0x0020;
-    const RDW_INVALIDATE: u32 = 0x0001;
-    const RDW_ERASE: u32 = 0x0004;
-    const RDW_FRAME: u32 = 0x0400;
-    const RDW_ALLCHILDREN: u32 = 0x0080;
-    const RDW_UPDATENOW: u32 = 0x0100;
+fn current_motion_level_str(state: &AppState, override_level: Option<&str>) -> String {
+    match current_motion_style(state, override_level) {
+        window_transition::TransitionMotionStyle::None => "none".to_string(),
+        window_transition::TransitionMotionStyle::Standard => "standard".to_string(),
+        window_transition::TransitionMotionStyle::Rich => "best".to_string(),
+    }
+}
 
-    apply_main_window_zero_border_dwm(win);
-
-    let Ok(raw_hwnd) = win.hwnd() else {
-        return;
+/// 计算 Mini 小窗当前肉眼可见实体（自由悬浮 436x184 卡片 / 上下 332x34 灵动岛 / 左右 46x96 黑胶耳）的精确物理屏幕矩形
+fn compute_mini_visual_entity_rect(
+    mini_win: &tauri::WebviewWindow,
+    edge: &str,
+    expanded: bool,
+) -> Option<window_transition::RectPx> {
+    let (Ok(pos), Ok(size)) = (mini_win.outer_position(), mini_win.outer_size()) else {
+        return None;
     };
-    let hwnd = raw_hwnd.0 as isize;
-    if hwnd == 0 {
-        return;
+    let sf = mini_win.scale_factor().unwrap_or(1.0).max(1.0);
+    let wx = pos.x as f64;
+    let wy = pos.y as f64;
+    let ww = size.width as f64;
+    let wh = size.height as f64;
+
+    if expanded || edge == "none" {
+        let cw = 436.0 * sf;
+        let ch = 184.0 * sf;
+        let left = (wx + (ww - cw) * 0.5).round() as i32;
+        let top = (wy + (wh - ch) * 0.5).round() as i32;
+        return Some(window_transition::RectPx {
+            left,
+            top,
+            right: left + cw.round() as i32,
+            bottom: top + ch.round() as i32,
+        });
     }
 
-    let mut need_frame_reset = false;
-    let mut need_maximize_only = false;
+    match edge {
+        "top" => {
+            let pw = 332.0 * sf;
+            let ph = 34.0 * sf;
+            let left = (wx + (ww - pw) * 0.5).round() as i32;
+            let top = wy.round() as i32;
+            Some(window_transition::RectPx {
+                left,
+                top,
+                right: left + pw.round() as i32,
+                bottom: top + ph.round() as i32,
+            })
+        }
+        "bottom" => {
+            let pw = 332.0 * sf;
+            let ph = 34.0 * sf;
+            let left = (wx + (ww - pw) * 0.5).round() as i32;
+            let bottom = (wy + wh).round() as i32;
+            Some(window_transition::RectPx {
+                left,
+                top: bottom - ph.round() as i32,
+                right: left + pw.round() as i32,
+                bottom,
+            })
+        }
+        "left" => {
+            let pw = 46.0 * sf;
+            let ph = 96.0 * sf;
+            let left = (wx + 4.0 * sf).round() as i32;
+            let top = (wy + (wh - ph) * 0.5).round() as i32;
+            Some(window_transition::RectPx {
+                left,
+                top,
+                right: left + pw.round() as i32,
+                bottom: top + ph.round() as i32,
+            })
+        }
+        "right" => {
+            let pw = 46.0 * sf;
+            let ph = 96.0 * sf;
+            let right = (wx + ww - 4.0 * sf).round() as i32;
+            let top = (wy + (wh - ph) * 0.5).round() as i32;
+            Some(window_transition::RectPx {
+                left: right - pw.round() as i32,
+                top,
+                right,
+                bottom: top + ph.round() as i32,
+            })
+        }
+        _ => None,
+    }
+}
 
-    if expect_maximized {
-        unsafe {
-            let mut wp = WinWindowPlacement {
-                length: std::mem::size_of::<WinWindowPlacement>() as u32,
-                ..Default::default()
-            };
-            let show_cmd = if GetWindowPlacement(hwnd, &mut wp) != 0 {
-                wp.show_cmd
-            } else {
-                0
-            };
+/// 原子切换 Mini 透明小窗的点击穿透态：
+/// Windows 下直接操作 GWL_EXSTYLE（保 WS_EX_TOOLWINDOW、清 WS_EX_APPWINDOW），绝不走 tao::set_ignore_cursor_events
+/// 以彻底避免 tao apply_diff 篡改可见态（误调用 ShowWindow(SW_HIDE)）或抢夺前台焦点。
+fn set_mini_click_through(win: &tauri::WebviewWindow, ignore: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(raw) = win.hwnd() {
+            window_transition::win_impl::set_overlay_click_through_raw(raw.0 as isize, ignore);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = win.set_ignore_cursor_events(ignore);
+    }
+}
 
-            let mut rc_client = WinRect::default();
-            let client_ok = GetClientRect(hwnd, &mut rc_client) != 0
-                && rc_client.right > rc_client.left
-                && rc_client.bottom > rc_client.top;
+/// 必须在主线程调用：安全显示 Mini 独立悬浮小窗，同步 tao WindowFlags::VISIBLE = true，
+/// 并立即加固 WS_EX_TOOLWINDOW + 零边框零阴影零圆角 + 目标点击穿透态 + HWND_TOPMOST。
+fn show_mini_player_window_safely(win: &tauri::WebviewWindow, click_through: bool) {
+    set_subwindow_suspended(win, false);
+    set_webview_memory_target_low(win, false);
+    set_mini_click_through(win, click_through);
+    let _ = win.show();
+    enforce_transparent_overlay_window_style(win);
+    set_mini_click_through(win, click_through);
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(raw) = win.hwnd() {
+            window_transition::win_impl::show_overlay_window_native(raw.0 as isize, click_through);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = win.set_always_on_top(true);
+    }
+}
 
-            let mut tl = WinPoint {
-                x: rc_client.left,
-                y: rc_client.top,
-            };
-            let mut br = WinPoint {
-                x: rc_client.right,
-                y: rc_client.bottom,
-            };
-            let mapped_ok =
-                client_ok && ClientToScreen(hwnd, &mut tl) != 0 && ClientToScreen(hwnd, &mut br) != 0;
+/// 必须在主线程调用：仅执行底层 HWND 隐藏（开启点击穿透 + tao win.hide() + Win32 强制 SW_HIDE + 去置顶），不触发挂起定时器
+fn hide_mini_player_hwnd_only(win: &tauri::WebviewWindow) {
+    set_mini_click_through(win, true);
+    let _ = win.hide();
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(raw) = win.hwnd() {
+            window_transition::win_impl::hide_overlay_window_native(raw.0 as isize);
+        }
+    }
+}
 
-            let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-            let mut mi = WinMonitorInfo {
-                cb_size: std::mem::size_of::<WinMonitorInfo>() as u32,
-                ..Default::default()
-            };
-            let mon_ok = hmon != 0 && GetMonitorInfoW(hmon, &mut mi) != 0;
+/// 必须在主线程调用：四重防线彻底隐藏 Mini 独立悬浮小窗，杜绝任何情况下残留透明遮挡幽灵窗：
+/// 1. 立即开启点击穿透（WS_EX_TRANSPARENT | WS_EX_LAYERED）
+/// 2. 同步 tao win.hide() 更新 WindowFlags::VISIBLE = false
+/// 3. 原生 Win32 强制 ShowWindow(SW_HIDE) + SetWindowPos(HWND_NOTOPMOST, SWP_HIDEWINDOW)（绝不受 tao 缓存漂移影响）
+/// 4. 可选重置前端阶段为 hidden 并延迟挂起 WebView2 省内存
+fn hide_mini_player_window_safely(
+    app: &AppHandle,
+    win: &tauri::WebviewWindow,
+    vis_flag: Arc<AtomicBool>,
+    emit_hidden: bool,
+) {
+    hide_mini_player_hwnd_only(win);
+    if emit_hidden {
+        let _ = app.emit_to(
+            "mini_player",
+            "bm-mini-player-transition",
+            serde_json::json!({
+                "phase": "hidden",
+                "instant": true,
+            }),
+        );
+    }
+    schedule_subwindow_suspend(app, "mini_player", vis_flag);
+}
 
-            if show_cmd != SW_SHOWMAXIMIZED as u32 {
-                need_maximize_only = true;
+/// 纯原生安全隐藏主窗口（进入小窗或收起至托盘），彻底避开 tao::set_visible 的最大化白边陷阱，并同步清理任何残留 GPU 过渡舞台
+fn hide_main_window_cleanly(win: &tauri::WebviewWindow, state: &AppState) {
+    state.main_transition_gen.fetch_add(1, Ordering::AcqRel);
+    #[cfg(target_os = "windows")]
+    {
+        let app = win.app_handle().clone();
+        let max_flag = state.main_was_maximized.clone();
+        let low_mem = state.main_low_memory_active.clone();
+        let app_ui = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            window_transition::win_impl::cancel_and_hide_gpu_stage_on_main_thread();
+            if let Some(main_win) = app_ui.get_webview_window("main") {
+                if let Ok(raw) = main_win.hwnd() {
+                    let hwnd = raw.0 as isize;
+                    if window_transition::win_impl::is_hwnd_visible_and_not_minimized(hwnd)
+                        && !window_transition::win_impl::is_main_cloaked()
+                    {
+                        let is_max = window_transition::win_impl::is_hwnd_maximized_native(hwnd);
+                        max_flag.store(is_max, Ordering::Relaxed);
+                    }
+                }
+                sync_main_low_memory_state(&main_win, &low_mem, true);
+                window_transition::win_impl::hide_main_window_native(&main_win);
             }
-            if mapped_ok && mon_ok {
-                let client_screen = PhysRect {
-                    left: tl.x,
-                    top: tl.y,
-                    right: br.x,
-                    bottom: br.y,
-                };
-                let work_area = PhysRect {
-                    left: mi.rc_work.left,
-                    top: mi.rc_work.top,
-                    right: mi.rc_work.right,
-                    bottom: mi.rc_work.bottom,
-                };
-                if maximized_client_needs_reconcile(client_screen, work_area, None) {
-                    need_frame_reset = true;
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let is_max = is_hwnd_zoomed(win);
+        state.main_was_maximized.store(is_max, Ordering::Relaxed);
+        sync_main_low_memory_state(win, &state.main_low_memory_active, true);
+        let _ = win.hide();
+    }
+}
+
+/// 统一的主窗口恢复与 GPU 空间展开编排：
+/// - 无论是最大化还是默认窗口、无论来自 Mini 小窗还是系统托盘，均走同一套零白线、零跳变管线。
+/// - 最大化主窗口直接在 DWMWA_CLOAK 隐身斗篷下一步 SW_SHOWMAXIMIZED 恢复并校准客户区与 WebView2 Bounds，
+///   再由 DirectComposition GPU 舞台从 Mini 方向平滑圆角消融舒展铺满全屏并 65ms 丝滑无痕揭幕，
+///   彻底杜绝「先变回默认窗口大小再快速最大化」与底部白线！
+/// - 退出 Mini 第 0ms 立即对 Mini 施加点击穿透，退场完成后通过四重防线强制原生 SW_HIDE + 去置顶，彻底杜绝透明遮挡幽灵窗。
+fn orchestrate_restore_main_window(app: &AppHandle, state: &AppState, from_mini: bool) {
+    let gen = state.main_transition_gen.fetch_add(1, Ordering::AcqRel) + 1;
+    let was_mini_visible = state.mini_player_visible.swap(false, Ordering::AcqRel);
+    let effective_from_mini = from_mini || was_mini_visible;
+    state
+        .mini_yielded_for_fullscreen
+        .store(false, Ordering::Relaxed);
+    state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed);
+    wake_hotkey_thread(&state.hotkey_thread_id);
+
+    let motion_style = current_motion_style(state, None);
+    let motion_str = current_motion_level_str(state, None);
+    let app_for_main = app.clone();
+    let gen_ref = state.main_transition_gen.clone();
+    let mini_vis_ref = state.mini_player_visible.clone();
+    let mini_exiting_ref = state.mini_exiting_anim.clone();
+    let hotkey_tid_ref = state.hotkey_thread_id.clone();
+    let low_mem_ref = state.main_low_memory_active.clone();
+    let max_flag_ref = state.main_was_maximized.clone();
+    let dock_edge = state
+        .mini_player_dock_edge
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_else(|| "none".to_string());
+    let mini_expanded = state.mini_player_expanded.load(Ordering::Relaxed);
+    let (accent1_rgb, accent2_rgb) = state
+        .cover_accent_rgb
+        .lock()
+        .ok()
+        .map(|g| *g)
+        .unwrap_or(((94, 106, 210), (45, 212, 191)));
+
+    let _ = app.run_on_main_thread(move || {
+        if gen_ref.load(Ordering::Acquire) != gen {
+            return;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use window_transition::win_impl as wt;
+
+            // 先清理可能残留在屏上的旧过渡舞台
+            wt::cancel_and_hide_gpu_stage_on_main_thread();
+
+            let mini_win_opt = app_for_main.get_webview_window("mini_player");
+
+            let Some(main_win) = app_for_main.get_webview_window("main") else {
+                if let Some(ref mw) = mini_win_opt {
+                    if !mini_vis_ref.load(Ordering::Acquire) {
+                        mini_exiting_ref.store(false, Ordering::Release);
+                        hide_mini_player_window_safely(&app_for_main, mw, mini_vis_ref.clone(), true);
+                    }
+                }
+                return;
+            };
+            let Ok(raw_main) = main_win.hwnd() else {
+                return;
+            };
+            let main_hwnd = raw_main.0 as isize;
+
+            // 若主窗口当前已经完全可见且未最小化，并且并非从小窗退回，则确保无残留 Mini 幽灵窗后直接置前聚焦
+            if !effective_from_mini && wt::is_hwnd_visible_and_not_minimized(main_hwnd) {
+                if !mini_vis_ref.load(Ordering::Acquire) {
+                    mini_exiting_ref.store(false, Ordering::Release);
+                    if let Some(ref mw) = mini_win_opt {
+                        hide_mini_player_window_safely(&app_for_main, mw, mini_vis_ref.clone(), true);
+                    }
+                }
+                wt::reveal_main_window_native(&main_win, true, paint_main_window_non_client_area);
+                let _ = app_for_main.emit(
+                    "bm-main-window-restored",
+                    serde_json::json!({ "maximized": wt::is_hwnd_maximized_native(main_hwnd) }),
+                );
+                return;
+            }
+
+            // 读取退出前 Mini 实体位置（在隐藏 Mini 前采样，作为主窗口舒展归位的空间锚点）
+            let mini_hwnd = mini_win_opt
+                .as_ref()
+                .and_then(|w| w.hwnd().ok())
+                .map(|h| h.0 as isize)
+                .unwrap_or(0);
+            let mini_entity_rect = mini_win_opt
+                .as_ref()
+                .and_then(|w| compute_mini_visual_entity_rect(w, &dock_edge, mini_expanded));
+
+            // 第 0ms 立即令 Mini 进入点击穿透态（即便在短暂 128ms 退场淡出期间也绝不拦截桌面或主窗口任何点击！）
+            if let Some(ref mw) = mini_win_opt {
+                if !mini_vis_ref.load(Ordering::Acquire) {
+                    set_mini_click_through(mw, true);
                 }
             }
-        }
-    }
 
-    unsafe {
-        // 关键修复：当已处于 WS_MAXIMIZE 的窗口经历 SW_HIDE -> ShowWindow(SW_MAXIMIZE/SW_SHOW) 时，
-        //即便 GetClientRect 已对齐 rcWork（need_frame_reset == false），Win32 内核仍会将非客户区重定向位图刷成纯白 (RGB 255,255,255)。
-        // 因此在最大化恢复的首轮可见同步（force_visible_frame_sync == true）或检出尺寸偏离时，无条件执行锁绘 SW_RESTORE -> SW_SHOWMAXIMIZED 复位。
-        if expect_maximized && (force_visible_frame_sync || need_frame_reset) && allow_cycle_reset {
-            let _ = SendMessageW(hwnd, WM_SETREDRAW, 0, 0);
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
-            let _ = SetWindowPos(
-                hwnd,
-                0,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            );
-            apply_main_window_zero_border_dwm(win);
-            let _ = SendMessageW(hwnd, WM_SETREDRAW, 1, 0);
-        } else if expect_maximized && need_maximize_only {
-            let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
-            let _ = SetWindowPos(
-                hwnd,
-                0,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            );
-            apply_main_window_zero_border_dwm(win);
-        } else if expect_maximized && force_visible_frame_sync {
-            let _ = SetWindowPos(
-                hwnd,
-                0,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            );
-            apply_main_window_zero_border_dwm(win);
-        }
-        paint_main_window_non_client_area(hwnd);
-    }
+            let expect_max = max_flag_ref.load(Ordering::Relaxed)
+                || wt::is_hwnd_maximized_native(main_hwnd);
 
-    let need_redraw =
-        need_frame_reset || need_maximize_only || (expect_maximized && force_visible_frame_sync);
-    let _ = win.with_webview(move |webview| unsafe {
-        let controller = webview.controller();
-        let mut rc = WinRect::default();
-        if GetClientRect(hwnd, &mut rc) != 0 && rc.right > rc.left && rc.bottom > rc.top {
-            let cw = rc.right - rc.left;
-            let ch = rc.bottom - rc.top;
-            let mut parent_wv_hwnd = std::mem::zeroed();
-            if controller.ParentWindow(&mut parent_wv_hwnd).is_ok() {
-                let wry_child_hwnd = parent_wv_hwnd.0 as isize;
-                if wry_child_hwnd != 0 && wry_child_hwnd != hwnd {
+            // 1. 在 DWMWA_CLOAK = 1 隐身斗篷下，一步到位原子恢复主窗口并校准客户区/WebView2 Bounds（0 弹跳、0 白线）
+            sync_main_low_memory_state(&main_win, &low_mem_ref, false);
+            let restored_client_rect = wt::restore_main_window_cloaked_native(
+                &main_win,
+                expect_max,
+                paint_main_window_non_client_area,
+            );
+            let final_is_max = wt::is_hwnd_maximized_native(main_hwnd);
+            max_flag_ref.store(final_is_max, Ordering::Relaxed);
+
+            let main_rect = restored_client_rect
+                .or_else(|| wt::get_window_client_screen_rect(main_hwnd))
+                .or_else(|| wt::get_window_visual_rect(main_hwnd));
+
+            let sf = main_win.scale_factor().unwrap_or(1.0).max(1.0);
+            let same_mon = effective_from_mini && wt::is_same_monitor(main_hwnd, mini_hwnd);
+            let kind = if effective_from_mini {
+                window_transition::TransitionKind::ExitMini
+            } else {
+                window_transition::TransitionKind::RestoreFromTray
+            };
+
+            let plan = main_rect.map(|mr| {
+                window_transition::compute_spatial_transition_plan(
+                    kind,
+                    mr,
+                    mini_entity_rect,
+                    final_is_max,
+                    same_mon,
+                    sf,
+                    motion_style,
+                )
+            });
+
+            // 2. 第 0ms 通知 Mini 前端播放优雅的释能退场动效（或在无动效档位/非小窗退回下立即原生强杀隐藏）
+            if effective_from_mini {
+                let _ = app_for_main.emit(
+                    "bm-mini-player-visibility",
+                    serde_json::json!({ "visible": false }),
+                );
+                let should_animate_mini_exit = plan.map(|p| p.duration_ms > 0).unwrap_or(false)
+                    && mini_hwnd != 0
+                    && wt::is_hwnd_visible_and_not_minimized(mini_hwnd);
+                if should_animate_mini_exit {
+                    if let Some(p) = plan {
+                        mini_exiting_ref.store(true, Ordering::Release);
+                        let _ = app_for_main.emit_to(
+                            "mini_player",
+                            "bm-mini-player-transition",
+                            serde_json::json!({
+                                "phase": "exiting",
+                                "offsetX": p.mini_hint_offset_x,
+                                "offsetY": p.mini_hint_offset_y,
+                                "dockEdge": dock_edge,
+                                "motionLevel": motion_str,
+                                "transitionGen": gen,
+                            }),
+                        );
+                    }
+                } else if let Some(ref mw) = mini_win_opt {
+                    mini_exiting_ref.store(false, Ordering::Release);
+                    hide_mini_player_window_safely(&app_for_main, mw, mini_vis_ref.clone(), true);
+                }
+            } else if let Some(ref mw) = mini_win_opt {
+                if !mini_vis_ref.load(Ordering::Acquire) {
+                    mini_exiting_ref.store(false, Ordering::Release);
+                    hide_mini_player_window_safely(&app_for_main, mw, mini_vis_ref.clone(), true);
+                }
+            }
+
+            let _ = app_for_main.emit(
+                "bm-main-window-restored",
+                serde_json::json!({ "maximized": final_is_max }),
+            );
+
+            // 3. 若无动效档位或未能获取有效几何矩形，直接原子揭开真实主窗口（0 闪烁、0 弹跳、0 白线）
+            let (Some(mr), Some(p)) = (main_rect, plan) else {
+                wt::reveal_main_window_native(&main_win, true, paint_main_window_non_client_area);
+                return;
+            };
+            if p.duration_ms == 0 {
+                wt::reveal_main_window_native(&main_win, true, paint_main_window_non_client_area);
+                return;
+            }
+
+            // 4. 三级智能优选 GPU 舒展纹理（优先实帧 -> 同尺寸同主题高清快照 -> 四主题双主色流光卡面，100% 绝不闪黑屏）
+            let stage_rect = wt::get_monitor_rects_for_hwnd(main_hwnd)
+                .map(|(mon, _work)| mon)
+                .unwrap_or(mr);
+            let bg_colorref = MAIN_BG_COLORREF.load(Ordering::Relaxed);
+            let bg_rgb = wt::colorref_to_rgb(bg_colorref);
+            let target_w = mr.width().max(16) as u32;
+            let target_h = mr.height().max(16) as u32;
+
+            let (tex_w, tex_h, bgra) =
+                if let Some((cw, ch, live_px)) = wt::capture_window_client_bgra(main_hwnd, false) {
+                    (cw, ch, live_px)
+                } else if let Some(cached) =
+                    window_transition::load_cached_main_snapshot(target_w, target_h, bg_colorref)
+                {
+                    (cached.width, cached.height, cached.bgra_premultiplied)
+                } else {
+                    // 1/2 降采样合成流光底板，GPU 自动线性放大 + 硬件圆角，速度 < 1ms 且极度顺滑
+                    let sw = (target_w / 2).clamp(64, 960);
+                    let sh = (target_h / 2).clamp(64, 540);
+                    let px = window_transition::synthesize_theme_aura_card_bgra(
+                        sw,
+                        sh,
+                        bg_rgb,
+                        accent1_rgb,
+                        accent2_rgb,
+                    );
+                    (sw, sh, px)
+                };
+
+            let started = wt::play_gpu_transition_on_main_thread(
+                stage_rect, mr, tex_w, tex_h, &bgra, p,
+            );
+
+            // 若是从 Mini 退回且 Mini 正在播放 115ms 释能淡出动效，将其保持在 GPU 舞台正上方（已开启点击穿透，绝不挡点击）
+            if started && effective_from_mini && mini_hwnd != 0 && mini_exiting_ref.load(Ordering::Acquire) {
+                #[link(name = "user32")]
+                extern "system" {
+                    fn SetWindowPos(
+                        hwnd: isize,
+                        hwnd_insert_after: isize,
+                        x: i32,
+                        y: i32,
+                        cx: i32,
+                        cy: i32,
+                        u_flags: u32,
+                    ) -> i32;
+                }
+                const HWND_TOPMOST: isize = -1;
+                const SWP_NOSIZE: u32 = 0x0001;
+                const SWP_NOMOVE: u32 = 0x0002;
+                const SWP_NOACTIVATE: u32 = 0x0010;
+                unsafe {
                     let _ = SetWindowPos(
-                        wry_child_hwnd,
+                        mini_hwnd,
+                        HWND_TOPMOST,
                         0,
                         0,
                         0,
-                        cw,
-                        ch,
-                        SWP_NOZORDER | SWP_NOACTIVATE,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                     );
                 }
             }
-            let mut bounds = std::mem::zeroed();
-            if controller.Bounds(&mut bounds).is_ok() {
-                let bounds_mismatch = bounds.left != 0
-                    || bounds.top != 0
-                    || bounds.right != cw
-                    || bounds.bottom != ch;
-                if bounds_mismatch || need_redraw {
-                    bounds.left = 0;
-                    bounds.top = 0;
-                    bounds.right = cw;
-                    bounds.bottom = ch;
-                    let _ = controller.SetBounds(bounds);
-                    let _ = controller.NotifyParentWindowPositionChanged();
+
+            if !started {
+                wt::reveal_main_window_native(&main_win, true, paint_main_window_non_client_area);
+                if let Some(ref mw) = mini_win_opt {
+                    if !mini_vis_ref.load(Ordering::Acquire) {
+                        mini_exiting_ref.store(false, Ordering::Release);
+                        hide_mini_player_window_safely(
+                            &app_for_main,
+                            mw,
+                            mini_vis_ref.clone(),
+                            true,
+                        );
+                    }
                 }
+                return;
+            }
+
+            // 5. 异步收尾时序：
+            //    - 128ms：只要 mini_player_visible 仍为 false（不因重复点击恢复而跳过！），必执行四重防线强制原生隐藏 Mini
+            //    - p.duration_ms：GPU 舞台 100% 像素级重合归位 -> 揭开真实主窗口 + 触发 65ms 丝滑交叉溶解揭幕
+            //    - p.duration_ms + p.reveal_dissolve_ms + 20ms：隐藏并释放 GPU 过渡舞台
+            if effective_from_mini && mini_exiting_ref.load(Ordering::Acquire) {
+                let app_hide_mini = app_for_main.clone();
+                let mini_vis_check = mini_vis_ref.clone();
+                let mini_exit_check = mini_exiting_ref.clone();
+                let hotkey_tid_done = hotkey_tid_ref.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(128)).await;
+                    if mini_vis_check.load(Ordering::Acquire) {
+                        mini_exit_check.store(false, Ordering::Release);
+                        return;
+                    }
+                    let app_ui = app_hide_mini.clone();
+                    let vis_flag = mini_vis_check.clone();
+                    let exit_flag = mini_exit_check.clone();
+                    let tid_flag = hotkey_tid_done.clone();
+                    let _ = app_hide_mini.run_on_main_thread(move || {
+                        exit_flag.store(false, Ordering::Release);
+                        if !vis_flag.load(Ordering::Acquire) {
+                            if let Some(mw) = app_ui.get_webview_window("mini_player") {
+                                hide_mini_player_window_safely(&app_ui, &mw, vis_flag, true);
+                            }
+                        }
+                        wake_hotkey_thread(&tid_flag);
+                    });
+                });
+            }
+
+            let app_reveal = app_for_main.clone();
+            let gen_reveal = gen_ref.clone();
+            let mini_vis_reveal = mini_vis_ref.clone();
+            let mini_exit_reveal = mini_exiting_ref.clone();
+            let dur_ms = p.duration_ms;
+            let dissolve_ms = p.reveal_dissolve_ms;
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(dur_ms)).await;
+                if gen_reveal.load(Ordering::Acquire) != gen {
+                    return;
+                }
+                let app_ui = app_reveal.clone();
+                let gen_ui = gen_reveal.clone();
+                let vis_ui = mini_vis_reveal.clone();
+                let exit_ui = mini_exit_reveal.clone();
+                let _ = app_reveal.run_on_main_thread(move || {
+                    if gen_ui.load(Ordering::Acquire) != gen {
+                        return;
+                    }
+                    // 终态双保险：揭开主窗口时若 Mini 仍未隐藏且 mini_player_visible=false，立即强制隐藏
+                    if !vis_ui.load(Ordering::Acquire) {
+                        exit_ui.store(false, Ordering::Release);
+                        if let Some(mini_w) = app_ui.get_webview_window("mini_player") {
+                            hide_mini_player_window_safely(&app_ui, &mini_w, vis_ui, false);
+                        }
+                    }
+                    if let Some(mw) = app_ui.get_webview_window("main") {
+                        wt::reveal_main_window_native(&mw, true, paint_main_window_non_client_area);
+                    }
+                    if dissolve_ms > 0 {
+                        wt::start_gpu_cross_dissolve_on_main_thread(dissolve_ms);
+                    } else {
+                        wt::cancel_and_hide_gpu_stage_on_main_thread();
+                    }
+                });
+
+                if dissolve_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(dissolve_ms + 22)).await;
+                    if gen_reveal.load(Ordering::Acquire) != gen {
+                        return;
+                    }
+                    let gen_cleanup = gen_reveal.clone();
+                    let _ = app_reveal.run_on_main_thread(move || {
+                        if gen_cleanup.load(Ordering::Acquire) == gen {
+                            wt::cancel_and_hide_gpu_stage_on_main_thread();
+                        }
+                    });
+                }
+            });
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (&motion_str, &dock_edge, mini_expanded, accent1_rgb, accent2_rgb, &mini_exiting_ref, &hotkey_tid_ref);
+            if effective_from_mini {
+                if let Some(mw) = app_for_main.get_webview_window("mini_player") {
+                    hide_mini_player_window_safely(&app_for_main, &mw, mini_vis_ref.clone(), true);
+                }
+                let _ = app_for_main.emit(
+                    "bm-mini-player-visibility",
+                    serde_json::json!({ "visible": false }),
+                );
+            }
+            if let Some(main_win) = app_for_main.get_webview_window("main") {
+                sync_main_low_memory_state(&main_win, &low_mem_ref, false);
+                if main_win.is_minimized().unwrap_or(false) {
+                    let _ = main_win.unminimize();
+                }
+                let _ = main_win.show();
+                let _ = main_win.set_focus();
+                let _ = app_for_main.emit(
+                    "bm-main-window-restored",
+                    serde_json::json!({ "maximized": main_win.is_maximized().unwrap_or(false) }),
+                );
             }
         }
-        if need_redraw {
-            let _ = RedrawWindow(
-                hwnd,
-                std::ptr::null(),
-                0,
-                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-            );
-        }
-        paint_main_window_non_client_area(hwnd);
     });
-}
-
-#[cfg(not(target_os = "windows"))]
-fn reconcile_main_window_frame_and_bounds(
-    _win: &tauri::WebviewWindow,
-    _expect_maximized: bool,
-    _allow_cycle_reset: bool,
-    _force_visible_frame_sync: bool,
-) {
 }
 
 fn show_and_restore_main_window(app: &AppHandle, state: &AppState) {
-    let was_maximized = state.main_was_maximized.load(Ordering::Relaxed)
-        || app
-            .get_webview_window("main")
-            .map(|w| is_hwnd_zoomed(&w))
-            .unwrap_or(false);
-
-    let app_for_main = app.clone();
-    let low_mem_flag = state.main_low_memory_active.clone();
-    let max_flag = state.main_was_maximized.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let Some(main_win) = app_for_main.get_webview_window("main") {
-            sync_main_low_memory_state(&main_win, &low_mem_flag, false);
-            apply_main_window_zero_border_dwm(&main_win);
-            if main_win.is_minimized().unwrap_or(false) {
-                let _ = main_win.unminimize();
-            }
-            // 先让 tao 完成内部的 WindowFlags::VISIBLE -> show() 队列切换，绝不在 show() 前偷跑 Win32 ShowWindow 导致时序反转
-            let _ = main_win.show();
-            let _ = main_win.set_focus();
-        }
-
-        // 三段主线程兜底核验：确保首个检测到窗口已可见的主线程回调必然执行一次无闪烁 SW_RESTORE -> SW_SHOWMAXIMIZED 与非客户区重绘
-        let did_force_cycle = Arc::new(AtomicBool::new(false));
-        for (delay_ms, emit_restored) in [(18u64, true), (68u64, false), (165u64, false)] {
-            let app_delay = app_for_main.clone();
-            let max_flag_inner = max_flag.clone();
-            let did_force_inner = did_force_cycle.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                let app_ui = app_delay.clone();
-                let _ = app_delay.run_on_main_thread(move || {
-                    if let Some(w) = app_ui.get_webview_window("main") {
-                        if w.is_visible().unwrap_or(false) {
-                            let expect_max = was_maximized || is_hwnd_zoomed(&w);
-                            let first_visible_pass = !did_force_inner.swap(true, Ordering::Relaxed);
-                            reconcile_main_window_frame_and_bounds(
-                                &w,
-                                expect_max,
-                                true,
-                                first_visible_pass,
-                            );
-                            max_flag_inner.store(is_hwnd_zoomed(&w), Ordering::Relaxed);
-                        }
-                    }
-                    if emit_restored {
-                        let _ = app_ui.emit(
-                            "bm-main-window-restored",
-                            serde_json::json!({ "maximized": was_maximized }),
-                        );
-                    }
-                });
-            });
-        }
-    });
+    orchestrate_restore_main_window(app, state, false);
 }
 
 #[tauri::command]
@@ -1142,6 +1492,34 @@ async fn sync_main_window_bg_color_cmd(
 ) -> Result<bool, String> {
     ensure_main_window(&window)?;
     apply_main_window_bg_color(&window, r, g, b);
+    Ok(true)
+}
+
+#[tauri::command]
+async fn sync_motion_level_cmd(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    level: String,
+) -> Result<bool, String> {
+    ensure_main_window(&window)?;
+    let normalized = match level.trim().to_ascii_lowercase().as_str() {
+        "none" => "none",
+        "standard" => "standard",
+        _ => "best",
+    };
+    if let Ok(mut g) = state.motion_level.lock() {
+        *g = normalized.to_string();
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+async fn hide_main_to_tray_cmd(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    ensure_main_window(&window)?;
+    hide_main_window_cleanly(&window, &state);
     Ok(true)
 }
 
@@ -3204,14 +3582,29 @@ fn reclamp_mini_player_if_needed(
 }
 
 /// Windows 级 Mini 灵动岛自愈与方案 1 智能全屏礼让守护：
-/// - 切窗 / Alt+Tab / Win+D / 切屏后自动无抢焦复活并维持 HWND_TOPMOST
+/// - 若 mini_player_visible == false 且不在退场淡出窗口内，若检测到窗口仍物理可见则立即强制四重隐藏（彻底杜绝透明遮挡幽灵窗）
+/// - 切窗 / Alt+Tab / Win+D / 切屏后自动无抢焦复活并维持 HWND_TOPMOST 与 WS_EX_TOOLWINDOW
 /// - 同一显示器运行全屏视频/游戏时暂不遮挡画面，退出全屏后立刻自动复活置顶
 #[cfg(target_os = "windows")]
 fn heal_mini_player_window(app: &AppHandle, state: &AppState, force_resnap: bool) {
-    if !state.mini_player_visible.load(Ordering::Relaxed) {
+    if !state.mini_player_visible.load(Ordering::Acquire) {
         state
             .mini_yielded_for_fullscreen
             .store(false, Ordering::Relaxed);
+        if !state.mini_exiting_anim.load(Ordering::Acquire) {
+            if let Some(mini_win) = app.get_webview_window("mini_player") {
+                if let Ok(raw) = mini_win.hwnd() {
+                    if window_transition::win_impl::is_hwnd_visible_and_not_minimized(raw.0 as isize) {
+                        hide_mini_player_window_safely(
+                            app,
+                            &mini_win,
+                            state.mini_player_visible.clone(),
+                            true,
+                        );
+                    }
+                }
+            }
+        }
         return;
     }
     let Some(mini_win) = app.get_webview_window("mini_player") else {
@@ -3237,7 +3630,6 @@ fn heal_mini_player_window(app: &AppHandle, state: &AppState, force_resnap: bool
 
     #[link(name = "user32")]
     extern "system" {
-        fn ShowWindow(hwnd: isize, n_cmd_show: i32) -> i32;
         fn IsIconic(hwnd: isize) -> i32;
         fn IsWindowVisible(hwnd: isize) -> i32;
         fn SetWindowPos(
@@ -3253,11 +3645,9 @@ fn heal_mini_player_window(app: &AppHandle, state: &AppState, force_resnap: bool
 
     const HWND_TOPMOST: isize = -1;
     const HWND_NOTOPMOST: isize = -2;
-    const SW_SHOWNOACTIVATE: i32 = 4;
     const SWP_NOSIZE: u32 = 0x0001;
     const SWP_NOMOVE: u32 = 0x0002;
     const SWP_NOACTIVATE: u32 = 0x0010;
-    const SWP_SHOWWINDOW: u32 = 0x0040;
 
     // 方案 1：检测同屏全屏独占应用（如全屏视频/游戏）
     if is_foreground_fullscreen_on_same_monitor(mini_hwnd, main_hwnd, lyric_hwnd) {
@@ -3287,22 +3677,22 @@ fn heal_mini_player_window(app: &AppHandle, state: &AppState, force_resnap: bool
     // 边界与切屏自检（放在显示前，防止窗口留在已断开的屏幕坐标）
     reclamp_mini_player_if_needed(app, &mini_win, state, force_resnap);
 
+    let dock_edge = state
+        .mini_player_dock_edge
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_else(|| "none".to_string());
+    let is_expanded = state.mini_player_expanded.load(Ordering::Relaxed);
+    let default_click_through = dock_edge != "none" && !is_expanded;
+
     unsafe {
         let iconic = IsIconic(mini_hwnd) != 0;
         let visible = IsWindowVisible(mini_hwnd) != 0;
         if iconic || !visible || was_yielded {
             set_subwindow_suspended(&mini_win, false);
             set_webview_memory_target_low(&mini_win, false);
-            let _ = ShowWindow(mini_hwnd, SW_SHOWNOACTIVATE);
-            let _ = SetWindowPos(
-                mini_hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
+            window_transition::win_impl::show_overlay_window_native(mini_hwnd, default_click_through);
         } else {
             let _ = SetWindowPos(
                 mini_hwnd,
@@ -3329,21 +3719,346 @@ fn heal_mini_player_window(app: &AppHandle, state: &AppState, force_resnap: bool
 }
 
 fn restore_main_from_mini(app: &AppHandle, state: &AppState) {
-    state.mini_player_visible.store(false, Ordering::Relaxed);
+    orchestrate_restore_main_window(app, state, false);
+}
+
+fn orchestrate_enter_mini_mode(
+    app: &AppHandle,
+    state: &AppState,
+    motion_override: Option<String>,
+) {
+    let gen = state.main_transition_gen.fetch_add(1, Ordering::AcqRel) + 1;
+    if let Some(ref raw) = motion_override {
+        let norm = match raw.trim().to_ascii_lowercase().as_str() {
+            "none" => "none",
+            "standard" => "standard",
+            _ => "best",
+        };
+        if let Ok(mut g) = state.motion_level.lock() {
+            *g = norm.to_string();
+        }
+    }
+    let motion_style = current_motion_style(state, motion_override.as_deref());
+    let motion_str = current_motion_level_str(state, motion_override.as_deref());
+
+    state.mini_exiting_anim.store(false, Ordering::Release);
+    state.mini_player_visible.store(true, Ordering::Release);
     state
         .mini_yielded_for_fullscreen
         .store(false, Ordering::Relaxed);
     state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed);
-    wake_hotkey_thread(&state.hotkey_thread_id);
-    if let Some(mini_win) = app.get_webview_window("mini_player") {
-        let _ = mini_win.hide();
-        schedule_subwindow_suspend(app, "mini_player", state.mini_player_visible.clone());
-    }
-    show_and_restore_main_window(app, state);
-    let _ = app.emit(
-        "bm-mini-player-visibility",
-        serde_json::json!({ "visible": false }),
-    );
+
+    let app_for_main = app.clone();
+    let gen_ref = state.main_transition_gen.clone();
+    let mini_vis_ref = state.mini_player_visible.clone();
+    let mini_pos_ref = state.mini_player_positioned.clone();
+    let mini_exp_ref = state.mini_player_expanded.clone();
+    let mini_edge_ref = state.mini_player_dock_edge.clone();
+    let mini_snap_ref = state.mini_player_snapshot.clone();
+    let hotkey_tid_ref = state.hotkey_thread_id.clone();
+    let max_flag_ref = state.main_was_maximized.clone();
+    let low_mem_ref = state.main_low_memory_active.clone();
+    let (accent1_rgb, accent2_rgb) = state
+        .cover_accent_rgb
+        .lock()
+        .ok()
+        .map(|g| *g)
+        .unwrap_or(((94, 106, 210), (45, 212, 191)));
+
+    let _ = app.run_on_main_thread(move || {
+        if gen_ref.load(Ordering::Acquire) != gen {
+            return;
+        }
+        let st_ref = app_for_main.state::<AppState>();
+
+        // 1. 预热并精准定位 Mini 独立子窗（先发 entering 透明起势态，确保 0 硬切闪现）
+        let Some(mini_win) = ensure_mini_player_window(&app_for_main) else {
+            return;
+        };
+        set_subwindow_suspended(&mini_win, false);
+        set_webview_memory_target_low(&mini_win, false);
+        enforce_transparent_overlay_window_style(&mini_win);
+        if !mini_pos_ref.load(Ordering::Relaxed) {
+            place_mini_player_default(&app_for_main, &mini_win, &st_ref);
+        } else {
+            reclamp_mini_player_if_needed(&app_for_main, &mini_win, &st_ref, false);
+        }
+
+        let dock_edge = mini_edge_ref
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_else(|| "none".to_string());
+        let expanded = mini_exp_ref.load(Ordering::Relaxed);
+        let mini_entity_rect = compute_mini_visual_entity_rect(&mini_win, &dock_edge, expanded);
+
+        if let Some(snap) = mini_snap_ref.lock().ok().and_then(|g| g.clone()) {
+            let _ = app_for_main.emit_to("mini_player", "bm-mini-player-sync", snap);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use window_transition::win_impl as wt;
+
+            wt::cancel_and_hide_gpu_stage_on_main_thread();
+
+            let main_win_opt = app_for_main.get_webview_window("main");
+            let main_hwnd = main_win_opt
+                .as_ref()
+                .and_then(|w| w.hwnd().ok())
+                .map(|h| h.0 as isize)
+                .unwrap_or(0);
+            let mini_hwnd = mini_win.hwnd().ok().map(|h| h.0 as isize).unwrap_or(0);
+
+            let main_was_visible =
+                wt::is_hwnd_visible_and_not_minimized(main_hwnd) && !wt::is_main_cloaked();
+            let is_max = if main_was_visible {
+                let z = wt::is_hwnd_maximized_native(main_hwnd);
+                max_flag_ref.store(z, Ordering::Relaxed);
+                z
+            } else {
+                max_flag_ref.load(Ordering::Relaxed)
+            };
+
+            let main_rect = if main_was_visible {
+                wt::get_window_client_screen_rect(main_hwnd)
+                    .or_else(|| wt::get_window_visual_rect(main_hwnd))
+            } else {
+                None
+            };
+            let sf = main_win_opt
+                .as_ref()
+                .and_then(|w| w.scale_factor().ok())
+                .unwrap_or(1.0)
+                .max(1.0);
+            let same_mon = main_was_visible && wt::is_same_monitor(main_hwnd, mini_hwnd);
+
+            let plan = main_rect.map(|mr| {
+                window_transition::compute_spatial_transition_plan(
+                    window_transition::TransitionKind::EnterMini,
+                    mr,
+                    mini_entity_rect,
+                    is_max,
+                    same_mon,
+                    sf,
+                    motion_style,
+                )
+            });
+
+            let (hint_ox, hint_oy, handoff_delay_ms, gpu_dur_ms) = match plan {
+                Some(p) => (
+                    p.mini_hint_offset_x,
+                    p.mini_hint_offset_y,
+                    p.mini_handoff_delay_ms,
+                    p.duration_ms,
+                ),
+                None => (0.0, -14.0, 0, 0),
+            };
+
+            let use_anim = motion_style != window_transition::TransitionMotionStyle::None;
+
+            // 先令 Mini 前端就位到 entering 起势态（opacity: 0）并无抢焦显示窗口，让 WebView2 提前完成首帧合成
+            if use_anim {
+                let _ = app_for_main.emit_to(
+                    "mini_player",
+                    "bm-mini-player-transition",
+                    serde_json::json!({
+                        "phase": "entering",
+                        "offsetX": hint_ox,
+                        "offsetY": hint_oy,
+                        "dockEdge": dock_edge,
+                        "motionLevel": motion_str,
+                        "transitionGen": gen,
+                    }),
+                );
+            }
+
+            let mut gpu_started = false;
+            if let (Some(main_win), Some(mr), Some(p)) = (&main_win_opt, main_rect, plan) {
+                if main_was_visible && p.duration_ms > 0 {
+                    let stage_rect = wt::get_monitor_rects_for_hwnd(main_hwnd)
+                        .map(|(mon, _work)| mon)
+                        .unwrap_or(mr);
+                    let bg_colorref = MAIN_BG_COLORREF.load(Ordering::Relaxed);
+                    let bg_rgb = wt::colorref_to_rgb(bg_colorref);
+                    let target_w = mr.width().max(16) as u32;
+                    let target_h = mr.height().max(16) as u32;
+
+                    let (tex_w, tex_h, bgra) =
+                        if let Some((cw, ch, live_px)) = wt::capture_window_client_bgra(main_hwnd, true)
+                        {
+                            // 缓存高清真画面快照供退出小窗时实现极速无黑屏交叉溶解展开
+                            window_transition::store_cached_main_snapshot(
+                                window_transition::CachedMainSnapshot {
+                                    width: cw,
+                                    height: ch,
+                                    bg_colorref,
+                                    bgra_premultiplied: live_px.clone(),
+                                },
+                            );
+                            (cw, ch, live_px)
+                        } else {
+                            let sw = (target_w / 2).clamp(64, 960);
+                            let sh = (target_h / 2).clamp(64, 540);
+                            let px = window_transition::synthesize_theme_aura_card_bgra(
+                                sw,
+                                sh,
+                                bg_rgb,
+                                accent1_rgb,
+                                accent2_rgb,
+                            );
+                            (sw, sh, px)
+                        };
+
+                    gpu_started = wt::play_gpu_transition_on_main_thread(
+                        stage_rect, mr, tex_w, tex_h, &bgra, p,
+                    );
+                }
+
+                // GPU 舞台已提交并严丝合缝接管屏幕画面后，原生隐身隐藏真实主窗口（0 闪烁、保留最大化态）
+                sync_main_low_memory_state(main_win, &low_mem_ref, true);
+                wt::hide_main_window_native(main_win);
+            } else if let Some(main_win) = &main_win_opt {
+                sync_main_low_memory_state(main_win, &low_mem_ref, true);
+                wt::hide_main_window_native(main_win);
+            }
+
+            let initial_click_through = dock_edge != "none" && !expanded;
+
+            let _ = app_for_main.emit_to(
+                "main",
+                "bm-mini-player-cmd",
+                serde_json::json!({ "type": "CMD_REQUEST_SYNC" }),
+            );
+
+            // 2. 在主窗口收束的势能交接甜点时刻（~58ms），再同步显示 Mini（更新 tao VISIBLE + TOOLWINDOW + TOPMOST）并弹性浮现落位，
+            //    既彻底避免 0ms 抢跑露出旧帧，又确保 tao WindowFlags::VISIBLE 100% 同步！
+            if gpu_started && handoff_delay_ms > 0 {
+                let app_handoff = app_for_main.clone();
+                let gen_handoff = gen_ref.clone();
+                let mini_vis_check = mini_vis_ref.clone();
+                let hotkey_tid_h = hotkey_tid_ref.clone();
+                let dock_edge_h = dock_edge.clone();
+                let motion_h = motion_str.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(handoff_delay_ms)).await;
+                    if gen_handoff.load(Ordering::Acquire) != gen
+                        || !mini_vis_check.load(Ordering::Acquire)
+                    {
+                        return;
+                    }
+                    let app_ui = app_handoff.clone();
+                    let gen_ui = gen_handoff.clone();
+                    let vis_ui = mini_vis_check.clone();
+                    let tid_ui = hotkey_tid_h.clone();
+                    let _ = app_handoff.run_on_main_thread(move || {
+                        if gen_ui.load(Ordering::Acquire) != gen || !vis_ui.load(Ordering::Acquire) {
+                            return;
+                        }
+                        if let Some(mw) = app_ui.get_webview_window("mini_player") {
+                            show_mini_player_window_safely(&mw, initial_click_through);
+                        }
+                        let _ = app_ui.emit(
+                            "bm-mini-player-visibility",
+                            serde_json::json!({ "visible": true }),
+                        );
+                        let _ = app_ui.emit_to(
+                            "mini_player",
+                            "bm-mini-player-transition",
+                            serde_json::json!({
+                                "phase": "visible",
+                                "offsetX": hint_ox,
+                                "offsetY": hint_oy,
+                                "dockEdge": dock_edge_h,
+                                "motionLevel": motion_h,
+                                "instant": false,
+                                "transitionGen": gen,
+                            }),
+                        );
+                        wake_hotkey_thread(&tid_ui);
+                    });
+                });
+            } else {
+                show_mini_player_window_safely(&mini_win, initial_click_through);
+                let _ = app_for_main.emit(
+                    "bm-mini-player-visibility",
+                    serde_json::json!({ "visible": true }),
+                );
+                let _ = app_for_main.emit_to(
+                    "mini_player",
+                    "bm-mini-player-transition",
+                    serde_json::json!({
+                        "phase": "visible",
+                        "offsetX": hint_ox,
+                        "offsetY": hint_oy,
+                        "dockEdge": dock_edge,
+                        "motionLevel": motion_str,
+                        "instant": !use_anim,
+                        "transitionGen": gen,
+                    }),
+                );
+                wake_hotkey_thread(&hotkey_tid_ref);
+            }
+
+            // 3. GPU 收缩动画完成后隐藏并释放过渡舞台资源
+            if gpu_started && gpu_dur_ms > 0 {
+                let app_done = app_for_main.clone();
+                let gen_done = gen_ref.clone();
+                let mini_vis_done = mini_vis_ref.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(gpu_dur_ms + 24)).await;
+                    if gen_done.load(Ordering::Acquire) != gen {
+                        return;
+                    }
+                    let app_ui = app_done.clone();
+                    let gen_ui = gen_done.clone();
+                    let vis_ui = mini_vis_done.clone();
+                    let _ = app_done.run_on_main_thread(move || {
+                        if gen_ui.load(Ordering::Acquire) == gen {
+                            wt::cancel_and_hide_gpu_stage_on_main_thread();
+                            if vis_ui.load(Ordering::Acquire) {
+                                let st_inner = app_ui.state::<AppState>();
+                                heal_mini_player_window(&app_ui, &st_inner, false);
+                            }
+                        }
+                    });
+                });
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (mini_entity_rect, accent1_rgb, accent2_rgb, mini_vis_ref);
+            if let Some(main_win) = app_for_main.get_webview_window("main") {
+                hide_main_window_cleanly(&main_win, &st_ref);
+            }
+            let _ = mini_win.set_always_on_top(true);
+            let _ = mini_win.show();
+            let _ = mini_win.set_focus();
+            let _ = app_for_main.emit_to(
+                "mini_player",
+                "bm-mini-player-transition",
+                serde_json::json!({
+                    "phase": "visible",
+                    "offsetX": 0.0,
+                    "offsetY": -14.0,
+                    "dockEdge": dock_edge,
+                    "motionLevel": motion_str,
+                    "instant": motion_style == window_transition::TransitionMotionStyle::None,
+                    "transitionGen": gen,
+                }),
+            );
+            let _ = app_for_main.emit_to(
+                "main",
+                "bm-mini-player-cmd",
+                serde_json::json!({ "type": "CMD_REQUEST_SYNC" }),
+            );
+            let _ = app_for_main.emit(
+                "bm-mini-player-visibility",
+                serde_json::json!({ "visible": true }),
+            );
+        }
+    });
 }
 
 #[tauri::command]
@@ -3352,56 +4067,24 @@ async fn set_mini_player_mode_cmd(
     app: AppHandle,
     state: State<'_, AppState>,
     mini: bool,
+    motion_level: Option<String>,
 ) -> Result<bool, String> {
     ensure_main_window(&window)?;
     if mini {
-        state.mini_player_visible.store(true, Ordering::Relaxed);
-        state
-            .mini_yielded_for_fullscreen
-            .store(false, Ordering::Relaxed);
-        state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed);
-        wake_hotkey_thread(&state.hotkey_thread_id);
-        if let Some(main_win) = app.get_webview_window("main") {
-            let is_max = is_hwnd_zoomed(&main_win);
-            state.main_was_maximized.store(is_max, Ordering::Relaxed);
-            sync_main_low_memory_state(&main_win, &state.main_low_memory_active, true);
-            let _ = main_win.hide();
-        }
-        if let Some(mini_win) = ensure_mini_player_window(&app) {
-            set_subwindow_suspended(&mini_win, false);
-            set_webview_memory_target_low(&mini_win, false);
-            enforce_transparent_overlay_window_style(&mini_win);
-            if !state.mini_player_positioned.load(Ordering::Relaxed) {
-                place_mini_player_default(&app, &mini_win, &state);
-            } else {
-                reclamp_mini_player_if_needed(&app, &mini_win, &state, false);
-            }
-            let _ = mini_win.set_always_on_top(true);
-            let _ = mini_win.show();
-            let _ = mini_win.set_focus();
-            heal_mini_player_window(&app, &state, false);
-            if let Some(snap) = state
-                .mini_player_snapshot
-                .lock()
-                .ok()
-                .and_then(|g| g.clone())
-            {
-                let _ = app.emit_to("mini_player", "bm-mini-player-sync", snap);
-            }
-            let _ = app.emit_to(
-                "main",
-                "bm-mini-player-cmd",
-                serde_json::json!({ "type": "CMD_REQUEST_SYNC" }),
-            );
-            let _ = app.emit(
-                "bm-mini-player-visibility",
-                serde_json::json!({ "visible": true }),
-            );
-            return Ok(true);
-        }
-        return Ok(false);
+        orchestrate_enter_mini_mode(&app, &state, motion_level);
+        return Ok(true);
     } else {
-        restore_main_from_mini(&app, &state);
+        if let Some(ref raw) = motion_level {
+            let norm = match raw.trim().to_ascii_lowercase().as_str() {
+                "none" => "none",
+                "standard" => "standard",
+                _ => "best",
+            };
+            if let Ok(mut g) = state.motion_level.lock() {
+                *g = norm.to_string();
+            }
+        }
+        orchestrate_restore_main_window(&app, &state, true);
         return Ok(false);
     }
 }
@@ -3415,6 +4098,30 @@ async fn push_mini_player_sync_cmd(
 ) -> Result<bool, String> {
     ensure_main_window(&window)?;
     if payload.get("type").and_then(|v| v.as_str()) == Some("STATE_SYNC") {
+        if let Some(level) = payload.get("motionLevel").and_then(|v| v.as_str()) {
+            let norm = match level.trim().to_ascii_lowercase().as_str() {
+                "none" => "none",
+                "standard" => "standard",
+                _ => "best",
+            };
+            if let Ok(mut g) = state.motion_level.lock() {
+                *g = norm.to_string();
+            }
+        }
+        if let (Some(c1), Some(c2)) = (
+            payload
+                .get("coverAccentPrimary")
+                .and_then(|v| v.as_str())
+                .and_then(parse_hex_color_rgb),
+            payload
+                .get("coverAccentSecondary")
+                .and_then(|v| v.as_str())
+                .and_then(parse_hex_color_rgb),
+        ) {
+            if let Ok(mut g) = state.cover_accent_rgb.lock() {
+                *g = (c1, c2);
+            }
+        }
         if let Ok(mut guard) = state.mini_player_snapshot.lock() {
             *guard = Some(payload.clone());
         }
@@ -3472,23 +4179,61 @@ async fn send_mini_player_command_cmd(
     ensure_allowed_windows(&window, &["main", "mini_player"])?;
     if let Some(cmd_type) = command.get("type").and_then(|v| v.as_str()) {
         match cmd_type {
-            "CMD_RESTORE_MAIN" => {
-                restore_main_from_mini(&app, &state);
-            }
-            "CMD_OPEN_NOW_PLAYING" => {
-                restore_main_from_mini(&app, &state);
-            }
-            "CMD_HIDE_TO_TRAY" => {
-                state.mini_player_visible.store(false, Ordering::Relaxed);
-                wake_hotkey_thread(&state.hotkey_thread_id);
-                if let Some(mini_win) = app.get_webview_window("mini_player") {
-                    let _ = mini_win.hide();
+            "CMD_MINI_PLAYER_READY" => {
+                state.mini_player_ready.store(true, Ordering::Relaxed);
+                if state.mini_player_visible.load(Ordering::Relaxed) {
+                    // 冷启动新建窗口场景：前端挂载完成后若当前已在小窗态，立即补发一次优雅弹性入场信号，防止停留在透明起势态
+                    let motion_str = current_motion_level_str(&state, None);
+                    let dock_edge = state
+                        .mini_player_dock_edge
+                        .lock()
+                        .ok()
+                        .map(|g| g.clone())
+                        .unwrap_or_else(|| "none".to_string());
+                    let gen = state.main_transition_gen.load(Ordering::Acquire);
+                    let _ = app.emit_to(
+                        "mini_player",
+                        "bm-mini-player-transition",
+                        serde_json::json!({
+                            "phase": "visible",
+                            "offsetX": 0.0,
+                            "offsetY": -14.0,
+                            "dockEdge": dock_edge,
+                            "motionLevel": motion_str,
+                            "instant": motion_str == "none",
+                            "transitionGen": gen,
+                        }),
+                    );
+                } else {
+                    // 启动后后台空闲预热完成的隐藏窗口：挂起省内存，用户首次点击即可 0ms 瞬时平滑进入
                     schedule_subwindow_suspend(
                         &app,
                         "mini_player",
                         state.mini_player_visible.clone(),
                     );
                 }
+            }
+            "CMD_RESTORE_MAIN" => {
+                orchestrate_restore_main_window(&app, &state, true);
+            }
+            "CMD_OPEN_NOW_PLAYING" => {
+                orchestrate_restore_main_window(&app, &state, true);
+            }
+            "CMD_HIDE_TO_TRAY" => {
+                state.mini_exiting_anim.store(false, Ordering::Release);
+                state.mini_player_visible.store(false, Ordering::Release);
+                state.main_transition_gen.fetch_add(1, Ordering::AcqRel);
+                wake_hotkey_thread(&state.hotkey_thread_id);
+                let app_hide = app.clone();
+                let vis_flag = state.mini_player_visible.clone();
+                let app_ui = app_hide.clone();
+                let _ = app_hide.run_on_main_thread(move || {
+                    #[cfg(target_os = "windows")]
+                    window_transition::win_impl::cancel_and_hide_gpu_stage_on_main_thread();
+                    if let Some(mini_win) = app_ui.get_webview_window("mini_player") {
+                        hide_mini_player_window_safely(&app_ui, &mini_win, vis_flag, true);
+                    }
+                });
                 let _ = app.emit(
                     "bm-mini-player-visibility",
                     serde_json::json!({ "visible": false }),
@@ -3581,7 +4326,7 @@ async fn drag_mini_player_step_cmd(
             if let Ok(mut g) = state.mini_player_dock_edge.lock() {
                 *g = "none".to_string();
             }
-            let _ = win.set_ignore_cursor_events(false);
+            set_mini_click_through(&win, false);
             let (fw, fh) = mini_logical_dims("none", true);
             let pw = (fw * sf).round() as i32;
             let ph = (fh * sf).round() as i32;
@@ -3828,7 +4573,7 @@ async fn expand_mini_player_from_dock_cmd(
     let Some(win) = app.get_webview_window("mini_player") else {
         return Ok(false);
     };
-    let _ = win.set_ignore_cursor_events(false);
+    set_mini_click_through(&win, false);
     let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) else {
         return Ok(false);
     };
@@ -3875,7 +4620,9 @@ async fn expand_mini_player_from_dock_cmd(
         let _ = win.set_position(Position::Physical(PhysicalPosition::new(tx, ty)));
     }
     let _ = win.set_always_on_top(true);
-    let _ = win.set_focus();
+    if state.mini_player_visible.load(Ordering::Relaxed) {
+        let _ = win.set_focus();
+    }
     Ok(true)
 }
 
@@ -4913,6 +5660,7 @@ fn spawn_windows_global_hotkey_listener(
     lyric_locked: Arc<AtomicBool>,
     lyric_visible: Arc<AtomicBool>,
     mini_visible: Arc<AtomicBool>,
+    mini_exiting_anim: Arc<AtomicBool>,
     mini_expanded: Arc<AtomicBool>,
     mini_dock_edge: Arc<std::sync::Mutex<String>>,
 ) {
@@ -5226,13 +5974,37 @@ fn spawn_windows_global_hotkey_listener(
                 }
             }
 
-            // Mini 灵动岛收起态局部热区穿透检测：
-            let is_mini_vis = mini_visible.load(Ordering::Relaxed);
+            // Mini 灵动岛收起态局部热区穿透检测（采用原生 GWL_EXSTYLE 原子切换，零抢焦且绝不触发 tao 误隐藏）：
+            let is_mini_vis = mini_visible.load(Ordering::Acquire);
             let is_mini_exp = mini_expanded.load(Ordering::Relaxed);
             if !is_mini_vis {
                 was_in_mini_island = false;
                 last_mini_ignore_cursor = None;
                 last_mini_cursor = None;
+                // 幽灵窗终极看门狗：只要已退出小窗且短暂退场动画已结束，若检测到 mini_player HWND 仍可见，立刻派发主线程四重强杀！
+                if !mini_exiting_anim.load(Ordering::Acquire) {
+                    if let Some(win) = app_handle.get_webview_window("mini_player") {
+                        if let Ok(raw_h) = win.hwnd() {
+                            let mh = raw_h.0 as isize;
+                            if mh != 0 && unsafe { IsWindowVisible(mh) != 0 } {
+                                let app_kill = app_handle.clone();
+                                let vis_kill = mini_visible.clone();
+                                let exit_kill = mini_exiting_anim.clone();
+                                let _ = app_handle.run_on_main_thread(move || {
+                                    if !vis_kill.load(Ordering::Acquire)
+                                        && !exit_kill.load(Ordering::Acquire)
+                                    {
+                                        if let Some(mw) = app_kill.get_webview_window("mini_player") {
+                                            hide_mini_player_window_safely(
+                                                &app_kill, &mw, vis_kill, true,
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
             } else {
                 let edge = mini_dock_edge
                     .lock()
@@ -5242,9 +6014,17 @@ fn spawn_windows_global_hotkey_listener(
                 if is_mini_exp || edge == "none" {
                     last_mini_cursor = None;
                     if last_mini_ignore_cursor != Some(false) {
-                        if let Some(win) = app_handle.get_webview_window("mini_player") {
-                            let _ = win.set_ignore_cursor_events(false);
-                        }
+                        let app_ct = app_handle.clone();
+                        let vis_ct = mini_visible.clone();
+                        let _ = app_handle.run_on_main_thread(move || {
+                            if let Some(win) = app_ct.get_webview_window("mini_player") {
+                                if vis_ct.load(Ordering::Acquire) {
+                                    set_mini_click_through(&win, false);
+                                } else {
+                                    set_mini_click_through(&win, true);
+                                }
+                            }
+                        });
                         last_mini_ignore_cursor = Some(false);
                     }
                     was_in_mini_island = true;
@@ -5320,7 +6100,17 @@ fn spawn_windows_global_hotkey_listener(
 
                                     let desired_ignore = !in_island;
                                     if last_mini_ignore_cursor != Some(desired_ignore) {
-                                        let _ = win.set_ignore_cursor_events(desired_ignore);
+                                        let app_ct = app_handle.clone();
+                                        let vis_ct = mini_visible.clone();
+                                        let _ = app_handle.run_on_main_thread(move || {
+                                            if let Some(mw) = app_ct.get_webview_window("mini_player") {
+                                                if vis_ct.load(Ordering::Acquire) {
+                                                    set_mini_click_through(&mw, desired_ignore);
+                                                } else {
+                                                    set_mini_click_through(&mw, true);
+                                                }
+                                            }
+                                        });
                                         last_mini_ignore_cursor = Some(desired_ignore);
                                     }
                                     if was_in_mini_island && !in_island {
@@ -5418,6 +6208,17 @@ fn spawn_windows_global_hotkey_listener(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 0. 进程级单实例互斥守卫（必须在 WebView2、AppStore、托盘与 Tauri Builder 初始化之前执行）：
+    //    小窗模式、最小化至托盘或已有实例在后台运行时，再次点击任务栏固定图标 / 桌面快捷方式会立即将前台焦点权限
+    //    移交给已有主实例并唤醒恢复主窗口，本进程在数毫秒内静默退出，彻底杜绝无上限多开进程与重复托盘图标。
+    let single_instance_guard = match single_instance::SingleInstanceGuard::acquire() {
+        single_instance::AcquireOutcome::Primary(guard) => Arc::new(guard),
+        single_instance::AcquireOutcome::SecondaryWokeExisting { .. } => {
+            return;
+        }
+    };
+    let single_instance_for_setup = single_instance_guard.clone();
+
     // 强制将 WebView2 用户数据与浏览器缓存目录重定向至软件安装目录下的 webview_data，避免占用 C 盘 AppData\Local
     let webview_data_dir = kugou::store::resolve_webview_data_dir();
     if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
@@ -5455,8 +6256,14 @@ pub fn run() {
     let mini_player_snapshot = Arc::new(std::sync::Mutex::new(None));
     let mini_snap_anim_gen = Arc::new(AtomicU64::new(0));
     let mini_yielded_for_fullscreen = Arc::new(AtomicBool::new(false));
+    let mini_player_ready = Arc::new(AtomicBool::new(false));
+    let mini_exiting_anim = Arc::new(AtomicBool::new(false));
+    let mini_exiting_anim_for_setup = mini_exiting_anim.clone();
     let main_was_maximized = Arc::new(AtomicBool::new(false));
     let main_was_maximized_for_event = main_was_maximized.clone();
+    let main_transition_gen = Arc::new(AtomicU64::new(0));
+    let motion_level = Arc::new(std::sync::Mutex::new("best".to_string()));
+    let cover_accent_rgb = Arc::new(std::sync::Mutex::new(((94u8, 106u8, 210u8), (45u8, 212u8, 191u8))));
     let main_low_memory_active = Arc::new(AtomicBool::new(false));
     let main_low_memory_for_event = main_low_memory_active.clone();
     let hotkey_thread_id = Arc::new(AtomicU32::new(0));
@@ -5485,18 +6292,65 @@ pub fn run() {
             mini_player_snapshot,
             mini_snap_anim_gen,
             mini_yielded_for_fullscreen,
+            mini_player_ready,
+            mini_exiting_anim,
             main_was_maximized,
+            main_transition_gen,
+            motion_level,
+            cover_accent_rgb,
             main_low_memory_active,
             hotkey_thread_id,
             active_download_cancels,
             authorized_font_import_paths,
         })
         .setup(move |app| {
+            {
+                let app_wake = app.handle().clone();
+                single_instance_for_setup.attach_wake_handler(move || {
+                    let st = app_wake.state::<AppState>();
+                    restore_main_from_mini(&app_wake, &st);
+                });
+            }
             if let Some(w) = app.get_webview_window("main") {
                 harden_desktop_webview2(&w);
                 install_main_window_nc_paint_subclass(&w);
                 apply_main_window_zero_border_dwm(&w);
                 apply_main_window_bg_color(&w, 12, 14, 20);
+            }
+            // 启动 1.8s 后空闲后台静默预热隐藏态 mini_player 子窗，彻底消除首次进小窗的 WebView2 冷启动空档；
+            // 加载就绪后自动切低内存并 TrySuspend，平时零活跃开销。
+            {
+                let app_warm = app.handle().clone();
+                let mini_vis_warm = mini_player_visible_for_setup.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+                    let app_ui = app_warm.clone();
+                    let vis_flag = mini_vis_warm.clone();
+                    let _ = app_warm.run_on_main_thread(move || {
+                        if app_ui.get_webview_window("mini_player").is_none() {
+                            if let Some(mini_win) = ensure_mini_player_window(&app_ui) {
+                                if !vis_flag.load(Ordering::Acquire) {
+                                    // 仅做 HWND 隐藏+穿透+去置顶，保留 WebView2 活跃直到 CMD_MINI_PLAYER_READY（或 2.4s 兜底）完成挂起
+                                    hide_mini_player_hwnd_only(&mini_win);
+                                    // 兜底 2.4s 后若用户仍未进入小窗则强制挂起省内存
+                                    let app_susp = app_ui.clone();
+                                    let vis_susp = vis_flag.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        tokio::time::sleep(std::time::Duration::from_millis(2400))
+                                            .await;
+                                        if !vis_susp.load(Ordering::Acquire) {
+                                            schedule_subwindow_suspend(
+                                                &app_susp,
+                                                "mini_player",
+                                                vis_susp,
+                                            );
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    });
+                });
             }
             #[cfg(target_os = "windows")]
             spawn_windows_global_hotkey_listener(
@@ -5509,6 +6363,7 @@ pub fn run() {
                 desktop_lyric_locked_for_setup.clone(),
                 desktop_lyric_visible_for_setup.clone(),
                 mini_player_visible_for_setup.clone(),
+                mini_exiting_anim_for_setup.clone(),
                 mini_player_expanded_for_setup.clone(),
                 mini_player_dock_edge_for_setup.clone(),
             );
@@ -5630,16 +6485,12 @@ pub fn run() {
                     WindowEvent::CloseRequested { api, .. } => {
                         if close_to_tray_for_event.load(Ordering::Relaxed) {
                             api.prevent_close();
-                            let is_max = window
-                                .app_handle()
-                                .get_webview_window("main")
-                                .map(|mw| is_hwnd_zoomed(&mw))
-                                .unwrap_or_else(|| window.is_maximized().unwrap_or(false));
-                            main_was_maximized_for_event.store(is_max, Ordering::Relaxed);
                             if let Some(mw) = window.app_handle().get_webview_window("main") {
-                                sync_main_low_memory_state(&mw, &main_low_memory_for_event, true);
+                                let st = window.app_handle().state::<AppState>();
+                                hide_main_window_cleanly(&mw, &st);
+                            } else {
+                                let _ = window.hide();
                             }
-                            let _ = window.hide();
                         } else {
                             window.app_handle().exit(0);
                         }
@@ -5654,10 +6505,26 @@ pub fn run() {
                         let state = app.state::<AppState>();
                         restore_main_from_mini(&app, &state);
                     }
-                    WindowEvent::Focused(false) | WindowEvent::Resized(_) => {
+                    WindowEvent::Focused(false) => {
                         let app = window.app_handle().clone();
                         let st = app.state::<AppState>();
-                        if st.mini_player_visible.load(Ordering::Relaxed) {
+                        if st.mini_player_visible.load(Ordering::Acquire) {
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(35));
+                                let app_ui = app.clone();
+                                let _ = app.run_on_main_thread(move || {
+                                    let st_inner = app_ui.state::<AppState>();
+                                    heal_mini_player_window(&app_ui, &st_inner, false);
+                                });
+                            });
+                        }
+                    }
+                    WindowEvent::Resized(_) => {
+                        let app = window.app_handle().clone();
+                        let st = app.state::<AppState>();
+                        if st.mini_player_visible.load(Ordering::Acquire)
+                            && window.is_visible().unwrap_or(false)
+                        {
                             std::thread::spawn(move || {
                                 std::thread::sleep(std::time::Duration::from_millis(35));
                                 let app_ui = app.clone();
@@ -5805,6 +6672,8 @@ pub fn run() {
             snap_desktop_lyric_position_cmd,
             focus_main_window_cmd,
             sync_main_window_bg_color_cmd,
+            sync_motion_level_cmd,
+            hide_main_to_tray_cmd,
             push_desktop_lyric_sync_cmd,
             pull_desktop_lyric_sync_cmd,
             send_desktop_lyric_command_cmd,
@@ -6227,6 +7096,403 @@ mod settings_backend_tests {
             let _ = DeleteObject(hbmp);
             let _ = DeleteDC(hdc_mem);
             let _ = ReleaseDC(hwnd, hdc_win);
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_nc_paint_subclass_preserves_unmaximized_dwm_insets_after_maximized_cycle() {
+        use std::sync::atomic::AtomicUsize;
+
+        #[repr(C)]
+        #[derive(Default, Clone, Copy)]
+        struct WinRect {
+            left: i32,
+            top: i32,
+            right: i32,
+            bottom: i32,
+        }
+        #[repr(C)]
+        #[derive(Default, Clone, Copy)]
+        struct WinPoint {
+            x: i32,
+            y: i32,
+        }
+        #[repr(C)]
+        struct WinNcCalcSizeParams {
+            rgrc: [WinRect; 3],
+            lppos: usize,
+        }
+        #[repr(C)]
+        #[derive(Default)]
+        struct WinMonitorInfo {
+            cb_size: u32,
+            rc_monitor: WinRect,
+            rc_work: WinRect,
+            dw_flags: u32,
+        }
+        #[repr(C)]
+        struct WinClassExW {
+            cb_size: u32,
+            style: u32,
+            lpfn_wnd_proc:
+                Option<unsafe extern "system" fn(isize, u32, usize, isize) -> isize>,
+            cb_cls_extra: i32,
+            cb_wnd_extra: i32,
+            h_instance: isize,
+            h_icon: isize,
+            h_cursor: isize,
+            hbr_background: isize,
+            lpsz_menu_name: *const u16,
+            lpsz_class_name: *const u16,
+            h_icon_sm: isize,
+        }
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetModuleHandleW(lp_module_name: *const u16) -> isize;
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn RegisterClassExW(lpwcx: *const WinClassExW) -> u16;
+            fn CreateWindowExW(
+                dw_ex_style: u32,
+                lp_class_name: *const u16,
+                lp_window_name: *const u16,
+                dw_style: u32,
+                x: i32,
+                y: i32,
+                n_width: i32,
+                n_height: i32,
+                h_wnd_parent: isize,
+                h_menu: isize,
+                h_instance: isize,
+                lp_param: isize,
+            ) -> isize;
+            fn DestroyWindow(hwnd: isize) -> i32;
+            fn DefWindowProcW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+            fn SendMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+            fn ShowWindow(hwnd: isize, n_cmd_show: i32) -> i32;
+            fn SetWindowLongW(hwnd: isize, n_index: i32, dw_new_long: i32) -> i32;
+            fn SetWindowPos(
+                hwnd: isize,
+                hwnd_insert_after: isize,
+                x: i32,
+                y: i32,
+                cx: i32,
+                cy: i32,
+                u_flags: u32,
+            ) -> i32;
+            fn IsZoomed(hwnd: isize) -> i32;
+            fn MonitorFromWindow(hwnd: isize, dw_flags: u32) -> isize;
+            fn GetMonitorInfoW(h_monitor: isize, lpmi: *mut WinMonitorInfo) -> i32;
+            fn GetWindowRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
+            fn GetClientRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
+            fn ClientToScreen(hwnd: isize, lp_point: *mut WinPoint) -> i32;
+            fn GetWindowDC(hwnd: isize) -> isize;
+            fn ReleaseDC(hwnd: isize, hdc: isize) -> i32;
+            fn PrintWindow(hwnd: isize, hdc_blt: isize, n_flags: u32) -> i32;
+            fn GetDpiForWindow(hwnd: isize) -> u32;
+            fn GetSystemMetricsForDpi(n_index: i32, dpi: u32) -> i32;
+        }
+        #[link(name = "gdi32")]
+        extern "system" {
+            fn CreateCompatibleDC(hdc: isize) -> isize;
+            fn CreateCompatibleBitmap(hdc: isize, cx: i32, cy: i32) -> isize;
+            fn SelectObject(hdc: isize, h: isize) -> isize;
+            fn DeleteObject(ho: isize) -> i32;
+            fn DeleteDC(hdc: isize) -> i32;
+            fn GetPixel(hdc: isize, x: i32, y: i32) -> u32;
+        }
+        #[link(name = "dwmapi")]
+        extern "system" {
+            fn DwmSetWindowAttribute(
+                hwnd: isize,
+                dw_attribute: u32,
+                pv_attribute: *const std::ffi::c_void,
+                cb_attribute: u32,
+            ) -> i32;
+            fn DwmGetWindowAttribute(
+                hwnd: isize,
+                dw_attribute: u32,
+                pv_attribute: *mut std::ffi::c_void,
+                cb_attribute: u32,
+            ) -> i32;
+            fn DwmFlush() -> i32;
+        }
+
+        static NCPAINT_DELEGATED_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static NCACTIVATE_LPARAM_PRESERVED: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "system" fn mock_tao_shadow_wnd_proc(
+            hwnd: isize,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+        ) -> isize {
+            const WM_NCCALCSIZE: u32 = 0x0083;
+            const WM_NCPAINT: u32 = 0x0085;
+            const WM_NCACTIVATE: u32 = 0x0086;
+
+            if msg == WM_NCCALCSIZE {
+                let rect_ptr = if wparam == 0 {
+                    lparam as *mut WinRect
+                } else {
+                    &mut (*(lparam as *mut WinNcCalcSizeParams)).rgrc[0] as *mut WinRect
+                };
+                if IsZoomed(hwnd) != 0 {
+                    let hmon = MonitorFromWindow(hwnd, 2);
+                    let mut mi = WinMonitorInfo {
+                        cb_size: std::mem::size_of::<WinMonitorInfo>() as u32,
+                        ..Default::default()
+                    };
+                    if hmon != 0 && GetMonitorInfoW(hmon, &mut mi) != 0 {
+                        let mut rc = mi.rc_work;
+                        // 同步模拟自动隐藏任务栏 1px 留边，确保最大化无白线与非最大化无蓝边同时成立
+                        rc.bottom -= 1;
+                        *rect_ptr = rc;
+                        return 0;
+                    }
+                } else {
+                    let dpi = GetDpiForWindow(hwnd).max(96);
+                    let frame_thick =
+                        GetSystemMetricsForDpi(32, dpi) + GetSystemMetricsForDpi(92, dpi);
+                    let top_inset = ((dpi as f32) / 96.0).round() as i32;
+                    (*rect_ptr).left += frame_thick;
+                    (*rect_ptr).top += top_inset;
+                    (*rect_ptr).right -= frame_thick;
+                    (*rect_ptr).bottom -= frame_thick;
+                    return 0;
+                }
+            } else if msg == WM_NCPAINT {
+                NCPAINT_DELEGATED_COUNT.fetch_add(1, Ordering::Relaxed);
+            } else if msg == WM_NCACTIVATE && lparam != -1 {
+                NCACTIVATE_LPARAM_PRESERVED.fetch_add(1, Ordering::Relaxed);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+
+        unsafe fn pump_window_msgs(ms: u64) {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            let mut m = MSG::default();
+            while std::time::Instant::now() < deadline {
+                while PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&m);
+                    let _ = DispatchMessageW(&m);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+            let _ = DwmFlush();
+        }
+
+        unsafe {
+            let hinst = GetModuleHandleW(std::ptr::null());
+            let cls_name: Vec<u16> = "BmTestUnmaxDwmInsetPreserveV2\0".encode_utf16().collect();
+            let wc = WinClassExW {
+                cb_size: std::mem::size_of::<WinClassExW>() as u32,
+                style: 0x0023,
+                lpfn_wnd_proc: Some(mock_tao_shadow_wnd_proc),
+                cb_cls_extra: 0,
+                cb_wnd_extra: 0,
+                h_instance: hinst,
+                h_icon: 0,
+                h_cursor: 0,
+                hbr_background: 0,
+                lpsz_menu_name: std::ptr::null(),
+                lpsz_class_name: cls_name.as_ptr(),
+                h_icon_sm: 0,
+            };
+            let _ = RegisterClassExW(&wc);
+
+            let base_style: u32 =
+                0x00C00000 | 0x04000000 | 0x00080000 | 0x00040000 | 0x00010000 | 0x00020000;
+            let hwnd = CreateWindowExW(
+                0x00040100,
+                cls_name.as_ptr(),
+                cls_name.as_ptr(),
+                base_style,
+                140,
+                120,
+                760,
+                500,
+                0,
+                0,
+                hinst,
+                0,
+            );
+            assert!(hwnd != 0);
+
+            const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+            const DWMWA_CLOAK: u32 = 13;
+            const DWMWA_BORDER_COLOR: u32 = 34;
+            const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+            const PW_RENDERFULLCONTENT: u32 = 2;
+
+            let border_none = DWMWA_COLOR_NONE;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR,
+                &border_none as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u32,
+            );
+
+            MAIN_BG_COLORREF.store(12u32 | (14u32 << 8) | (20u32 << 16), Ordering::Relaxed);
+            install_nc_paint_subclass_on_hwnd(hwnd);
+
+            let _ = ShowWindow(hwnd, 5); // SW_SHOW
+            pump_window_msgs(80);
+
+            // 记录初始正常默认窗口的 DWM 透明扩展帧厚度（Windows 11 上左右底应为 ~7px）
+            let mut wr0 = WinRect::default();
+            let mut ext0 = WinRect::default();
+            assert!(GetWindowRect(hwnd, &mut wr0) != 0);
+            let dwm_ok0 = DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                &mut ext0 as *mut WinRect as *mut _,
+                std::mem::size_of::<WinRect>() as u32,
+            ) == 0;
+            let init_left_inset = ext0.left - wr0.left;
+
+            // 覆盖四套主题（D1 / L1 / L2 / D2）反复完整循环：
+            // 最大化 -> 隐身进小窗 -> 隐身一步恢复最大化 -> 校验底边 1px 零白线 -> 还原回默认窗口大小 -> 校验 DWM 扩展帧与边缘像素无 Aero Basic 蓝框
+            let theme_colorrefs: [u32; 4] = [
+                12u32 | (14u32 << 8) | (20u32 << 16),   // D1 #0C0E14
+                246u32 | (248u32 << 8) | (252u32 << 16), // L1 #F6F8FC
+                232u32 | (224u32 << 8) | (208u32 << 16), // L2 #E8E0D0
+                26u32 | (17u32 << 8) | (22u32 << 16),   // D2 #1A1116
+            ];
+
+            for &theme_bg in &theme_colorrefs {
+                MAIN_BG_COLORREF.store(theme_bg, Ordering::Relaxed);
+                NCPAINT_DELEGATED_COUNT.store(0, Ordering::Relaxed);
+                NCACTIVATE_LPARAM_PRESERVED.store(0, Ordering::Relaxed);
+
+                let _ = ShowWindow(hwnd, 3); // SW_SHOWMAXIMIZED
+                pump_window_msgs(60);
+                assert_ne!(IsZoomed(hwnd), 0);
+
+                // 模拟进入 Mini 小窗：Cloak + SW_HIDE
+                let one: u32 = 1;
+                let zero: u32 = 0;
+                let _ = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &one as *const u32 as *const _, 4);
+                let _ = ShowWindow(hwnd, 0);
+                let _ =
+                    DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &zero as *const u32 as *const _, 4);
+                pump_window_msgs(40);
+
+                // 模拟退出小窗回最大化：Cloak + SW_SHOWMAXIMIZED + 解除 Cloak
+                let _ = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &one as *const u32 as *const _, 4);
+                let _ = ShowWindow(hwnd, 3);
+                paint_main_window_non_client_area(hwnd);
+                pump_window_msgs(40);
+                let _ =
+                    DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &zero as *const u32 as *const _, 4);
+                pump_window_msgs(60);
+                assert_ne!(IsZoomed(hwnd), 0);
+
+                // 校验 1：最大化态自动隐藏任务栏 1px 留边必须匹配当前主题底色，绝不漏纯白
+                let mut wr_m = WinRect::default();
+                let mut cr_m = WinRect::default();
+                let mut tl_m = WinPoint::default();
+                assert!(GetWindowRect(hwnd, &mut wr_m) != 0);
+                assert!(GetClientRect(hwnd, &mut cr_m) != 0);
+                assert!(ClientToScreen(hwnd, &mut tl_m) != 0);
+                let wm = wr_m.right - wr_m.left;
+                let hm = wr_m.bottom - wr_m.top;
+                let gap_y = ((tl_m.y - wr_m.top) + (cr_m.bottom - cr_m.top)).min(hm - 1);
+                let hdc_win_m = GetWindowDC(hwnd);
+                let hdc_mem_m = CreateCompatibleDC(hdc_win_m);
+                let hbmp_m = CreateCompatibleBitmap(hdc_win_m, wm, hm);
+                let old_m = SelectObject(hdc_mem_m, hbmp_m);
+                assert_eq!(PrintWindow(hwnd, hdc_mem_m, PW_RENDERFULLCONTENT), 1);
+                let max_gap_px = GetPixel(hdc_mem_m, wm / 2, gap_y);
+                assert_eq!(
+                    max_gap_px, theme_bg,
+                    "最大化态底部 1px 非客户区必须精准匹配当前主题底色，杜绝白线"
+                );
+                let _ = SelectObject(hdc_mem_m, old_m);
+                let _ = DeleteObject(hbmp_m);
+                let _ = DeleteDC(hdc_mem_m);
+                let _ = ReleaseDC(hwnd, hdc_win_m);
+
+                // 模拟 tao unmaximize() 完整序列
+                let _ = ShowWindow(hwnd, 9); // SW_RESTORE
+                let _ = SetWindowLongW(hwnd, -16, (base_style | 0x1000_0000) as i32);
+                let _ = SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037);
+                let _ = ShowWindow(hwnd, 5);
+                let _ = SendMessageW(hwnd, 0x0085, 1, 0); // WM_NCPAINT
+                let _ = SendMessageW(hwnd, 0x0086, 1, 0); // WM_NCACTIVATE
+                pump_window_msgs(90);
+                assert_eq!(IsZoomed(hwnd), 0);
+
+                // 校验 2：无论最大化还是还原态，WM_NCPAINT 与 WM_NCACTIVATE 都必须透传给原生 DefWindowProcW
+                assert!(
+                    NCPAINT_DELEGATED_COUNT.load(Ordering::Relaxed) >= 1,
+                    "WM_NCPAINT 必须始终先透传给原生 DefWindowProcW，绝不能吞掉消息导致 DWM 退化"
+                );
+                assert!(
+                    NCACTIVATE_LPARAM_PRESERVED.load(Ordering::Relaxed) >= 1,
+                    "WM_NCACTIVATE 必须始终保留原生 lparam 透传给 DefWindowProcW"
+                );
+
+                // 校验 3：Windows 11 原生 DWM 扩展阴影帧（DWMWA_EXTENDED_FRAME_BOUNDS）绝不能坍塌归零！
+                let mut wr = WinRect::default();
+                let mut ext = WinRect::default();
+                assert!(GetWindowRect(hwnd, &mut wr) != 0);
+                if dwm_ok0 && init_left_inset > 0 {
+                    assert_eq!(
+                        DwmGetWindowAttribute(
+                            hwnd,
+                            DWMWA_EXTENDED_FRAME_BOUNDS,
+                            &mut ext as *mut WinRect as *mut _,
+                            std::mem::size_of::<WinRect>() as u32,
+                        ),
+                        0
+                    );
+                    assert_eq!(
+                        ext.left - wr.left,
+                        init_left_inset,
+                        "还原为默认窗口大小后左侧 DWM 透明阴影帧厚度必须完整保留，禁止退化归零"
+                    );
+                    assert_eq!(
+                        wr.right - ext.right,
+                        init_left_inset,
+                        "还原为默认窗口大小后右侧 DWM 透明阴影帧厚度必须完整保留"
+                    );
+                    assert_eq!(
+                        wr.bottom - ext.bottom,
+                        init_left_inset,
+                        "还原为默认窗口大小后底部 DWM 透明阴影帧厚度必须完整保留"
+                    );
+                }
+
+                // 校验 4：采样还原态左右/底边非客户区像素，严禁出现 Windows 7 Aero Basic 蓝灰边框 (186,210,234) 或涂色色带！
+                let w = wr.right - wr.left;
+                let h = wr.bottom - wr.top;
+                let hdc_win = GetWindowDC(hwnd);
+                let hdc_mem = CreateCompatibleDC(hdc_win);
+                let hbmp = CreateCompatibleBitmap(hdc_win, w, h);
+                let old = SelectObject(hdc_mem, hbmp);
+                assert_eq!(PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT), 1);
+                let left_px = GetPixel(hdc_mem, 3, h / 2);
+                let right_px = GetPixel(hdc_mem, w - 4, h / 2);
+                let bottom_px = GetPixel(hdc_mem, w / 2, h - 4);
+                assert_eq!(
+                    (left_px, right_px, bottom_px),
+                    (0, 0, 0),
+                    "还原为默认窗口大小后左右底边阴影热区必须保持纯粹透明（0,0,0），禁止出现 Aero Basic 蓝框或实体色带"
+                );
+                let _ = SelectObject(hdc_mem, old);
+                let _ = DeleteObject(hbmp);
+                let _ = DeleteDC(hdc_mem);
+                let _ = ReleaseDC(hwnd, hdc_win);
+            }
+
             let _ = DestroyWindow(hwnd);
         }
     }

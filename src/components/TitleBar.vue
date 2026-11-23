@@ -373,6 +373,7 @@
 import { computed, nextTick } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAppStore, type MainTab } from "../stores/appStore";
+import { kugouClient } from "../api/kugou";
 import { runThemeCircularTransition } from "../utils/microMotionFx";
 import PlumpIcon from "./PlumpIcon.vue";
 
@@ -597,7 +598,7 @@ async function toggleMaximizeWin() {
 async function closeWin() {
   try {
     if (store.closeToTray) {
-      await getCurrentWindow().hide();
+      await kugouClient.hideMainToTray().catch(() => getCurrentWindow().hide());
       store.notify("微风音乐已最小化至系统托盘");
     } else {
       await getCurrentWindow().close();

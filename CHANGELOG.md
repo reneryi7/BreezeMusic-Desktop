@@ -8,10 +8,17 @@
 
 ## [Unreleased]
 
+### 优化 (Changed)
+- **全新重做主窗口 ↔ Mini 小窗 GPU 空间势能过渡动效引擎**：彻底弃用旧版硬切隐藏/显示与事后弹跳补丁，新增 `src-tauri/src/window_transition.rs` 原生 D3D11 + DirectComposition (`WS_EX_NOREDIRECTIONBITMAP`) 硬件合成舞台，通过分段三次 Hermite 样条精准驱动 Apple 高阻尼曲线、动态抗锯齿圆角（最大化 `0px ↔ 22px`、默认窗 `8px ↔ 22px`）、等比缩放与指向小窗实体的空间牵引位移，并与 `MiniPlayerWindow.vue` 外层弹簧入场 / 释能退场动效及启动空闲后台预热严密锁相；全面支持三档动效 (`best` / `standard` / `none`) 与系统减弱动态效果。
+
 ### 修复 (Fixed)
 - **修复贴边灵动岛幽灵按钮透出与误触**：为 `MiniPlayerWindow.vue` 双层形态切换补齐原生 `inert`、`visibility: hidden`、不可击穿后代 `pointer-events: none !important` 与卡片动作状态门控，彻底消除贴边收起态悬浮/点击右侧播放钮时错误弹出「返回主窗口」等展开层提示并触发对应功能的问题。
 - **加固贴边灵动岛切屏/切窗/`Win+D` 稳定性并支持全屏智能礼让**：为 `mini_player` 补齐 Win32 `WS_EX_TOOLWINDOW` 透明叠层样式加固、磁吸动画代号防竞态、多显示器切屏越界自动重吸附与后台低开销切窗自愈守护；普通切窗与显示桌面下始终稳定不消失，同屏运行全屏视频/游戏时智能礼让并在退出全屏后自动恢复置顶。
-- **根治最大化进入小窗再返回主窗口底部出现白线**：通过 `SetWindowSubclass` 为主窗口挂载 `WM_NCPAINT` / `WM_NCACTIVATE`（`lparam = -1`）非客户区防白边子类化守护，使用当前主题底色覆盖 `ExcludeClipRect` 以外的非客户区重定向位图；同时在最大化恢复的首轮可见同步中无条件执行锁绘 `SW_RESTORE -> SW_SHOWMAXIMIZED` 复位并同步 `WRY_WEBVIEW` 容器与 WebView2 `Bounds`，彻底消除 Windows 内核在已最大化隐藏窗口重新显示时刷出的纯白底边。
+- **彻底根治最大化进入小窗/托盘再恢复的底部白线、生硬双跳、透明幽灵窗遮挡与默认窗两边渲染异常**：
+  - 全面绕开 `tao::set_visible` 在最大化隐藏/恢复时破坏 `WS_VISIBLE` / `GWL_STYLE` 的底层缺陷，改为在 `DWMWA_CLOAK = 1` + `DWMWA_TRANSITIONS_FORCEDISABLED = 1` 隐身掩护下原生一步 `SW_SHOWMAXIMIZED` 恢复并原子校准客户区、无描边 DWM 与 WebView2 `Bounds`，再经 GPU 空间舒展与 65ms 交叉溶解无痕揭幕，彻底杜绝「先变回默认窗口大小再快速最大化」与底部白边。
+  - 修复 `mini_player` 经由原生 `ShowWindow` 显示导致 `tao` 内部 `WindowFlags::VISIBLE` 缓存漂移、退出小窗调用 `win.hide()` 静默失效并残留 480×228 全透明置顶窗口遮挡主界面与桌面点击的严重缺陷；新增四重防线原生强制隐藏（退出第 0ms 立即开启点击穿透、同步 `win.hide()` + Win32 `SW_HIDE` + 剥离 `HWND_TOPMOST` + 后台幽灵窗看门狗自愈），并将贴边点击穿透切换改为原子 `GWL_EXSTYLE` 操作（零抢焦、保 `WS_EX_TOOLWINDOW`、绝不误隐藏）。
+  - 彻底根治「最大化 → 小窗 → 退出回最大化 → 还原为默认窗口大小」后左右/底部边缘退化为 Windows 7 Aero Basic 蓝灰粗框或实体色带的底层缺陷：修正 `main_window_nc_subclass_proc` 中最大化态吞掉 `WM_NCPAINT`（未先调用 `DefSubclassProc` 即返回 `0`）以及 `WM_NCACTIVATE` 传入 `-1` 导致 Windows 11 DWM 永久撤销 `DWMWA_EXTENDED_FRAME_BOUNDS`（~7px 透明扩展阴影帧）的问题；现无论最大化还是默认窗口态均先原样透传原生 `DefSubclassProc`，仅在最大化态返回后补刷 1px 自动隐藏任务栏防白边底色，四套主题反复切换均 100% 保持无白线与无瑕 Win11 原生圆角柔影。
+- **新增原生 Win32 进程级单实例守卫与跨进程唤醒（杜绝小窗/托盘下重复多开进程）**：新增 `src-tauri/src/single_instance.rs`，在 WebView2、托盘与 Tauri Builder 初始化之前通过 `Local\` 会话级命名 Mutex + 0% CPU 休眠的 `HWND_MESSAGE` 宿主窗口完成原子单实例判定；小窗模式、托盘常驻或最小化状态下点击任务栏固定图标、桌面快捷方式或连点双击时，不再拉起新窗口与重复托盘图标，而是通过 `AllowSetForegroundWindow` 移交前台焦点令牌并平滑唤醒/恢复已有主窗口（含 260ms 连点防抖与 `AttachThreadInput` 置前加固）。
 
 ---
 
