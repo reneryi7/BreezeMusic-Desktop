@@ -19,26 +19,26 @@ withDefaults(
 </script>
 
 <template>
-  <section class="bms-card" :data-setting-id="settingId">
-    <header class="bms-card-head">
-      <div class="bms-card-head-left">
-        <div v-if="icon" class="bms-card-icon">
-          <PlumpIcon :name="icon" :size="18" :color="iconColor" />
+  <section class="bms-section" :data-setting-id="settingId">
+    <header class="bms-section-head">
+      <div class="bms-section-head-left">
+        <div class="bms-section-title-row">
+          <span v-if="icon" class="bms-section-icon" aria-hidden="true">
+            <PlumpIcon :name="icon" :size="15" :color="iconColor" />
+          </span>
+          <h2 class="bms-section-title">{{ title }}</h2>
         </div>
-        <div>
-          <h2 class="bms-card-title">{{ title }}</h2>
-          <p v-if="subtitle" class="bms-card-sub">{{ subtitle }}</p>
-        </div>
+        <p v-if="subtitle" class="bms-section-sub">{{ subtitle }}</p>
       </div>
       <div
         v-if="$slots.headerRight || $slots.actions"
-        class="bms-card-head-right"
+        class="bms-section-head-right"
       >
         <slot name="headerRight" />
         <slot name="actions" />
       </div>
     </header>
-    <div class="bms-card-body">
+    <div class="bms-panel">
       <slot />
     </div>
   </section>

@@ -206,11 +206,12 @@ function handleDisableUnlockedFeature(enabled: boolean) {
 
 <style scoped>
 .bms-about-hero {
-  border-radius: var(--bm-r-xl, 24px);
-  padding: 24px 26px;
-  background: var(--bg-card);
-  box-shadow: var(--shadow-soft);
-  backdrop-filter: blur(20px);
+  border-radius: 20px;
+  padding: 22px 24px;
+  background: var(--bms-surface-panel);
+  box-shadow: var(--bms-panel-shadow);
+  backdrop-filter: blur(22px) saturate(155%);
+  -webkit-backdrop-filter: blur(22px) saturate(155%);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -219,17 +220,13 @@ function handleDisableUnlockedFeature(enabled: boolean) {
 }
 
 .bms-about-hero.is-flash-highlight {
-  box-shadow: 0 0 30px -2px color-mix(in srgb, var(--primary) 50%, transparent);
+  box-shadow: 0 0 30px -2px color-mix(in oklab, var(--primary) 50%, transparent);
 }
 
-.scheme-watercolor_light.light-variant-nordic_oat .bms-about-hero {
-  background: var(--bms-surface-card);
-  backdrop-filter: none;
-}
-
+.scheme-watercolor_light.light-variant-nordic_oat .bms-about-hero,
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bms-about-hero {
-  background: var(--bms-surface-card);
   backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .bms-about-brand-left {

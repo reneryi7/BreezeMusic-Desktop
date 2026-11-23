@@ -167,7 +167,11 @@ onBeforeUnmount(() => {
         :aria-selected="activeTab === 'global'"
         @click="activeTab = 'global'"
       >
-        <PlumpIcon name="sliders" :size="14" :color="activeTab === 'global' ? '#ffffff' : 'var(--coral)'" />
+        <PlumpIcon
+          name="sliders"
+          :size="14"
+          :color="activeTab === 'global' ? 'var(--primary-text, var(--primary))' : 'var(--text-muted)'"
+        />
         <span>系统全局热键</span>
         <span v-if="store.osGlobalHotkeysEnabled" class="bms-subtab-count">已启用</span>
       </button>
@@ -179,7 +183,11 @@ onBeforeUnmount(() => {
         :aria-selected="activeTab === 'inApp'"
         @click="activeTab = 'inApp'"
       >
-        <PlumpIcon name="sparkles" :size="14" :color="activeTab === 'inApp' ? '#ffffff' : 'var(--primary)'" />
+        <PlumpIcon
+          name="sparkles"
+          :size="14"
+          :color="activeTab === 'inApp' ? 'var(--primary-text, var(--primary))' : 'var(--text-muted)'"
+        />
         <span>应用内快捷键</span>
       </button>
     </div>
@@ -438,41 +446,65 @@ onBeforeUnmount(() => {
 .bms-hk-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  border-radius: var(--bm-r-lg, 18px);
+  gap: 2px;
+  border-radius: 14px;
   transition: opacity 0.2s ease, box-shadow 0.25s ease;
 }
 
 .bms-hk-list.is-dimmed {
-  opacity: 0.58;
+  opacity: 0.54;
 }
 
 .bms-hk-list.is-flash-highlight {
-  box-shadow: 0 0 28px -2px color-mix(in srgb, var(--primary) 48%, transparent);
+  box-shadow: 0 0 28px -2px color-mix(in oklab, var(--primary) 46%, transparent);
 }
 
 .bms-hk-row {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: 12px 15px;
-  border-radius: var(--bm-r-lg, 18px);
-  background: var(--bms-surface-row);
-  transition: background 0.2s ease, box-shadow 0.2s ease;
+  padding: 11px 14px;
+  border-radius: 12px;
+  background: transparent;
+  transition: background 0.18s ease, box-shadow 0.2s ease;
+}
+
+.bms-hk-row + .bms-hk-row::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 14px;
+  right: 14px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--bms-hairline-soft) 6%,
+    var(--bms-hairline-soft) 94%,
+    transparent 100%
+  );
+  pointer-events: none;
+  transition: opacity 0.18s ease;
 }
 
 .bms-hk-row:hover {
-  background: var(--bms-surface-row-hover);
+  background: var(--bms-row-hover);
+}
+
+.bms-hk-row:hover + .bms-hk-row::before,
+.bms-hk-row + .bms-hk-row:hover::before {
+  opacity: 0;
 }
 
 .bms-hk-row.is-recording {
-  background: color-mix(in srgb, var(--primary) 16%, var(--bms-surface-row));
-  box-shadow: 0 10px 24px -10px color-mix(in srgb, var(--primary) 42%, transparent);
+  background: var(--bms-tile-active-bg);
+  box-shadow: var(--bms-tile-active-shadow);
 }
 
 .bms-hk-row.is-conflict {
-  background: color-mix(in srgb, var(--coral) 12%, var(--bms-surface-row));
+  background: color-mix(in oklab, var(--coral) 10%, transparent);
 }
 
 .bms-hk-copy {
@@ -601,9 +633,9 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 15px;
-  border-radius: var(--bm-r-md, 14px);
-  background: var(--bms-surface-row);
+  padding: 11px 14px;
+  border-radius: 13px;
+  background: var(--bms-surface-tile);
   font-size: var(--bm-fs-caption, 12.5px);
   line-height: 1.55;
   color: var(--text-secondary);
@@ -611,17 +643,6 @@ onBeforeUnmount(() => {
 
 .bms-media-keys-note strong {
   color: var(--text-primary);
-}
-
-.scheme-watercolor_light.light-variant-nordic_oat .bms-hk-row,
-.scheme-watercolor_light.light-variant-nordic_oat .bms-media-keys-note,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .bms-hk-row,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .bms-media-keys-note {
-  background: var(--bms-surface-row);
-}
-
-.scheme-watercolor_light.light-variant-nordic_oat .bms-keycap-recorder {
-  background: #FAF6EE;
 }
 
 @media (max-width: 680px) {

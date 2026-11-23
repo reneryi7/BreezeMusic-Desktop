@@ -424,9 +424,9 @@ function setDesktopLyricMode(mode: TypographyDesktopLyricMode) {
 }
 
 .bmt-slot-card {
-  border-radius: var(--bm-r-lg, 18px);
-  padding: 16px 18px;
-  background: var(--bms-surface-row);
+  border-radius: 14px;
+  padding: 15px 16px;
+  background: var(--bms-surface-tile);
   display: flex;
   flex-direction: column;
   gap: 10px;

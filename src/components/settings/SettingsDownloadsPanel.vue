@@ -262,7 +262,11 @@ async function handleClearHistory() {
         :aria-selected="activeSubTab === 'queue'"
         @click="activeSubTab = 'queue'"
       >
-        <PlumpIcon name="download" :size="14" :color="activeSubTab === 'queue' ? '#ffffff' : 'var(--primary)'" />
+        <PlumpIcon
+          name="download"
+          :size="14"
+          :color="activeSubTab === 'queue' ? 'var(--primary-text, var(--primary))' : 'var(--text-muted)'"
+        />
         <span>下载队列</span>
         <span v-if="store.downloadQueue.length > 0" class="bms-subtab-count">
           {{ activeQueueCount > 0 ? `${activeQueueCount} 进行中` : store.downloadQueue.length }}
@@ -277,7 +281,11 @@ async function handleClearHistory() {
         :aria-selected="activeSubTab === 'history'"
         @click="activeSubTab = 'history'"
       >
-        <PlumpIcon name="history" :size="14" :color="activeSubTab === 'history' ? '#ffffff' : 'var(--mint)'" />
+        <PlumpIcon
+          name="history"
+          :size="14"
+          :color="activeSubTab === 'history' ? 'var(--primary-text, var(--primary))' : 'var(--text-muted)'"
+        />
         <span>下载记录</span>
         <span v-if="store.downloadHistory.length > 0" class="bms-subtab-count">
           {{ store.downloadHistory.length }}
@@ -292,7 +300,11 @@ async function handleClearHistory() {
         :aria-selected="activeSubTab === 'prefs'"
         @click="activeSubTab = 'prefs'"
       >
-        <PlumpIcon name="sliders" :size="14" :color="activeSubTab === 'prefs' ? '#ffffff' : 'var(--gold)'" />
+        <PlumpIcon
+          name="sliders"
+          :size="14"
+          :color="activeSubTab === 'prefs' ? 'var(--primary-text, var(--primary))' : 'var(--text-muted)'"
+        />
         <span>下载偏好</span>
       </button>
     </div>
@@ -1011,12 +1023,12 @@ async function handleClearHistory() {
 
 .bmd-filter-btn:hover:not(.active) {
   color: var(--text-primary);
-  background: var(--bms-neutral-control, var(--bg-hover-square));
 }
 
 .bmd-filter-btn.active {
-  background: var(--bms-focus-grad, var(--grad-kugou-primary));
-  color: #ffffff;
+  background: var(--bms-seg-thumb);
+  color: var(--bms-seg-thumb-text);
+  box-shadow: var(--bms-seg-thumb-shadow);
 }
 
 .bmd-queue-list,

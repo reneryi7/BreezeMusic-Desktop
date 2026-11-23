@@ -309,22 +309,14 @@ async function handleManualRefreshAll() {
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
-  padding: 16px 18px;
-  border-radius: var(--bm-r-lg, 18px);
-  background: var(--bms-surface-row);
+  padding: 15px 17px;
+  border-radius: 15px;
+  background: var(--bms-surface-tile);
   transition: box-shadow 0.25s ease;
 }
 
 .bms-account-hero.is-flash-highlight {
-  box-shadow: 0 0 28px -2px color-mix(in srgb, var(--primary) 52%, transparent);
-}
-
-.scheme-watercolor_light.light-variant-nordic_oat .bms-account-hero {
-  background: var(--bms-surface-row);
-}
-
-.scheme-abyssal_dark.dark-variant-velvet_nebula .bms-account-hero {
-  background: var(--bms-surface-row);
+  box-shadow: 0 0 28px -2px color-mix(in oklab, var(--primary) 52%, transparent);
 }
 
 .bms-account-left {

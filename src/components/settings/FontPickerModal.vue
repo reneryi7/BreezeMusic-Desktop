@@ -680,12 +680,12 @@ onBeforeUnmount(() => {
 
 .bm-fd-scope-btn:hover:not([aria-selected="true"]) {
   color: var(--text-primary);
-  background: var(--bms-neutral-control, var(--bg-hover-square));
 }
 
 .bm-fd-scope-btn[aria-selected="true"] {
-  background: var(--bms-focus-grad, var(--grad-kugou-primary));
-  color: #ffffff;
+  background: var(--bms-seg-thumb);
+  color: var(--bms-seg-thumb-text);
+  box-shadow: var(--bms-seg-thumb-shadow);
 }
 
 .bm-fd-head-actions {

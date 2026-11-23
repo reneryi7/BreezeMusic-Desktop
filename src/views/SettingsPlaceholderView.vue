@@ -26,6 +26,7 @@ const store = useAppStore();
 
 const searchQuery = ref("");
 const highlightedSettingId = ref("");
+const searchInputRef = ref<HTMLInputElement | null>(null);
 const detailStageRef = ref<HTMLElement | null>(null);
 const navGroupsRef = ref<HTMLElement | null>(null);
 const navGliderRef = ref<HTMLElement | null>(null);
@@ -110,32 +111,38 @@ const searchResults = computed<SettingsSearchEntry[]>(() => {
   });
 });
 
-function getNavDynamicBadge(id: SettingsSectionId): string {
+interface NavMetaInfo {
+  text: string;
+  alert?: boolean;
+}
+
+function getNavDynamicMeta(id: SettingsSectionId): NavMetaInfo | null {
   if (id === "appearance") {
-    return store.isDarkTheme
+    const code = store.isDarkTheme
       ? store.darkThemeVariantMeta.shortBadge.split(" ")[0]
       : store.lightThemeVariantMeta.shortBadge.split(" ")[0];
+    return code ? { text: code } : null;
   }
   if (id === "typography") {
     const pct = Math.round(store.typographyConfig.uiFontScale * 100);
-    if (pct !== 100) return `${pct}%`;
-    if (store.typographyConfig.uiFontFamily) return "自定";
-    return "";
+    if (pct !== 100) return { text: `${pct}%` };
+    if (store.typographyConfig.uiFontFamily) return { text: "自定" };
+    return null;
   }
   if (id === "playback") {
     const q = store.preferredQuality;
-    if (q === "high") return "Hi-Res";
-    if (q === "flac") return "SQ";
-    if (q === "320") return "320K";
-    return "128K";
+    if (q === "high") return { text: "Hi-Res" };
+    if (q === "flac") return { text: "SQ" };
+    if (q === "320") return { text: "320K" };
+    return { text: "128K" };
   }
   if (id === "lyrics") {
-    return store.desktopLyricEnabled ? "桌面开" : "";
+    return store.desktopLyricEnabled ? { text: "已开" } : null;
   }
   if (id === "local_music") {
     return store.localMusicSongs.length > 0
-      ? `${store.localMusicSongs.length}`
-      : "";
+      ? { text: `${store.localMusicSongs.length}` }
+      : null;
   }
   if (id === "downloads") {
     const running = store.downloadQueue.filter(
@@ -145,21 +152,24 @@ function getNavDynamicBadge(id: SettingsSectionId): string {
         t.status === "downloading" ||
         t.status === "tagging"
     ).length;
-    if (running > 0) return `${running} 进行中`;
+    if (running > 0) return { text: `${running} 进行中` };
     return store.downloadHistory.length > 0
-      ? `${store.downloadHistory.length}`
-      : "";
+      ? { text: `${store.downloadHistory.length}` }
+      : null;
   }
   if (id === "shortcuts") {
     if (
       store.osGlobalHotkeysEnabled &&
       store.globalHotkeyFailedActions.length > 0
     ) {
-      return `${store.globalHotkeyFailedActions.length} 冲突`;
+      return {
+        text: `${store.globalHotkeyFailedActions.length} 冲突`,
+        alert: true,
+      };
     }
-    return store.osGlobalHotkeysEnabled ? "全局开" : "";
+    return null;
   }
-  return "";
+  return null;
 }
 
 function setTabBtnRef(id: string, el: unknown) {
@@ -346,15 +356,26 @@ function handleSearchKeyDown(e: KeyboardEvent) {
   if (e.key === "Escape") {
     e.stopPropagation();
     searchQuery.value = "";
+    searchInputRef.value?.blur();
   } else if (e.key === "Enter" && searchResults.value.length > 0) {
     e.preventDefault();
     jumpToSearchEntry(searchResults.value[0]);
   }
 }
 
+function handleGlobalSettingsKeyDown(e: KeyboardEvent) {
+  if (store.isRecordingShortcut || store.isNowPlayingOpen) return;
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    searchInputRef.value?.focus();
+    searchInputRef.value?.select();
+  }
+}
+
 onMounted(() => {
   store.refreshCacheStats();
   store.refreshAutostartState();
+  window.addEventListener("keydown", handleGlobalSettingsKeyDown);
   nextTick(() => {
     scheduleNavGliderSync(false, false);
     if (typeof ResizeObserver !== "undefined" && navGroupsRef.value) {
@@ -367,6 +388,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleGlobalSettingsKeyDown);
   if (highlightTimer) {
     clearTimeout(highlightTimer);
     highlightTimer = null;
@@ -384,29 +406,20 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="bms-settings-shell" aria-label="微风音乐设置中心">
-    <!-- 左侧固定导航栏：精简抬头 + 搜索 + 单行清爽分类，永不随右侧内容滚动 -->
+    <!-- 左侧彻底透明无底色导览列：直接浮于画布，顶部直出命令搜索框 -->
     <aside class="bms-nav-rail" aria-label="设置分类导航">
-      <div class="bms-rail-head">
-        <div class="bms-rail-title-wrap">
-          <div class="bms-rail-logo-orb">
-            <PlumpIcon name="nav-settings" :size="16" color="var(--primary)" />
-          </div>
-          <span class="bms-rail-title">设置中心</span>
-        </div>
-        <span class="bms-rail-version">{{ APP_VERSION_TAG }}</span>
-      </div>
-
       <search class="bms-search-box" aria-label="检索设置项">
-        <PlumpIcon name="search" :size="15" color="var(--text-muted)" />
+        <PlumpIcon name="search" :size="14" color="var(--text-muted)" />
         <label for="bms-settings-search" class="bms-visually-hidden">
           搜索全部设置项
         </label>
         <input
           id="bms-settings-search"
+          ref="searchInputRef"
           v-model="searchQuery"
           type="search"
           class="bms-search-input"
-          placeholder="搜索主题、字体、音质、本地…"
+          placeholder="搜索设置…"
           autocomplete="off"
           autocorrect="off"
           autocapitalize="none"
@@ -422,6 +435,7 @@ onBeforeUnmount(() => {
         >
           <PlumpIcon name="close" :size="11" />
         </button>
+        <kbd v-else class="bms-search-kbd" aria-hidden="true">Ctrl F</kbd>
       </search>
 
       <div
@@ -439,6 +453,7 @@ onBeforeUnmount(() => {
         >
           <span class="bms-nav-glider-bar"></span>
         </span>
+
         <div
           v-for="group in groupedNavItems"
           :key="group.id"
@@ -460,23 +475,35 @@ onBeforeUnmount(() => {
             @click="selectSection(item.id)"
             @keydown="handleTabKeyDown($event, item.id)"
           >
-            <span class="bms-nav-icon-box">
-              <PlumpIcon
-                :name="item.icon"
-                :size="16"
-                :color="!isSearching && activeSection === item.id ? '#ffffff' : item.accentVar"
-              />
+            <span class="bms-nav-icon" aria-hidden="true">
+              <PlumpIcon :name="item.icon" :size="16" color="currentColor" />
             </span>
             <span class="bms-nav-title">{{ item.title }}</span>
             <span
-              v-if="getNavDynamicBadge(item.id)"
-              class="bms-nav-badge"
+              v-if="getNavDynamicMeta(item.id)"
+              class="bms-nav-meta"
+              :class="{ 'is-alert': getNavDynamicMeta(item.id)?.alert }"
             >
-              {{ getNavDynamicBadge(item.id) }}
+              <span
+                v-if="getNavDynamicMeta(item.id)?.alert"
+                class="bms-nav-alert-dot"
+                aria-hidden="true"
+              ></span>
+              <span>{{ getNavDynamicMeta(item.id)?.text }}</span>
             </span>
           </button>
         </div>
       </div>
+
+      <footer class="bms-rail-foot">
+        <button
+          type="button"
+          class="bms-rail-version-btn"
+          @click="selectSection('about')"
+        >
+          BreezeMusic · {{ APP_VERSION_TAG }}
+        </button>
+      </footer>
     </aside>
 
     <!-- 右侧独立滚动详情舞台 -->

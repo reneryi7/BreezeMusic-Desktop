@@ -38,9 +38,9 @@ withDefaults(
     :data-setting-id="settingId"
   >
     <div class="bms-row-info">
-      <div v-if="icon" class="bms-row-icon">
-        <PlumpIcon :name="icon" :size="17" :color="iconColor" />
-      </div>
+      <span v-if="icon" class="bms-row-icon" aria-hidden="true">
+        <PlumpIcon :name="icon" :size="16" :color="iconColor" />
+      </span>
       <div class="bms-row-copy">
         <div class="bms-row-title-line">
           <label

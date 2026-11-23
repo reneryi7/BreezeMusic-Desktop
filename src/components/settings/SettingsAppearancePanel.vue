@@ -47,54 +47,58 @@ const themePresetCards: ThemePresetCard[] = [
     mode: "dark",
     darkVariant: "obsidian_aurora",
     badge: "D1 · 极夜冷曜",
-    title: "黑曜石与暗夜极光",
-    description: "冷曜石夜色画布与冰川极光散景，层次清晰、专注通透。",
+    title: "黑曜石极光",
+    description: "冷曜石夜幕与冰川极光折射，通透专注。",
   },
   {
     key: "d2",
     mode: "dark",
     darkVariant: "velvet_nebula",
     badge: "D2 · 丝绒微醺",
-    title: "丝绒暗紫与星云流光",
-    description: "苦巧丝绒实体块面与香槟暖字，温润醇厚、久看不累。",
+    title: "丝绒星云",
+    description: "哑光苦巧实体块面与香槟暖字，温润耐看。",
   },
   {
     key: "l1",
     mode: "light",
     variant: "watercolor",
     badge: "L1 · 云宣水彩",
-    title: "棉纸水彩浸润",
-    description: "云宣瓷白画卷融合樱粉天青湿水彩，轻盈通透。",
+    title: "棉纸水彩",
+    description: "云宣瓷白融合樱粉天青湿水彩，轻盈透亮。",
   },
   {
     key: "l2",
     mode: "light",
     variant: "nordic_oat",
     badge: "L2 · 燕麦暖纸",
-    title: "晨雾燕麦与矿物纸感",
-    description: "三阶手抄暖纸与矿物青玉点缀，零彩光柔和护眼。",
+    title: "晨雾燕麦",
+    description: "三阶手抄暖纸配矿物青玉点缀，柔和护眼。",
   },
 ];
 
 const motionOptions: ReadonlyArray<{
   id: MotionLevel;
   label: string;
+  icon: string;
   desc: string;
 }> = [
   {
     id: "best",
     label: "最佳效果",
+    icon: "sparkles",
     desc: "完整弹性微交互、FLIP 封面飞行与 60fps 光学舞台",
   },
   {
     id: "standard",
     label: "普通效果",
+    icon: "wave",
     desc: "轻盈简洁过渡与节流渲染，兼顾流畅观感与节能",
   },
   {
     id: "none",
     label: "无效果",
-    desc: "零过渡即时切换、静态舞台底色，极速响应低占用",
+    icon: "sliders",
+    desc: "零过渡即时切换与静态舞台底色，极速低占用",
   },
 ];
 
@@ -103,9 +107,9 @@ const densityOptions: ReadonlyArray<{
   label: string;
   desc: string;
 }> = [
-  { id: "compact", label: "紧凑", desc: "同屏展示更多曲目与设置项" },
-  { id: "standard", label: "标准", desc: "默认平衡留白与阅读效率" },
-  { id: "spacious", label: "舒展", desc: "更宽裕的行高与视觉呼吸感" },
+  { id: "compact", label: "紧凑", desc: "同屏呈现更多曲目与设置项" },
+  { id: "standard", label: "标准", desc: "平衡留白呼吸感与阅读效率" },
+  { id: "spacious", label: "舒展", desc: "更宽裕的行距与从容节奏" },
 ];
 
 const accentTokens = computed(() => {
@@ -280,7 +284,7 @@ function handleDensityChange(density: UiDensityMode) {
     <!-- 1. 四套高定主题矩阵 -->
     <SettingsCard
       icon="palette-orb"
-      icon-color="var(--primary)"
+      icon-color="var(--primary-text, var(--primary))"
       title="主题氛围"
       subtitle="两套深色与两套浅色无框主题，支持跟随系统自动切换"
     >
@@ -292,7 +296,7 @@ function handleDensityChange(density: UiDensityMode) {
             :class="{ active: store.colorScheme === 'abyssal_dark' }"
             @click="setColorMode('abyssal_dark', $event)"
           >
-            <PlumpIcon name="moon" :size="13" />
+            <PlumpIcon name="moon" :size="13" color="currentColor" />
             <span>深色</span>
           </button>
           <button
@@ -301,7 +305,7 @@ function handleDensityChange(density: UiDensityMode) {
             :class="{ active: store.colorScheme === 'watercolor_light' }"
             @click="setColorMode('watercolor_light', $event)"
           >
-            <PlumpIcon name="sun" :size="13" />
+            <PlumpIcon name="sun" :size="13" color="currentColor" />
             <span>浅色</span>
           </button>
           <button
@@ -310,7 +314,7 @@ function handleDensityChange(density: UiDensityMode) {
             :class="{ active: store.colorScheme === 'system' }"
             @click="setColorMode('system', $event)"
           >
-            <PlumpIcon name="sparkles" :size="13" />
+            <PlumpIcon name="sparkles" :size="13" color="currentColor" />
             <span>跟随系统</span>
           </button>
         </div>
@@ -331,6 +335,9 @@ function handleDensityChange(density: UiDensityMode) {
           @click="applyPresetCard(card, $event)"
         >
           <div class="ts-mini-canvas" :class="`canvas-${card.key}`">
+            <span v-if="isCardActive(card)" class="ts-canvas-check" aria-hidden="true">
+              <PlumpIcon name="check" :size="11" color="#ffffff" />
+            </span>
             <div class="ts-mini-island">
               <span class="ts-mini-tab-active"></span>
               <span class="ts-mini-tab-dot"></span>
@@ -354,20 +361,14 @@ function handleDensityChange(density: UiDensityMode) {
           </div>
 
           <div class="ts-card-meta">
-            <div class="ts-card-badge-row">
-              <span class="ts-preset-code">{{ card.badge }}</span>
-              <span v-if="isCardActive(card)" class="ts-active-chip">
-                <PlumpIcon name="check" :size="11" color="#ffffff" />
-                <span>生效中</span>
-              </span>
-            </div>
+            <span class="ts-preset-code">{{ card.badge }}</span>
             <h3 class="ts-card-title">{{ card.title }}</h3>
             <p class="ts-card-desc">{{ card.description }}</p>
           </div>
         </button>
       </div>
 
-      <!-- 渐进式折叠色彩预览，默认清爽收起 -->
+      <!-- 轻量内联主题色板折叠条（与上方主题卡由柔光渐隐线区隔，默认极简收起） -->
       <div
         class="ts-palette-disclosure-wrap"
         data-setting-id="appearance-palette-preview"
@@ -384,7 +385,7 @@ function handleDensityChange(density: UiDensityMode) {
           @click="showPaletteDetails = !showPaletteDetails"
         >
           <div class="ts-palette-summary-left">
-            <span class="ts-palette-summary-title">当前主题色彩与徽章预览</span>
+            <span class="ts-palette-summary-title">主题色板与音质徽章预览</span>
             <div
               class="ts-mini-dot-strip"
               :class="{ 'is-dimmed': showPaletteDetails }"
@@ -399,9 +400,9 @@ function handleDensityChange(density: UiDensityMode) {
             </div>
           </div>
           <span class="ts-disclosure-toggle" :class="{ 'is-open': showPaletteDetails }">
-            <span class="ts-disclosure-label">{{ showPaletteDetails ? "收起预览" : "展开预览" }}</span>
+            <span class="ts-disclosure-label">{{ showPaletteDetails ? "收起" : "展开" }}</span>
             <span class="ts-disclosure-chevron" aria-hidden="true">
-              <PlumpIcon name="chevron-down" :size="14" />
+              <PlumpIcon name="chevron-down" :size="13" color="currentColor" />
             </span>
           </span>
         </button>
@@ -429,7 +430,7 @@ function handleDensityChange(density: UiDensityMode) {
                 </div>
               </div>
               <div class="ts-jelly-showcase">
-                <span class="ts-showcase-label">状态徽章预览：</span>
+                <span class="ts-showcase-label">状态徽章</span>
                 <span class="mini-badge hires">Hi-Res</span>
                 <span class="mini-badge sq">SQ</span>
                 <span class="mini-badge hq">HQ</span>
@@ -443,7 +444,7 @@ function handleDensityChange(density: UiDensityMode) {
       </div>
     </SettingsCard>
 
-    <!-- 2. 界面动效等级 & 界面信息密度（用户核心关注项） -->
+    <!-- 2. 界面动效等级 & 界面信息密度 -->
     <SettingsCard
       icon="sparkles"
       icon-color="var(--cyan)"
@@ -469,13 +470,17 @@ function handleDensityChange(density: UiDensityMode) {
             @click="handleMotionChange(opt.id)"
           >
             <div class="bms-tile-top">
-              <span class="bms-tile-name">{{ opt.label }}</span>
-              <PlumpIcon
-                v-if="store.motionLevel === opt.id"
-                name="check"
-                :size="14"
-                color="var(--primary)"
-              />
+              <div class="bms-tile-head-left">
+                <PlumpIcon
+                  :name="opt.icon"
+                  :size="14"
+                  :color="store.motionLevel === opt.id ? 'var(--primary-text, var(--primary))' : 'var(--text-muted)'"
+                />
+                <span class="bms-tile-name">{{ opt.label }}</span>
+              </div>
+              <span v-if="store.motionLevel === opt.id" class="bms-tile-check" aria-hidden="true">
+                <PlumpIcon name="check" :size="10" color="#ffffff" />
+              </span>
             </div>
             <span class="bms-tile-desc">{{ opt.desc }}</span>
           </button>
@@ -485,7 +490,7 @@ function handleDensityChange(density: UiDensityMode) {
       <SettingsRow
         vertical
         title="界面信息密度"
-        description="仅作用于歌曲列表行、歌单/专辑卡片栅格、设置行与导航间距，保持顶栏、播控底栏及全屏播放舞台比例不变"
+        description="仅作用于歌曲列表行、歌单/专辑卡片栅格、设置行与导航间距，保持顶栏、播控底栏及播放舞台比例不变"
       >
         <div class="bms-tile-grid cols-3" role="radiogroup" aria-label="界面信息密度">
           <button
@@ -499,13 +504,21 @@ function handleDensityChange(density: UiDensityMode) {
             @click="handleDensityChange(opt.id)"
           >
             <div class="bms-tile-top">
-              <span class="bms-tile-name">{{ opt.label }}</span>
-              <PlumpIcon
-                v-if="store.uiDensity === opt.id"
-                name="check"
-                :size="14"
-                color="var(--primary)"
-              />
+              <div class="bms-tile-head-left">
+                <span
+                  class="ts-density-glyph"
+                  :class="[`is-${opt.id}`, { 'is-active': store.uiDensity === opt.id }]"
+                  aria-hidden="true"
+                >
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+                <span class="bms-tile-name">{{ opt.label }}</span>
+              </div>
+              <span v-if="store.uiDensity === opt.id" class="bms-tile-check" aria-hidden="true">
+                <PlumpIcon name="check" :size="10" color="#ffffff" />
+              </span>
             </div>
             <span class="bms-tile-desc">{{ opt.desc }}</span>
           </button>
@@ -540,12 +553,9 @@ function handleDensityChange(density: UiDensityMode) {
           >
             <div class="bms-tile-top">
               <span class="bms-tile-name">{{ opt.label }}</span>
-              <PlumpIcon
-                v-if="store.coverColorStageMode === opt.id"
-                name="check"
-                :size="14"
-                color="var(--primary)"
-              />
+              <span v-if="store.coverColorStageMode === opt.id" class="bms-tile-check" aria-hidden="true">
+                <PlumpIcon name="check" :size="10" color="#ffffff" />
+              </span>
             </div>
             <span class="bms-tile-desc">{{ opt.desc }}</span>
           </button>
@@ -572,7 +582,10 @@ function handleDensityChange(density: UiDensityMode) {
           >
             <div class="bms-tile-top">
               <span class="bms-tile-name">{{ bg.title }}</span>
-              <span class="bms-tile-en">{{ bg.tag }}</span>
+              <span v-if="store.playerBgStyle === bg.id" class="bms-tile-check" aria-hidden="true">
+                <PlumpIcon name="check" :size="10" color="#ffffff" />
+              </span>
+              <span v-else class="bms-tile-en">{{ bg.tag }}</span>
             </div>
             <span class="bms-tile-desc">{{ bg.desc }}</span>
           </button>
@@ -596,7 +609,7 @@ function handleDensityChange(density: UiDensityMode) {
             :aria-checked="store.playerStageStyle === st.id"
             @click="store.playerStageStyle = st.id"
           >
-            <PlumpIcon :name="st.icon" :size="14" />
+            <PlumpIcon :name="st.icon" :size="14" color="currentColor" />
             <span>{{ st.label }}</span>
           </button>
         </div>
@@ -609,61 +622,82 @@ function handleDensityChange(density: UiDensityMode) {
 .ts-presets-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
-  border-radius: var(--bm-r-lg, 18px);
+  gap: 11px;
+  border-radius: 14px;
 }
 
-@container settings-stage (max-width: 960px) {
+@container settings-stage (max-width: 820px) {
   .ts-presets-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-@container settings-stage (max-width: 560px) {
+@container settings-stage (max-width: 520px) {
   .ts-presets-grid {
     grid-template-columns: 1fr;
   }
 }
 
 .ts-presets-grid.is-flash-highlight {
-  box-shadow: 0 0 30px -2px color-mix(in srgb, var(--primary) 48%, transparent);
+  box-shadow: 0 0 30px -2px color-mix(in oklab, var(--primary) 48%, transparent);
 }
 
 .ts-preset-card {
   display: flex;
   flex-direction: column;
   text-align: left;
-  padding: 13px;
+  padding: 10px;
   border: none;
-  border-radius: var(--bm-r-lg, 18px);
-  background: var(--bms-surface-row);
+  border-radius: 15px;
+  background: var(--bms-surface-tile);
   cursor: pointer;
   transition:
-    transform 0.24s var(--ease-fluid),
-    box-shadow 0.24s ease,
-    background 0.24s ease;
+    transform 0.22s var(--ease-fluid),
+    box-shadow 0.22s ease,
+    background 0.2s ease;
 }
 
 .ts-preset-card:hover {
   transform: translateY(-2px);
-  background: var(--bms-surface-row-hover);
+  background: var(--bms-surface-tile-hover);
+}
+
+.ts-preset-card:focus-visible {
+  outline: 2px solid var(--primary-text, var(--primary));
+  outline-offset: 2px;
 }
 
 .ts-preset-card.is-active {
-  background: color-mix(in srgb, var(--primary) 16%, var(--bms-surface-row));
-  box-shadow: 0 14px 28px -12px color-mix(in srgb, var(--primary) 42%, transparent);
+  background: var(--bms-tile-active-bg);
+  box-shadow: var(--bms-tile-active-shadow);
 }
 
 .ts-mini-canvas {
+  position: relative;
   width: 100%;
-  height: 122px;
-  border-radius: var(--bm-r-md, 14px);
-  padding: 10px;
+  height: clamp(102px, 11cqi, 128px);
+  border-radius: 11px;
+  padding: 9px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
   overflow: hidden;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
+}
+
+.ts-canvas-check {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 2;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bms-focus-grad, var(--grad-kugou-primary));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 10px -2px color-mix(in oklab, var(--primary) 62%, transparent);
 }
 
 .canvas-d1 {
@@ -696,12 +730,12 @@ function handleDensityChange(density: UiDensityMode) {
 
 .ts-mini-island {
   align-self: center;
-  height: 16px;
+  height: 14px;
   padding: 2px 6px;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   background: rgba(255, 255, 255, 0.78);
 }
 
@@ -710,8 +744,8 @@ function handleDensityChange(density: UiDensityMode) {
 .canvas-d2 .ts-mini-island { background: rgba(38, 23, 33, 0.90); }
 
 .ts-mini-tab-active {
-  width: 22px;
-  height: 9px;
+  width: 20px;
+  height: 8px;
   border-radius: 999px;
   background: linear-gradient(135deg, #4f46e5, #0ea5e9, #ec4899);
 }
@@ -721,8 +755,8 @@ function handleDensityChange(density: UiDensityMode) {
 .canvas-d2 .ts-mini-tab-active { background: linear-gradient(135deg, #e11d48, #f43f5e, #f59e0b); }
 
 .ts-mini-tab-dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: rgba(120, 113, 108, 0.35);
 }
@@ -730,14 +764,14 @@ function handleDensityChange(density: UiDensityMode) {
 .ts-mini-bento-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  height: 26px;
+  gap: 5px;
+  height: 22px;
 }
 
 .ts-mini-bento-a,
 .ts-mini-bento-b {
-  border-radius: 8px;
-  padding: 4px 6px;
+  border-radius: 7px;
+  padding: 3px 5px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -752,7 +786,7 @@ function handleDensityChange(density: UiDensityMode) {
 .canvas-l2 .ts-mini-bento-a { background: linear-gradient(135deg, #DCECE7, #EAE5D9); }
 .canvas-l2 .ts-mini-bento-b { background: linear-gradient(135deg, #F5E6D6, #E6EFEA); }
 
-.ts-mini-play-dot { width: 11px; height: 11px; border-radius: 50%; }
+.ts-mini-play-dot { width: 9px; height: 9px; border-radius: 50%; }
 .ts-mini-play-dot.a { background: #4f46e5; }
 .canvas-l2 .ts-mini-play-dot.a { background: #0f766e; }
 .canvas-d1 .ts-mini-play-dot.a { background: #38bdf8; }
@@ -764,24 +798,24 @@ function handleDensityChange(density: UiDensityMode) {
 
 .ts-mini-glass-card {
   flex: 1;
-  border-radius: 10px;
-  padding: 6px 8px;
+  border-radius: 8px;
+  padding: 5px 7px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  background: rgba(255, 255, 255, 0.62);
+  background: rgba(255, 255, 255, 0.66);
 }
 
-.canvas-d1 .ts-mini-glass-card { background: rgba(20, 26, 38, 0.80); }
-.canvas-d2 .ts-mini-glass-card { background: rgba(44, 27, 38, 0.86); }
+.canvas-d1 .ts-mini-glass-card { background: rgba(20, 26, 38, 0.82); }
+.canvas-d2 .ts-mini-glass-card { background: rgba(44, 27, 38, 0.88); }
 .canvas-l2 .ts-mini-glass-card { background: #FAF6EE; }
 
 .ts-mini-badges { display: flex; gap: 4px; }
 .ts-demo-tag {
-  font-size: 9.5px;
+  font-size: 9px;
   font-weight: var(--bm-fw-bold, 700);
-  padding: 1px 5px;
-  border-radius: 5px;
+  padding: 1px 4px;
+  border-radius: 4px;
 }
 .ts-demo-tag.gold { background: rgba(217, 119, 6, 0.18); color: #b45309; }
 .ts-demo-tag.mint { background: rgba(13, 148, 136, 0.16); color: #0f766e; }
@@ -792,74 +826,76 @@ function handleDensityChange(density: UiDensityMode) {
 .canvas-d1 .ts-demo-tag.rose, .canvas-d2 .ts-demo-tag.rose { color: #fb7185; }
 
 .ts-mini-bars { display: flex; flex-direction: column; gap: 3px; }
-.ts-mini-bar { height: 4px; border-radius: 999px; background: rgba(28, 25, 23, 0.16); }
+.ts-mini-bar { height: 3.5px; border-radius: 999px; background: rgba(28, 25, 23, 0.16); }
 .canvas-d1 .ts-mini-bar, .canvas-d2 .ts-mini-bar { background: rgba(245, 239, 247, 0.18); }
-.ts-mini-bar.w70 { width: 72%; }
-.ts-mini-bar.w45 { width: 46%; }
+.ts-mini-bar.w70 { width: 70%; }
+.ts-mini-bar.w45 { width: 44%; }
 
 .ts-card-meta {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-}
-
-.ts-card-badge-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
+  gap: 3px;
+  padding: 0 2px 2px;
 }
 
 .ts-preset-code {
   font-size: var(--bm-fs-micro, 11px);
-  font-weight: var(--bm-fw-bold, 700);
-  color: var(--primary-text, var(--primary));
+  font-weight: var(--bm-fw-semibold, 600);
+  color: var(--text-muted);
+  transition: color 0.18s ease;
 }
 
-.ts-active-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--bms-focus-grad, var(--grad-kugou-primary));
-  color: #ffffff;
-  font-size: var(--bm-fs-micro, 11px);
-  font-weight: var(--bm-fw-bold, 700);
+.ts-preset-card.is-active .ts-preset-code {
+  color: var(--primary-text, var(--primary));
 }
 
 .ts-card-title {
   margin: 0;
-  font-size: var(--bm-fs-song-title, 15px);
-  font-weight: var(--bm-fw-heavy, 800);
+  font-size: var(--bm-fs-meta, 13.5px);
+  font-weight: var(--bm-fw-bold, 700);
   color: var(--text-primary);
+  line-height: 1.3;
 }
 
 .ts-card-desc {
-  margin: 0;
-  font-size: var(--bm-fs-caption, 12.5px);
-  line-height: var(--bm-ui-line-height, 1.48);
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.44;
   color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
-/* 可折叠色彩预览条（Grid 固有高度丝滑展开/收起 + 图标连续旋转） */
+/* 轻量内联主题色板折叠区（与上方主题矩阵以柔光渐隐线区隔，绝无笨重灰盒套壳） */
 .ts-palette-disclosure-wrap {
+  position: relative;
   display: flex;
   flex-direction: column;
+  padding-top: 8px;
+}
+
+.ts-palette-disclosure-wrap::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 4px;
+  right: 4px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--bms-hairline-soft) 6%,
+    var(--bms-hairline-soft) 94%,
+    transparent 100%
+  );
+  pointer-events: none;
 }
 
 .ts-palette-trigger {
-  transition:
-    background-color 0.24s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1)),
-    transform 0.2s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1));
-}
-
-.ts-palette-trigger:active {
-  transform: scale(0.994);
-}
-
-.ts-palette-trigger.is-open {
-  background: color-mix(in srgb, var(--primary) 10%, var(--bms-surface-row));
+  padding: 8px 10px;
+  border-radius: 12px;
 }
 
 .ts-palette-summary-left {
@@ -870,8 +906,13 @@ function handleDensityChange(density: UiDensityMode) {
 }
 
 .ts-palette-summary-title {
-  font-size: var(--bm-fs-meta, 13.5px);
-  font-weight: var(--bm-fw-bold, 700);
+  font-size: var(--bm-fs-caption, 12.5px);
+  font-weight: var(--bm-fw-semibold, 600);
+  color: var(--text-secondary);
+}
+
+.ts-palette-trigger:hover .ts-palette-summary-title,
+.ts-palette-trigger.is-open .ts-palette-summary-title {
   color: var(--text-primary);
 }
 
@@ -880,76 +921,62 @@ function handleDensityChange(density: UiDensityMode) {
   align-items: center;
   gap: 6px;
   transition:
-    opacity 0.24s ease,
-    transform 0.28s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1));
+    opacity 0.22s ease,
+    transform 0.26s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1));
 }
 
 .ts-mini-dot-strip.is-dimmed {
-  opacity: 0.28;
+  opacity: 0.25;
   transform: translate3d(-4px, 0, 0) scale(0.92);
 }
 
 .ts-mini-color-dot {
-  width: 13px;
-  height: 13px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
 }
 
 .ts-disclosure-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  font-size: var(--bm-fs-caption, 12.5px);
+  gap: 6px;
+  font-size: var(--bm-fs-caption, 12px);
   font-weight: var(--bm-fw-semibold, 600);
-  color: var(--text-secondary);
-  transition: color 0.22s ease;
+  color: var(--text-muted);
+  transition: color 0.18s ease;
 }
 
+.ts-palette-trigger:hover .ts-disclosure-toggle,
 .ts-disclosure-toggle.is-open {
   color: var(--primary-text, var(--primary));
 }
 
-.ts-disclosure-label {
-  min-width: 4em;
-  text-align: right;
-}
-
 .ts-disclosure-chevron {
-  width: 24px;
-  height: 24px;
-  border-radius: 999px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--bms-neutral-control, color-mix(in srgb, var(--text-primary) 6%, transparent));
-  transition:
-    transform 0.34s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1)),
-    background-color 0.24s ease,
-    color 0.24s ease;
+  transition: transform 0.32s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1));
 }
 
 .ts-disclosure-toggle.is-open .ts-disclosure-chevron {
   transform: rotate(180deg);
-  background: color-mix(in srgb, var(--primary) 20%, transparent);
-  color: var(--primary-text, var(--primary));
 }
 
-/* CSS Grid 0fr -> 1fr 平滑折叠容器（无任何布局突跳或硬边框） */
 .ts-palette-collapse {
   display: grid;
   grid-template-rows: 0fr;
   opacity: 0;
   transition:
-    grid-template-rows 0.34s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1)),
-    opacity 0.22s ease;
+    grid-template-rows 0.32s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1)),
+    opacity 0.2s ease;
 }
 
 .ts-palette-collapse.is-open {
   grid-template-rows: 1fr;
   opacity: 1;
   transition:
-    grid-template-rows 0.36s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1)),
-    opacity 0.26s ease 0.04s;
+    grid-template-rows 0.34s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1)),
+    opacity 0.24s ease 0.04s;
 }
 
 .ts-palette-collapse-inner {
@@ -958,22 +985,22 @@ function handleDensityChange(density: UiDensityMode) {
 }
 
 .ts-palette-expanded {
-  padding-top: 12px;
+  padding-top: 10px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  transform: translate3d(0, -8px, 0) scale(0.99);
-  transition: transform 0.34s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1));
+  gap: 10px;
+  transform: translate3d(0, -6px, 0);
+  transition: transform 0.32s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1));
 }
 
 .ts-palette-collapse.is-open .ts-palette-expanded {
-  transform: translate3d(0, 0, 0) scale(1);
+  transform: translate3d(0, 0, 0);
 }
 
 .ts-swatches-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 9px;
 }
 
 @container settings-stage (max-width: 720px) {
@@ -986,20 +1013,20 @@ function handleDensityChange(density: UiDensityMode) {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
-  border-radius: var(--bm-r-md, 14px);
-  background: var(--bms-surface-row);
+  padding: 9px 11px;
+  border-radius: 12px;
+  background: var(--bms-surface-tile);
   opacity: 0;
-  transform: translate3d(0, 6px, 0);
+  transform: translate3d(0, 5px, 0);
   transition:
     opacity 0.18s ease,
-    transform 0.24s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1));
+    transform 0.22s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1));
 }
 
 .ts-palette-collapse.is-open .ts-swatch-card {
   opacity: 1;
   transform: translate3d(0, 0, 0);
-  transition-delay: calc(var(--sw-idx, 0) * 24ms + 40ms);
+  transition-delay: calc(var(--sw-idx, 0) * 20ms + 30ms);
 }
 
 [data-motion-level="none"] .ts-palette-collapse,
@@ -1021,9 +1048,9 @@ function handleDensityChange(density: UiDensityMode) {
 }
 
 .ts-swatch-orb {
-  width: 30px;
-  height: 30px;
-  border-radius: 10px;
+  width: 26px;
+  height: 26px;
+  border-radius: 9px;
   flex-shrink: 0;
 }
 
@@ -1035,7 +1062,7 @@ function handleDensityChange(density: UiDensityMode) {
 }
 
 .ts-swatch-role {
-  font-size: var(--bm-fs-caption, 12.5px);
+  font-size: 12px;
   font-weight: var(--bm-fw-bold, 700);
   color: var(--text-primary);
 }
@@ -1050,22 +1077,31 @@ function handleDensityChange(density: UiDensityMode) {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 10px 14px;
-  border-radius: var(--bm-r-md, 14px);
-  background: var(--bms-surface-row);
+  padding: 9px 13px;
+  border-radius: 12px;
+  background: var(--bms-surface-tile);
 }
 
 .ts-showcase-label {
-  font-size: var(--bm-fs-caption, 12.5px);
+  font-size: 12px;
   font-weight: var(--bm-fw-semibold, 600);
-  color: var(--text-secondary);
+  color: var(--text-muted);
 }
 
+/* 选择砖内部排版 */
 .bms-tile-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-height: 20px;
+}
+
+.bms-tile-head-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
 }
 
 .bms-tile-name {
@@ -1076,27 +1112,44 @@ function handleDensityChange(density: UiDensityMode) {
 
 .bms-tile-en {
   font-size: var(--bm-fs-micro, 11px);
-  font-weight: var(--bm-fw-semibold, 600);
+  font-weight: var(--bm-fw-medium, 500);
   color: var(--text-muted);
 }
 
 .bms-tile-desc {
-  font-size: var(--bm-fs-caption, 12.5px);
-  line-height: var(--bm-ui-line-height, 1.48);
+  font-size: 12px;
+  line-height: 1.48;
   color: var(--text-secondary);
 }
 
-/* L2 / D2 特化 */
-.scheme-watercolor_light.light-variant-nordic_oat .ts-preset-card,
-.scheme-watercolor_light.light-variant-nordic_oat .ts-swatch-card,
-.scheme-watercolor_light.light-variant-nordic_oat .ts-jelly-showcase,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .ts-preset-card,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .ts-swatch-card,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .ts-jelly-showcase {
-  background: var(--bms-surface-row);
+/* 界面信息密度可视化三线示意徽标（纯 CSS，一眼识别紧凑 / 标准 / 舒展） */
+.ts-density-glyph {
+  width: 15px;
+  height: 14px;
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
-.scheme-watercolor_light.light-variant-nordic_oat .ts-preset-card.is-active {
-  background: color-mix(in srgb, var(--primary) 13%, #FAF6EE);
+.ts-density-glyph span {
+  display: block;
+  width: 100%;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--text-muted);
+  transition: background 0.18s ease;
 }
+
+.ts-density-glyph span:last-child {
+  width: 72%;
+}
+
+.ts-density-glyph.is-active span {
+  background: var(--primary-text, var(--primary));
+}
+
+.ts-density-glyph.is-compact { gap: 2px; }
+.ts-density-glyph.is-standard { gap: 3.5px; }
+.ts-density-glyph.is-spacious { gap: 5px; }
 </style>

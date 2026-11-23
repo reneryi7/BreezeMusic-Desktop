@@ -156,12 +156,13 @@ function goToTuner() {
             <span class="bms-chip" :class="q.tone === 'primary' ? '' : q.tone">
               {{ q.badge }}
             </span>
-            <PlumpIcon
+            <span
               v-if="normalizedPrefQuality === q.id"
-              name="check"
-              :size="14"
-              color="var(--primary)"
-            />
+              class="bms-tile-check"
+              aria-hidden="true"
+            >
+              <PlumpIcon name="check" :size="10" color="#ffffff" />
+            </span>
           </div>
           <div class="bms-q-title">{{ q.title }}</div>
           <div class="bms-q-spec">{{ q.spec }}</div>
@@ -187,6 +188,7 @@ function goToTuner() {
       >
         <select
           id="bms-audio-device-select"
+          name="audio-output-device"
           class="bms-select"
           :value="store.selectedAudioDeviceId"
           @change="handleDeviceChange"
@@ -352,7 +354,7 @@ function goToTuner() {
             :aria-checked="store.playMode === m.id"
             @click="setPlayMode(m.id)"
           >
-            <PlumpIcon :name="m.icon" :size="13" />
+            <PlumpIcon :name="m.icon" :size="13" color="currentColor" />
             <span>{{ m.label }}</span>
           </button>
         </div>

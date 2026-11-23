@@ -299,10 +299,12 @@ function goLocalMusicView() {
 
 <style scoped>
 .bml-hero-summary {
-  border-radius: var(--bm-r-xl, 24px);
-  padding: 20px 24px;
-  background: var(--bms-surface-card);
-  box-shadow: var(--shadow-soft);
+  border-radius: 20px;
+  padding: 18px 22px;
+  background: var(--bms-surface-panel);
+  box-shadow: var(--bms-panel-shadow);
+  backdrop-filter: blur(22px) saturate(155%);
+  -webkit-backdrop-filter: blur(22px) saturate(155%);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -401,11 +403,7 @@ function goLocalMusicView() {
 /* L2 晨雾燕麦 / D2 丝绒星云特化 */
 .scheme-watercolor_light.light-variant-nordic_oat .bml-hero-summary,
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bml-hero-summary {
-  background: var(--bms-surface-card);
-}
-
-.scheme-watercolor_light.light-variant-nordic_oat .bml-dir-item,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .bml-dir-item {
-  background: var(--bms-surface-row);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 </style>

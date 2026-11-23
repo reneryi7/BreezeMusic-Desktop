@@ -63,15 +63,15 @@ function onChange(e: Event) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 48px;
-  height: 28px;
+  width: 44px;
+  height: 26px;
   cursor: pointer;
   flex-shrink: 0;
   user-select: none;
 }
 
 .bms-switch-shell.is-disabled {
-  opacity: 0.52;
+  opacity: 0.48;
   cursor: not-allowed;
 }
 
@@ -89,16 +89,25 @@ function onChange(e: Event) {
 
 .bms-switch-track {
   position: relative;
-  width: 46px;
-  height: 26px;
+  width: 42px;
+  height: 24px;
   border-radius: var(--bm-r-pill, 999px);
-  background: var(--bms-neutral-control, var(--bg-pill));
+  background: var(--bms-surface-tile-hover, rgba(128, 128, 128, 0.28));
   transition: background 0.24s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.24s ease;
+}
+
+.scheme-watercolor_light .bms-switch-track,
+.scheme-light .bms-switch-track {
+  background: rgba(24, 24, 27, 0.16);
+}
+
+.scheme-watercolor_light.light-variant-nordic_oat .bms-switch-track {
+  background: #D6CBB8;
 }
 
 .bms-switch-shell.is-checked .bms-switch-track {
   background: var(--bms-focus-grad, var(--grad-kugou-primary));
-  box-shadow: 0 6px 16px -4px color-mix(in srgb, var(--primary) 50%, transparent);
+  box-shadow: 0 5px 14px -4px color-mix(in oklab, var(--primary) 52%, transparent);
 }
 
 .bms-switch-native:focus-visible + .bms-switch-track {
@@ -110,31 +119,27 @@ function onChange(e: Event) {
   position: absolute;
   top: 3px;
   left: 3px;
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.88);
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.28);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.26);
   transition:
-    transform 0.34s var(--ease-spring-tactile, cubic-bezier(0.22, 1.3, 0.36, 1)),
+    transform 0.32s var(--ease-spring-tactile, cubic-bezier(0.22, 1.28, 0.36, 1)),
     width 0.16s ease,
     background 0.2s ease;
 }
 
 .bms-switch-shell.is-checked .bms-switch-thumb {
-  transform: translateX(20px);
+  transform: translateX(18px);
   background: #ffffff;
 }
 
 .bms-switch-shell:active:not(.is-disabled) .bms-switch-thumb {
-  width: 24px;
+  width: 22px;
 }
 
 .bms-switch-shell.is-checked:active:not(.is-disabled) .bms-switch-thumb {
-  transform: translateX(16px);
-}
-
-.scheme-watercolor_light.light-variant-nordic_oat .bms-switch-track {
-  background: #DDD3C2;
+  transform: translateX(14px);
 }
 </style>

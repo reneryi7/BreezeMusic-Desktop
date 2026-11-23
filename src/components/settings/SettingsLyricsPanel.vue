@@ -120,7 +120,11 @@ function handleResetStageLyric() {
         :aria-selected="activeTab === 'desktop'"
         @click="activeTab = 'desktop'"
       >
-        <PlumpIcon name="mini-island" :size="14" :color="activeTab === 'desktop' ? '#ffffff' : 'var(--violet)'" />
+        <PlumpIcon
+          name="mini-island"
+          :size="14"
+          :color="activeTab === 'desktop' ? 'var(--primary-text, var(--primary))' : 'var(--text-muted)'"
+        />
         <span>桌面悬浮歌词</span>
         <span v-if="store.desktopLyricEnabled" class="bms-subtab-count">已开启</span>
       </button>
@@ -132,7 +136,11 @@ function handleResetStageLyric() {
         :aria-selected="activeTab === 'stage'"
         @click="activeTab = 'stage'"
       >
-        <PlumpIcon name="lyric" :size="14" :color="activeTab === 'stage' ? '#ffffff' : 'var(--primary)'" />
+        <PlumpIcon
+          name="lyric"
+          :size="14"
+          :color="activeTab === 'stage' ? 'var(--primary-text, var(--primary))' : 'var(--text-muted)'"
+        />
         <span>播放页歌词</span>
       </button>
     </div>
@@ -625,21 +633,16 @@ function handleResetStageLyric() {
   justify-content: space-between;
   gap: 10px;
   padding: 11px 14px;
-  border-radius: var(--bm-r-md, 14px);
-  background: var(--bms-surface-row);
+  border-radius: 13px;
+  background: var(--bms-surface-tile);
   font-size: var(--bm-fs-caption, 12.5px);
-  font-weight: 800;
+  font-weight: var(--bm-fw-semibold, 600);
   color: var(--text-primary);
   cursor: pointer;
   transition: background 0.18s ease;
 }
 
 .bms-mini-toggle-card:hover {
-  background: var(--bms-surface-row-hover);
-}
-
-.scheme-watercolor_light.light-variant-nordic_oat .bms-mini-toggle-card,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .bms-mini-toggle-card {
-  background: var(--bms-surface-row);
+  background: var(--bms-surface-tile-hover);
 }
 </style>

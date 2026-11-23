@@ -731,8 +731,8 @@ html body .pill-tabs.full-w.is-segmented-tabs {
 .bms-pill-group .bm-seg-glider,
 .bm-fd-scope-tabs .bm-seg-glider,
 .bmd-filter-pills .bm-seg-glider {
-  background: var(--bms-focus-grad, var(--grad-kugou-primary));
-  box-shadow: 0 6px 16px -4px color-mix(in srgb, var(--primary) 46%, transparent);
+  background: var(--bms-seg-thumb, rgba(255, 255, 255, 0.14));
+  box-shadow: var(--bms-seg-thumb-shadow, 0 4px 12px -2px rgba(0, 0, 0, 0.24));
 }
 
 .np-floating-window .bm-seg-glider {
@@ -815,6 +815,18 @@ html body .is-segmented-tabs > [role="radio"][aria-checked="true"] {
   background-image: none !important;
   box-shadow: none !important;
   color: #ffffff;
+}
+
+/* 设置中心中性浮起分段滑块文字适配（深色亮白 / 浅色深墨，四主题高对比） */
+html body .bms-subtabs.is-segmented-tabs > button.active,
+html body .bms-subtabs.is-segmented-tabs > button[aria-selected="true"],
+html body .bms-pill-group.is-segmented-tabs > button.active,
+html body .bms-pill-group.is-segmented-tabs > button[aria-checked="true"],
+html body .bms-pill-group.is-segmented-tabs > [role="radio"][aria-checked="true"],
+html body .bm-fd-scope-tabs.is-segmented-tabs > button.active,
+html body .bm-fd-scope-tabs.is-segmented-tabs > [role="tab"][aria-selected="true"],
+html body .bmd-filter-pills.is-segmented-tabs > button.active {
+  color: var(--bms-seg-thumb-text, var(--text-primary)) !important;
 }
 
 html body .np-floating-window .is-segmented-tabs > button.active,
