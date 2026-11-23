@@ -658,7 +658,7 @@ export function createWebAudioDspModule(deps: WebAudioDspDeps) {
       return;
     }
     if (replayGainTimerId === null && typeof window !== "undefined") {
-      replayGainTimerId = window.setInterval(evaluateDynamicReplayGainSample, 250);
+      replayGainTimerId = window.setInterval(evaluateDynamicReplayGainSample, 400);
     }
   }
 
@@ -2258,7 +2258,7 @@ export function createWebAudioDspModule(deps: WebAudioDspDeps) {
         stopSpectrumLoop(true);
         return;
       }
-      const minIntervalMs = motion.effectiveLevel === "standard" ? 36 : 16;
+      const minIntervalMs = motion.effectiveLevel === "standard" ? 42 : 24;
       if (lastSpectrumDrawMs > 0 && nowMs - lastSpectrumDrawMs < minIntervalMs) {
         rafId = requestAnimationFrame(tick);
         return;
@@ -2279,16 +2279,16 @@ export function createWebAudioDspModule(deps: WebAudioDspDeps) {
           else highSum += val;
         }
         spectrumBars.value = bars;
-        const lowE = Number((lowSum / (6 * 255)).toFixed(3));
-        const midE = Number((midSum / (12 * 255)).toFixed(3));
-        const highE = Number((highSum / (14 * 255)).toFixed(3));
+        const lowE = Math.round((lowSum / (6 * 255)) * 1000) / 1000;
+        const midE = Math.round((midSum / (12 * 255)) * 1000) / 1000;
+        const highE = Math.round((highSum / (14 * 255)) * 1000) / 1000;
         rhythmTelemetry.lowEnergy = lowE;
         rhythmTelemetry.midEnergy = midE;
         rhythmTelemetry.highEnergy = highE;
         rhythmTelemetry.bassEnergy = lowE;
         rhythmTelemetry.midVocalEnergy = midE;
         rhythmTelemetry.highAirEnergy = highE;
-        rhythmTelemetry.beatPulse = Number(Math.min(1, lowE * 1.25).toFixed(3));
+        rhythmTelemetry.beatPulse = Math.round(Math.min(1, lowE * 1.25) * 1000) / 1000;
         rafId = requestAnimationFrame(tick);
       } else if (playMomentum.value > 0.02) {
         spectrumBars.value = spectrumBars.value.map((v) =>

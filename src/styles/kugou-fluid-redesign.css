@@ -707,11 +707,32 @@ html body .pill-tabs.full-w.is-segmented-tabs {
   background: var(--grad-kugou-primary, linear-gradient(135deg, var(--primary), var(--primary-light, #818cf8)));
   box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 30%, transparent);
   will-change: transform;
-  transition:
-    transform 0.28s cubic-bezier(0.22, 1.18, 0.36, 1),
-    width 0.26s cubic-bezier(0.22, 1.16, 0.36, 1),
-    height 0.22s ease,
-    opacity 0.16s ease;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .bm-seg-glider {
+    transition:
+      transform 0.28s cubic-bezier(0.22, 1.18, 0.36, 1),
+      width 0.26s cubic-bezier(0.22, 1.16, 0.36, 1),
+      height 0.22s ease,
+      opacity 0.16s ease;
+  }
+
+  html[data-motion-level="standard"] .bm-seg-glider {
+    transition:
+      transform 0.2s cubic-bezier(0.25, 0.8, 0.25, 1),
+      width 0.18s cubic-bezier(0.25, 0.8, 0.25, 1),
+      height 0.18s ease,
+      opacity 0.14s ease;
+  }
+}
+
+.bms-subtabs .bm-seg-glider,
+.bms-pill-group .bm-seg-glider,
+.bm-fd-scope-tabs .bm-seg-glider,
+.bmd-filter-pills .bm-seg-glider {
+  background: var(--bms-focus-grad, var(--grad-kugou-primary));
+  box-shadow: 0 6px 16px -4px color-mix(in srgb, var(--primary) 46%, transparent);
 }
 
 .np-floating-window .bm-seg-glider {
@@ -745,6 +766,19 @@ html body .pill-tabs.full-w.is-segmented-tabs {
   box-shadow: 0 4px 14px var(--np-accent-glow, rgba(0, 0, 0, 0.28));
 }
 
+.bm-share-edition-pills .bm-seg-glider {
+  background: linear-gradient(
+    135deg in oklab,
+    var(--fm-primary, var(--primary)) 0%,
+    color-mix(
+      in oklab,
+      var(--fm-primary, var(--primary)) 72%,
+      var(--fm-secondary, var(--cyan))
+    ) 100%
+  );
+  box-shadow: 0 4px 14px var(--fm-primary-glow, rgba(0, 0, 0, 0.26));
+}
+
 html body .is-segmented-tabs > button,
 html body .is-segmented-tabs > [role="tab"] {
   position: relative;
@@ -771,9 +805,11 @@ html body .is-segmented-tabs > [role="tab"]:focus-visible {
 html body .is-segmented-tabs > button.active,
 html body .is-segmented-tabs > button.is-active,
 html body .is-segmented-tabs > button[aria-selected="true"],
+html body .is-segmented-tabs > button[aria-checked="true"],
 html body .is-segmented-tabs > [role="tab"].active,
 html body .is-segmented-tabs > [role="tab"].is-active,
-html body .is-segmented-tabs > [role="tab"][aria-selected="true"] {
+html body .is-segmented-tabs > [role="tab"][aria-selected="true"],
+html body .is-segmented-tabs > [role="radio"][aria-checked="true"] {
   background: transparent !important;
   background-color: transparent !important;
   background-image: none !important;
@@ -785,8 +821,10 @@ html body .np-floating-window .is-segmented-tabs > button.active,
 html body .np-floating-window .is-segmented-tabs > button[aria-selected="true"],
 html body .np-floating-window .is-segmented-tabs > [role="tab"].active,
 html body .np-floating-window .is-segmented-tabs > [role="tab"][aria-selected="true"],
-html body .np-stage-mode-group.is-segmented-tabs > button.active {
-  color: var(--np-on-accent-primary, var(--fm-on-primary, #ffffff)) !important;
+html body .np-stage-mode-group.is-segmented-tabs > button.active,
+html body .bm-share-edition-pills.is-segmented-tabs > button.active,
+html body .bm-share-edition-pills.is-segmented-tabs > [role="radio"][aria-checked="true"] {
+  color: var(--fm-on-primary, var(--np-on-accent-primary, #ffffff)) !important;
 }
 
 html body .nq-popover-window .is-segmented-tabs > button.active,

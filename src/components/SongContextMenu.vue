@@ -151,8 +151,8 @@ function handleOpenComments() {
 
 function handlePreviewHdCover() {
   const s = store.contextMenu.song;
-  if (s?.coverUrl) {
-    store.hdArtworkPreviewUrl = s.coverUrl.replace("/400/", "/1000/");
+  if (s?.coverUrl || s?.rawCoverTemplate) {
+    store.openHdArtworkPreview(s);
   }
   store.closeSongContextMenu();
 }
@@ -160,7 +160,7 @@ function handlePreviewHdCover() {
 function handleShareSong() {
   const s = store.contextMenu.song;
   if (s) {
-    store.shareModalSong = s;
+    store.openShareSongModal(s);
   }
   store.closeSongContextMenu();
 }

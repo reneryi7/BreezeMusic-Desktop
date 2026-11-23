@@ -223,12 +223,12 @@ function handleDisableUnlockedFeature(enabled: boolean) {
 }
 
 .scheme-watercolor_light.light-variant-nordic_oat .bms-about-hero {
-  background: #FAF6EE;
+  background: var(--bms-surface-card);
   backdrop-filter: none;
 }
 
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bms-about-hero {
-  background: rgba(46, 27, 38, 0.88);
+  background: var(--bms-surface-card);
   backdrop-filter: none;
 }
 
@@ -281,7 +281,7 @@ function handleDisableUnlockedFeature(enabled: boolean) {
   font-size: var(--bm-fs-micro, 11px);
   font-weight: var(--bm-fw-bold, 700);
   background: var(--primary-soft);
-  color: var(--primary);
+  color: var(--primary-text, var(--primary));
   cursor: pointer;
   user-select: none;
   transition: transform 0.14s ease, background 0.18s ease;
@@ -316,14 +316,14 @@ function handleDisableUnlockedFeature(enabled: boolean) {
   gap: 13px;
   padding: 16px 18px;
   border-radius: var(--bm-r-lg, 18px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
 }
 
 .bms-about-feat-icon {
   width: 38px;
   height: 38px;
   border-radius: 12px;
-  background: var(--bg-card);
+  background: var(--bms-surface-icon);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -344,19 +344,19 @@ function handleDisableUnlockedFeature(enabled: boolean) {
 
 .bms-about-feat-desc {
   font-size: var(--bm-fs-caption, 12.5px);
-  line-height: var(--bm-ui-line-height, 1.48);
+  line-height: var(--bm-ui-line-height, 1.52);
   color: var(--text-secondary);
 }
 
 .scheme-watercolor_light.light-variant-nordic_oat .bms-about-feature {
-  background: #F2ECE1;
+  background: var(--bms-surface-row);
 }
 
 .scheme-watercolor_light.light-variant-nordic_oat .bms-about-feat-icon {
-  background: #FAF6EE;
+  background: var(--bms-surface-icon);
 }
 
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bms-about-feature {
-  background: rgba(34, 20, 29, 0.82);
+  background: var(--bms-surface-row);
 }
 </style>

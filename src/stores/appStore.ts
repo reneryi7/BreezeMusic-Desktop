@@ -38,6 +38,7 @@ import type {
   FollowedArtist,
   GatewayDiagResult,
   GlobalShortcutActionId,
+  HdArtworkPreviewTarget,
   InAppShortcutActionId,
   KugouSession,
   LibraryAssetTab,
@@ -65,6 +66,7 @@ import type {
   RankItem,
   SearchCategoryTab,
   SearchDiscoveryData,
+  SharedMusicResolved,
   Song,
   SongComment,
   SongDetailInfo,
@@ -85,6 +87,17 @@ import {
   triggerFlyToQueue,
   triggerHeartBurst,
 } from "../utils/microMotionFx";
+import {
+  containsKugouShareSignal,
+  isClipboardShareTextHandled,
+  markClipboardShareTextHandled,
+} from "../utils/kugouShare";
+import {
+  ensureAppPowerVisibilityTracking,
+  isAppForegroundActive,
+  setNativeMainWindowVisible,
+  subscribeAppPowerVisibility,
+} from "../utils/windowPowerState";
 import {
   createDefaultGlobalHotkeys,
   createDefaultInAppHotkeys,
@@ -310,6 +323,7 @@ export const useAppStore = defineStore("breezeApp", () => {
   const isAccountManagerOpen = ref(false);
   const isFocusPodOpen = ref(false);
   const isLyricPosterOpen = ref(false);
+  const lyricPosterTargetSong = ref<Song | null>(null);
   const isCommentsModalOpen = ref(false);
   const commentsModalSong = ref<Song | null>(null);
   const isMultiArtistModalOpen = ref(false);
@@ -544,7 +558,105 @@ export const useAppStore = defineStore("breezeApp", () => {
   const addToPlaylistModalSong = ref<Song | null>(null);
   const downloadModalSong = ref<Song | null>(null);
   const shareModalSong = ref<Song | null>(null);
+  const shareModalPlaylist = ref<Playlist | null>(null);
+  const detectedSharedTarget = ref<SharedMusicResolved | null>(null);
   const hdArtworkPreviewUrl = ref<string | null>(null);
+  const hdArtworkPreviewTarget = ref<HdArtworkPreviewTarget | null>(null);
+
+  function openShareSongModal(song?: Song | null) {
+    if (!song) return;
+    shareModalPlaylist.value = null;
+    shareModalSong.value = { ...song };
+  }
+
+  function openSharePlaylistModal(playlist?: Playlist | null) {
+    if (!playlist) return;
+    shareModalSong.value = null;
+    shareModalPlaylist.value = { ...playlist };
+  }
+
+  function closeShareModal() {
+    shareModalSong.value = null;
+    shareModalPlaylist.value = null;
+  }
+
+  function dismissDetectedSharedTarget() {
+    detectedSharedTarget.value = null;
+  }
+
+  function openHdArtworkPreview(
+    input: Song | HdArtworkPreviewTarget | string | null | undefined,
+    overrideUrl?: string | null,
+    initialMetrics?: { width: number; height: number } | null
+  ) {
+    if (!input) return;
+    if (typeof input === "string") {
+      const url = input.trim();
+      if (!url) return;
+      hdArtworkPreviewTarget.value = {
+        url,
+        initialMetrics: initialMetrics ? { ...initialMetrics } : null,
+      };
+      hdArtworkPreviewUrl.value = url;
+      return;
+    }
+    if ("url" in input && typeof input.url === "string") {
+      const url = (overrideUrl || input.url || "").trim();
+      if (!url) return;
+      hdArtworkPreviewTarget.value = {
+        ...input,
+        url,
+        song: input.song ? { ...input.song } : null,
+        initialMetrics:
+          initialMetrics !== undefined
+            ? initialMetrics
+              ? { ...initialMetrics }
+              : null
+            : input.initialMetrics || null,
+      };
+      hdArtworkPreviewUrl.value = url;
+      return;
+    }
+    const song = input as Song;
+    const rawUrl = (
+      overrideUrl ||
+      song.coverUrl ||
+      song.rawCoverTemplate ||
+      ""
+    ).trim();
+    if (!rawUrl) return;
+    const upgradedUrl = rawUrl.includes("/400/")
+      ? rawUrl.replace("/400/", "/1000/")
+      : rawUrl;
+    hdArtworkPreviewTarget.value = {
+      url: upgradedUrl,
+      title: song.title || "专辑封面预览",
+      artist: song.artist || "高清封面画廊",
+      album: song.album || "",
+      rawCoverTemplate: song.rawCoverTemplate || song.coverUrl || upgradedUrl,
+      hdCoverCandidates: Array.isArray(song.hdCoverCandidates)
+        ? [...song.hdCoverCandidates]
+        : [],
+      song: { ...song },
+      initialMetrics: initialMetrics ? { ...initialMetrics } : null,
+    };
+    hdArtworkPreviewUrl.value = upgradedUrl;
+  }
+
+  function closeHdArtworkPreview() {
+    hdArtworkPreviewTarget.value = null;
+    hdArtworkPreviewUrl.value = null;
+  }
+
+  function openLyricPosterModal(song?: Song | null) {
+    const target = song || currentSong.value;
+    lyricPosterTargetSong.value = target ? { ...target } : null;
+    isLyricPosterOpen.value = true;
+  }
+
+  function closeLyricPosterModal() {
+    isLyricPosterOpen.value = false;
+  }
 
   // ================= 5. 全局设置与播放/歌词/DSP 配置 =================
   // 明暗双主题（D1/D2 深色外观 abyssal_dark / L1/L2 浅色外观 watercolor_light / 跟随系统 system）
@@ -789,6 +901,9 @@ export const useAppStore = defineStore("breezeApp", () => {
   );
   const closeToTray = ref<boolean>(
     localStorage.getItem("bm_close_to_tray") !== "false"
+  );
+  const clipboardShareDetectEnabled = ref<boolean>(
+    localStorage.getItem("bm_clipboard_share_detect_v1") !== "false"
   );
   const autostartEnabled = ref<boolean>(false);
   const isUpdatingAutostart = ref<boolean>(false);
@@ -1568,6 +1683,9 @@ export const useAppStore = defineStore("breezeApp", () => {
   watch(closeToTray, (v) => {
     localStorage.setItem("bm_close_to_tray", String(v));
     kugouClient.setCloseToTray(v).catch(() => {});
+  });
+  watch(clipboardShareDetectEnabled, (v) => {
+    localStorage.setItem("bm_clipboard_share_detect_v1", String(v));
   });
   watch(osGlobalHotkeysEnabled, (v) => {
     localStorage.setItem("bm_os_global_hotkeys", String(v));
@@ -2437,7 +2555,13 @@ export const useAppStore = defineStore("breezeApp", () => {
       }
     }).catch(() => {});
 
+    listen<{ visible?: boolean }>("bm-main-window-visibility", (event) => {
+      const vis = Boolean(event.payload?.visible);
+      setNativeMainWindowVisible(vis);
+    }).catch(() => {});
+
     listen<{ maximized?: boolean }>("bm-main-window-restored", () => {
+      setNativeMainWindowVisible(true);
       syncDocumentThemeAttr();
       if (typeof window !== "undefined") {
         window.requestAnimationFrame(() => {
@@ -3293,7 +3417,16 @@ export const useAppStore = defineStore("breezeApp", () => {
             width: best.width,
             height: best.height,
           };
-          if (hdArtworkPreviewUrl.value && currentSong.value?.hash === song?.hash) {
+          if (
+            hdArtworkPreviewTarget.value?.song &&
+            song &&
+            isSameHistoryTrack(hdArtworkPreviewTarget.value.song, song)
+          ) {
+            hdArtworkPreviewTarget.value = {
+              ...hdArtworkPreviewTarget.value,
+              url: best.url,
+              initialMetrics: { width: best.width, height: best.height },
+            };
             hdArtworkPreviewUrl.value = best.url;
           }
         })
@@ -3765,18 +3898,81 @@ export const useAppStore = defineStore("breezeApp", () => {
   });
   const isLoadingLyric = ref(false);
 
-  // 歌曲评论区状态（含总评论数、楼中楼展开与评论发送）
+  // 歌曲评论区状态（评论弹窗独立会话，绝不受后台播放切歌污染）
   const activeSongComments = ref<SongComment[]>([]);
   const activeSongCommentTotal = ref<number>(0);
+  // 当前正在播放歌曲的独立评论总数（仅用于播放页角标，切歌时轻量拉取计数，不触碰弹窗会话）
+  const currentSongCommentTotal = ref<number>(0);
   const commentSortType = ref<"hot" | "new">("hot");
   const isLoadingComments = ref(false);
   const expandedFloorCommentId = ref<string | null>(null);
   const floorRepliesMap = reactive<Record<string, SongComment[]>>({});
   const isLoadingFloorReplies = ref<boolean>(false);
 
+  let currentSongCommentCountSeq = 0;
+
+  function getCommentSongKey(song: Song | null | undefined): string {
+    if (!song) return "";
+    return `${String(song.hash || "").trim().toLowerCase()}::${String(
+      song.albumAudioId || song.mixSongId || song.id || ""
+    ).trim()}`;
+  }
+
+  function setCurrentSongCommentTotal(total: number) {
+    if (Number.isFinite(total) && total >= 0) {
+      currentSongCommentTotal.value = Math.round(total);
+    }
+  }
+
   function setActiveSongCommentTotal(total: number) {
     if (Number.isFinite(total) && total >= 0) {
-      activeSongCommentTotal.value = Math.round(total);
+      const rounded = Math.round(total);
+      activeSongCommentTotal.value = rounded;
+      if (
+        commentsModalSong.value &&
+        currentSong.value &&
+        isSameHistoryTrack(commentsModalSong.value, currentSong.value)
+      ) {
+        currentSongCommentTotal.value = Math.max(
+          currentSongCommentTotal.value,
+          rounded
+        );
+      }
+    }
+  }
+
+  async function refreshCurrentSongCommentCount(
+    song: Song | null = currentSong.value
+  ) {
+    const reqSeq = ++currentSongCommentCountSeq;
+    if (!song) {
+      currentSongCommentTotal.value = 0;
+      return;
+    }
+    const targetKey = getCommentSongKey(song);
+    currentSongCommentTotal.value = 0;
+    try {
+      const count = await kugouClient.getSongCommentCount(song);
+      if (
+        reqSeq !== currentSongCommentCountSeq ||
+        getCommentSongKey(currentSong.value) !== targetKey
+      ) {
+        return;
+      }
+      currentSongCommentTotal.value =
+        Number.isFinite(count) && count > 0 ? Math.round(count) : 0;
+    } catch {
+      if (
+        reqSeq !== currentSongCommentCountSeq ||
+        getCommentSongKey(currentSong.value) !== targetKey
+      ) {
+        return;
+      }
+      if (isBrowserDevPreviewEnv() && playQueue.value[0]?.hash === song.hash) {
+        currentSongCommentTotal.value = 136;
+      } else {
+        currentSongCommentTotal.value = 0;
+      }
     }
   }
 
@@ -3976,23 +4172,98 @@ export const useAppStore = defineStore("breezeApp", () => {
     notify,
     cancelVolumeRamp,
     hasVisualSpectrumConsumer: () =>
-      (typeof document === "undefined" || document.visibilityState === "visible") &&
+      isAppForegroundActive() &&
       (isNowPlayingOpen.value || activeTab.value === "tuner" || activeTab.value === "radio"),
   });
+
+  let clipboardDetectTimerId: number | null = null;
+  let isCheckingClipboardShare = false;
+
+  async function checkClipboardForKugouShare(force = false) {
+    if (isStandaloneSubWindow || isCheckingClipboardShare) return;
+    if (!force && !clipboardShareDetectEnabled.value) return;
+    if (!force && !isAppForegroundActive()) return;
+    if (detectedSharedTarget.value || shareModalSong.value || shareModalPlaylist.value) return;
+
+    isCheckingClipboardShare = true;
+    try {
+      let clipText = "";
+      try {
+        clipText = await kugouClient.readClipboardText();
+      } catch {
+        // 非 Tauri 浏览器预览环境下退回 Web Clipboard API
+        if (
+          typeof navigator !== "undefined" &&
+          navigator.clipboard?.readText &&
+          typeof document !== "undefined" &&
+          document.hasFocus()
+        ) {
+          try {
+            clipText = await navigator.clipboard.readText();
+          } catch {
+            clipText = "";
+          }
+        }
+      }
+      const trimmed = (clipText || "").trim();
+      if (!trimmed || !containsKugouShareSignal(trimmed)) return;
+      if (!force && isClipboardShareTextHandled(trimmed)) return;
+      markClipboardShareTextHandled(trimmed);
+
+      const resolved = await kugouClient.parseSharedMusic(trimmed);
+      if (
+        (resolved.targetType === "song" && resolved.song) ||
+        (resolved.targetType === "playlist" &&
+          (resolved.playlist || (resolved.songs && resolved.songs.length > 0)))
+      ) {
+        detectedSharedTarget.value = resolved;
+      }
+    } catch {
+      // ignore invalid or non-kugou clipboard contents
+    } finally {
+      isCheckingClipboardShare = false;
+    }
+  }
+
+  function scheduleClipboardShareCheck(delayMs = 420) {
+    if (isStandaloneSubWindow || !clipboardShareDetectEnabled.value) return;
+    if (clipboardDetectTimerId !== null) {
+      window.clearTimeout(clipboardDetectTimerId);
+    }
+    clipboardDetectTimerId = window.setTimeout(() => {
+      clipboardDetectTimerId = null;
+      void checkClipboardForKugouShare(false);
+    }, delayMs);
+  }
 
   watch([isNowPlayingOpen, activeTab, isPlaying], () => {
     syncSpectrumLoopDemand();
   });
 
   if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", () => {
+    ensureAppPowerVisibilityTracking();
+    subscribeAppPowerVisibility((active) => {
       syncSpectrumLoopDemand();
-      if (document.visibilityState === "hidden" && !isStandaloneSubWindow) {
-        flushPlaybackPersistenceNow();
+      if (!active) {
+        if (!isStandaloneSubWindow) {
+          flushPlaybackPersistenceNow();
+        }
+        return;
+      }
+      // 从最小化或托盘恢复前台：立刻同步音频进度（补偿后台降频跳过），并延迟检测剪贴板分享口令
+      if (!isStandaloneSubWindow) {
+        const liveMs = getLivePlaybackPositionMs();
+        if (Math.abs(liveMs - currentPositionMs.value) >= 120) {
+          currentPositionMs.value = liveMs;
+        }
+        scheduleClipboardShareCheck(450);
       }
     });
   }
   if (typeof window !== "undefined" && !isStandaloneSubWindow) {
+    window.addEventListener("focus", () => {
+      scheduleClipboardShareCheck(420);
+    });
     window.addEventListener("beforeunload", flushPlaybackPersistenceNow);
   }
 
@@ -4184,6 +4455,7 @@ export const useAppStore = defineStore("breezeApp", () => {
     openSoundMixerFromPlayer,
     selectPlaylist,
     openPlaylistDetail,
+    openResolvedSharedPlaylist,
     openLikedSongsDetail,
     openRecentHistoryDetail,
     openPurchasedSongsDetail,
@@ -4196,6 +4468,7 @@ export const useAppStore = defineStore("breezeApp", () => {
     createNewPlaylist,
     deletePlaylist,
     removeSongFromCurrentPlaylist,
+    importSongsAsNewPlaylist,
     importExternalPlaylist,
     isPlaylistCollected,
     toggleCollectPlaylist,
@@ -4492,7 +4765,11 @@ export const useAppStore = defineStore("breezeApp", () => {
   // HTML5 Audio 事件绑定
   audio.addEventListener("timeupdate", () => {
     const posMs = Math.floor(audio.currentTime * 1000);
-    currentPositionMs.value = posMs;
+    // 后台托盘/最小化状态跳过高频写 Vue 响应式进度，彻底消除隐藏窗口期间的无效依赖通知；
+    // 下方的副歌速刷、双轨交叉淡入和切歌仍直接基于 audio.currentTime 100% 精准运行。
+    if (isAppForegroundActive()) {
+      currentPositionMs.value = posMs;
+    }
 
     // 副歌速刷模式 (Chorus Quick-Skim 精华连播)：到达副歌结束点自动循环或切下一首
     if (climaxModeEnabled.value && currentSong.value) {
@@ -4814,7 +5091,7 @@ export const useAppStore = defineStore("breezeApp", () => {
     touchActiveQueueLastPlayed(nextSong);
     syncWindowsMediaSession(nextSong);
     loadLyricForSong(nextSong);
-    loadCommentsForSong(nextSong, commentSortType.value);
+    refreshCurrentSongCommentCount(nextSong);
     broadcastDesktopLyricState();
 
     activeTelemetrySong = nextSong;
@@ -4969,6 +5246,7 @@ export const useAppStore = defineStore("breezeApp", () => {
       currentLyric.value = demo.lyric;
       activeSongComments.value = demo.comments;
       activeSongCommentTotal.value = 136;
+      currentSongCommentTotal.value = 136;
       Object.assign(floorRepliesMap, demo.floorRepliesMap);
       userPlaylists.value = demo.playlists;
       recentHistorySongs.value = [...demo.songs];
@@ -5167,7 +5445,7 @@ export const useAppStore = defineStore("breezeApp", () => {
                 loadAndPlayCurrentSong(Math.max(0, savedPosMs));
               }, 600);
             } else {
-              loadCommentsForSong(restoredSong, commentSortType.value);
+              refreshCurrentSongCommentCount(restoredSong);
               refreshCurrentSongDetailInfo(restoredSong);
             }
           }
@@ -5400,9 +5678,21 @@ export const useAppStore = defineStore("breezeApp", () => {
       notify("请先选择或播放一首歌曲以查看评论");
       return;
     }
-    commentsModalSong.value = target;
+    const frozenTarget: Song = { ...target };
+    const nextKey = getCommentSongKey(frozenTarget);
+    const prevKey = getCommentSongKey(commentsModalSong.value);
+    const isDifferentSong = nextKey !== prevKey || nextKey !== lastCommentsSongKey;
+    commentsModalSong.value = frozenTarget;
+    if (isDifferentSong) {
+      activeSongComments.value = [];
+      activeSongCommentTotal.value = 0;
+      expandedFloorCommentId.value = null;
+      for (const k of Object.keys(floorRepliesMap)) {
+        delete floorRepliesMap[k];
+      }
+    }
     isCommentsModalOpen.value = true;
-    await loadCommentsForSong(target, commentSortType.value);
+    await loadCommentsForSong(frozenTarget, commentSortType.value);
   }
 
   function closeCommentsModal() {
@@ -5517,14 +5807,13 @@ export const useAppStore = defineStore("breezeApp", () => {
     isBuffering.value = true;
     currentPlaybackInfo.value = null;
     currentSongDetailInfo.value = null;
-    activeSongCommentTotal.value = 0;
     currentTrackPlayedAccumMs = 0;
     durationMs.value = song.durationMs || 0;
     syncWindowsMediaSession(song);
     broadcastDesktopLyricState();
 
     loadLyricForSong(song);
-    loadCommentsForSong(song, commentSortType.value);
+    refreshCurrentSongCommentCount(song);
 
     try {
       const targetStreamQuality = (activeCloudStreamEffect.value ||
@@ -5670,11 +5959,15 @@ export const useAppStore = defineStore("breezeApp", () => {
     }
   }
 
+  let activeSongDetailSeq = 0;
+
   async function openSongDetailModal(song: Song) {
-    songDetailModalSong.value = song;
-    const isCurrent =
-      Boolean(currentSong.value) && isSameHistoryTrack(currentSong.value!, song);
-    if (isCurrent && currentSongDetailInfo.value) {
+    const reqSeq = ++activeSongDetailSeq;
+    const frozenSong: Song = { ...song };
+    songDetailModalSong.value = frozenSong;
+    const isCurrentAtOpen =
+      Boolean(currentSong.value) && isSameHistoryTrack(currentSong.value!, frozenSong);
+    if (isCurrentAtOpen && currentSongDetailInfo.value) {
       activeSongDetailInfo.value = currentSongDetailInfo.value;
       isLoadingSongDetail.value = false;
       return;
@@ -5683,26 +5976,46 @@ export const useAppStore = defineStore("breezeApp", () => {
     isLoadingSongDetail.value = true;
     try {
       const targetQuality =
-        isCurrent && currentPlaybackInfo.value?.actualQuality
+        isCurrentAtOpen && currentPlaybackInfo.value?.actualQuality
           ? currentPlaybackInfo.value.actualQuality
           : preferredQuality.value;
       const detail = await kugouClient.getSongDetailInfo(
-        song,
+        frozenSong,
         targetQuality,
-        isCurrent ? currentPlaybackInfo.value : null
+        isCurrentAtOpen ? currentPlaybackInfo.value : null
       );
+      if (
+        reqSeq !== activeSongDetailSeq ||
+        !songDetailModalSong.value ||
+        !isSameHistoryTrack(songDetailModalSong.value, frozenSong)
+      ) {
+        return;
+      }
       activeSongDetailInfo.value = detail;
       if (detail?.song) {
         syncEnrichedSongMetadata(song, detail.song);
+        syncEnrichedSongMetadata(frozenSong, detail.song);
+        if (songDetailModalSong.value) {
+          syncEnrichedSongMetadata(songDetailModalSong.value, detail.song);
+        }
       }
-      if (isCurrent && currentSong.value) {
-        syncEnrichedSongMetadata(currentSong.value, detail.song);
+      if (
+        currentSong.value &&
+        isSameHistoryTrack(currentSong.value, frozenSong)
+      ) {
+        if (detail?.song) {
+          syncEnrichedSongMetadata(currentSong.value, detail.song);
+        }
         currentSongDetailInfo.value = detail;
       }
     } catch {
-      activeSongDetailInfo.value = null;
+      if (reqSeq === activeSongDetailSeq) {
+        activeSongDetailInfo.value = null;
+      }
     } finally {
-      isLoadingSongDetail.value = false;
+      if (reqSeq === activeSongDetailSeq) {
+        isLoadingSongDetail.value = false;
+      }
     }
   }
 
@@ -5711,11 +6024,14 @@ export const useAppStore = defineStore("breezeApp", () => {
   const activeLyricCandidateId = ref<string>("");
 
   let lyricLoadRequestSeq = 0;
+  let lyricCandidateSearchSeq = 0;
 
   async function loadLyricForSong(song: Song) {
     const reqSeq = ++lyricLoadRequestSeq;
+    lyricCandidateSearchSeq += 1;
     const targetKey = song.hash || song.id || "";
     isLoadingLyric.value = true;
+    isSearchingLyricCandidates.value = false;
     lyricCandidates.value = [];
     activeLyricCandidateId.value = "";
     // 切歌瞬间先清空旧歌残留歌词并立即同步桌面歌词窗口，防止新歌名配旧歌词错位闪烁
@@ -5762,9 +6078,17 @@ export const useAppStore = defineStore("breezeApp", () => {
       notify("请先播放一首歌曲再搜索候选歌词");
       return;
     }
+    const reqSeq = ++lyricCandidateSearchSeq;
     isSearchingLyricCandidates.value = true;
     try {
       const list = await kugouClient.searchLyricCandidates(song, customKeyword);
+      if (
+        reqSeq !== lyricCandidateSearchSeq ||
+        !currentSong.value ||
+        !isSameHistoryTrack(currentSong.value, song)
+      ) {
+        return;
+      }
       lyricCandidates.value = list;
       if (list.length > 0 && !activeLyricCandidateId.value) {
         activeLyricCandidateId.value = list[0].id;
@@ -5773,9 +6097,13 @@ export const useAppStore = defineStore("breezeApp", () => {
         notify("未检索到其他匹配的候选歌词");
       }
     } catch (e: any) {
-      notify(`检索候选歌词失败：${String(e)}`);
+      if (reqSeq === lyricCandidateSearchSeq) {
+        notify(`检索候选歌词失败：${String(e)}`);
+      }
     } finally {
-      isSearchingLyricCandidates.value = false;
+      if (reqSeq === lyricCandidateSearchSeq) {
+        isSearchingLyricCandidates.value = false;
+      }
     }
   }
 
@@ -5825,12 +6153,12 @@ export const useAppStore = defineStore("breezeApp", () => {
   let lastCommentsSongKey = "";
 
   async function loadCommentsForSong(
-    song: Song | null = currentSong.value,
+    song: Song | null = commentsModalSong.value || currentSong.value,
     sort: "hot" | "new" = "hot"
   ) {
     if (!song) return;
     const reqId = ++activeCommentsReqId;
-    const songKey = `${song.hash || ""}::${song.albumAudioId || song.mixSongId || song.id || ""}`;
+    const songKey = getCommentSongKey(song);
     if (songKey !== lastCommentsSongKey) {
       lastCommentsSongKey = songKey;
       for (const k of Object.keys(floorRepliesMap)) {
@@ -5842,13 +6170,25 @@ export const useAppStore = defineStore("breezeApp", () => {
     isLoadingComments.value = true;
     try {
       const list = await kugouClient.getSongComments(song, sort, 1);
-      if (reqId !== activeCommentsReqId) return;
+      if (
+        reqId !== activeCommentsReqId ||
+        (commentsModalSong.value &&
+          getCommentSongKey(commentsModalSong.value) !== songKey)
+      ) {
+        return;
+      }
       activeSongComments.value = Array.isArray(list) ? list : [];
       const firstTotal = Number(activeSongComments.value[0]?.totalCount || 0);
       let remoteCount = 0;
       if (!Number.isFinite(firstTotal) || firstTotal <= 0) {
         remoteCount = await kugouClient.getSongCommentCount(song).catch(() => 0);
-        if (reqId !== activeCommentsReqId) return;
+        if (
+          reqId !== activeCommentsReqId ||
+          (commentsModalSong.value &&
+            getCommentSongKey(commentsModalSong.value) !== songKey)
+        ) {
+          return;
+        }
       }
       const bestTotal = Math.max(
         Number(remoteCount) || 0,
@@ -5856,8 +6196,20 @@ export const useAppStore = defineStore("breezeApp", () => {
         activeSongComments.value.length
       );
       activeSongCommentTotal.value = bestTotal;
+      if (currentSong.value && isSameHistoryTrack(currentSong.value, song)) {
+        currentSongCommentTotal.value = Math.max(
+          currentSongCommentTotal.value,
+          bestTotal
+        );
+      }
     } catch {
-      if (reqId !== activeCommentsReqId) return;
+      if (
+        reqId !== activeCommentsReqId ||
+        (commentsModalSong.value &&
+          getCommentSongKey(commentsModalSong.value) !== songKey)
+      ) {
+        return;
+      }
       if (
         isBrowserDevPreviewEnv() &&
         playQueue.value[0]?.hash === song.hash
@@ -5883,25 +6235,41 @@ export const useAppStore = defineStore("breezeApp", () => {
       return;
     }
     expandedFloorCommentId.value = cmt.id;
-    const targetSong = commentsModalSong.value || currentSong.value;
+    const targetSong = commentsModalSong.value;
     if (floorRepliesMap[cmt.id]?.length || !targetSong) return;
+    const targetKey = getCommentSongKey(targetSong);
+    const reqId = activeCommentsReqId;
     isLoadingFloorReplies.value = true;
     try {
-      floorRepliesMap[cmt.id] = await kugouClient.getCommentFloorReplies(
+      const replies = await kugouClient.getCommentFloorReplies(
         targetSong,
         cmt.id,
         cmt.specialChildId,
         1
       );
+      if (
+        reqId !== activeCommentsReqId ||
+        getCommentSongKey(commentsModalSong.value) !== targetKey
+      ) {
+        return;
+      }
+      floorRepliesMap[cmt.id] = replies;
     } catch {
-      floorRepliesMap[cmt.id] = [];
+      if (
+        reqId === activeCommentsReqId &&
+        getCommentSongKey(commentsModalSong.value) === targetKey
+      ) {
+        floorRepliesMap[cmt.id] = [];
+      }
     } finally {
-      isLoadingFloorReplies.value = false;
+      if (reqId === activeCommentsReqId) {
+        isLoadingFloorReplies.value = false;
+      }
     }
   }
 
   async function toggleLikeComment(cmt: SongComment) {
-    const targetSong = commentsModalSong.value || currentSong.value;
+    const targetSong = commentsModalSong.value;
     if (!targetSong) return;
     const prevLiked = Boolean(cmt.isLiked);
     const prevCount = Number(cmt.likeCount) || 0;
@@ -5921,8 +6289,10 @@ export const useAppStore = defineStore("breezeApp", () => {
   }
 
   async function submitSongComment(content: string, replyToId?: string) {
-    const targetSong = commentsModalSong.value || currentSong.value;
+    const targetSong = commentsModalSong.value;
     if (!targetSong) return false;
+    const targetKey = getCommentSongKey(targetSong);
+    const reqId = activeCommentsReqId;
     if (!isLoggedIn.value) {
       isLoginModalOpen.value = true;
       return false;
@@ -5933,21 +6303,36 @@ export const useAppStore = defineStore("breezeApp", () => {
         content,
         replyToId
       );
-      if (replyToId) {
-        if (!floorRepliesMap[replyToId]) {
-          floorRepliesMap[replyToId] = [];
+      const stillSameModalSong =
+        reqId === activeCommentsReqId &&
+        getCommentSongKey(commentsModalSong.value) === targetKey;
+      if (stillSameModalSong) {
+        if (replyToId) {
+          if (!floorRepliesMap[replyToId]) {
+            floorRepliesMap[replyToId] = [];
+          }
+          floorRepliesMap[replyToId].unshift(created);
+          const parent = activeSongComments.value.find((c) => c.id === replyToId);
+          if (parent) {
+            parent.replyCount = (Number(parent.replyCount) || 0) + 1;
+          }
+          expandedFloorCommentId.value = replyToId;
+        } else {
+          activeSongComments.value.unshift(created);
+          activeSongCommentTotal.value = Math.max(
+            activeSongCommentTotal.value + 1,
+            activeSongComments.value.length
+          );
         }
-        floorRepliesMap[replyToId].unshift(created);
-        const parent = activeSongComments.value.find((c) => c.id === replyToId);
-        if (parent) {
-          parent.replyCount = (Number(parent.replyCount) || 0) + 1;
-        }
-        expandedFloorCommentId.value = replyToId;
-      } else {
-        activeSongComments.value.unshift(created);
-        activeSongCommentTotal.value = Math.max(
-          activeSongCommentTotal.value + 1,
-          activeSongComments.value.length
+      }
+      if (
+        !replyToId &&
+        currentSong.value &&
+        isSameHistoryTrack(currentSong.value, targetSong)
+      ) {
+        currentSongCommentTotal.value = Math.max(
+          currentSongCommentTotal.value + 1,
+          stillSameModalSong ? activeSongCommentTotal.value : 0
         );
       }
       notify("评论已发布");
@@ -7392,6 +7777,9 @@ export const useAppStore = defineStore("breezeApp", () => {
     isAccountManagerOpen,
     isFocusPodOpen,
     isLyricPosterOpen,
+    lyricPosterTargetSong,
+    openLyricPosterModal,
+    closeLyricPosterModal,
     desktopLyricEnabled,
     desktopLyricLocked,
     contextMenu,
@@ -7405,7 +7793,18 @@ export const useAppStore = defineStore("breezeApp", () => {
     addToPlaylistModalSong,
     downloadModalSong,
     shareModalSong,
+    shareModalPlaylist,
+    detectedSharedTarget,
+    openShareSongModal,
+    openSharePlaylistModal,
+    closeShareModal,
+    dismissDetectedSharedTarget,
+    checkClipboardForKugouShare,
+    clipboardShareDetectEnabled,
     hdArtworkPreviewUrl,
+    hdArtworkPreviewTarget,
+    openHdArtworkPreview,
+    closeHdArtworkPreview,
     statusBanner,
     discoverSubView,
     discoverHeroExpanding,
@@ -7619,7 +8018,10 @@ export const useAppStore = defineStore("breezeApp", () => {
     isLoadingLyric,
     activeSongComments,
     activeSongCommentTotal,
+    currentSongCommentTotal,
     setActiveSongCommentTotal,
+    setCurrentSongCommentTotal,
+    refreshCurrentSongCommentCount,
     commentSortType,
     isLoadingComments,
     expandedFloorCommentId,
@@ -7681,9 +8083,11 @@ export const useAppStore = defineStore("breezeApp", () => {
     loadRecentHistory,
     loadUserPlaylists,
     selectPlaylist,
+    openResolvedSharedPlaylist,
     createNewPlaylist,
     deletePlaylist,
     removeSongFromCurrentPlaylist,
+    importSongsAsNewPlaylist,
     importExternalPlaylist,
     isPlaylistCollected,
     toggleCollectPlaylist,

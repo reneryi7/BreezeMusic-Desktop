@@ -92,17 +92,17 @@ function onChange(e: Event) {
   width: 46px;
   height: 26px;
   border-radius: var(--bm-r-pill, 999px);
-  background: var(--bg-pill);
+  background: var(--bms-neutral-control, var(--bg-pill));
   transition: background 0.24s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.24s ease;
 }
 
 .bms-switch-shell.is-checked .bms-switch-track {
-  background: var(--grad-kugou-primary);
+  background: var(--bms-focus-grad, var(--grad-kugou-primary));
   box-shadow: 0 6px 16px -4px color-mix(in srgb, var(--primary) 50%, transparent);
 }
 
 .bms-switch-native:focus-visible + .bms-switch-track {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--primary-text, var(--primary));
   outline-offset: 2px;
 }
 
@@ -113,15 +113,17 @@ function onChange(e: Event) {
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.24);
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.28);
   transition:
     transform 0.34s var(--ease-spring-tactile, cubic-bezier(0.22, 1.3, 0.36, 1)),
-    width 0.16s ease;
+    width 0.16s ease,
+    background 0.2s ease;
 }
 
 .bms-switch-shell.is-checked .bms-switch-thumb {
   transform: translateX(20px);
+  background: #ffffff;
 }
 
 .bms-switch-shell:active:not(.is-disabled) .bms-switch-thumb {

@@ -26,7 +26,14 @@ import RollingCounter from "./RollingCounter.vue";
 import { triggerOneShotClass } from "../utils/microMotionFx";
 
 const store = useAppStore();
-const targetSong = computed(() => store.commentsModalSong || store.currentSong);
+const targetSong = computed(() => store.commentsModalSong);
+
+function getSongKey(song: { hash?: string; albumAudioId?: string | number; mixSongId?: string | number; id?: string } | null | undefined): string {
+  if (!song) return "";
+  return `${String(song.hash || "").trim().toLowerCase()}::${String(
+    song.albumAudioId || song.mixSongId || song.id || ""
+  ).trim()}`;
+}
 
 // ==================== 1. 四主题 + 封面自适应主题变量 ====================
 const {
@@ -268,13 +275,16 @@ function scheduleSilentMainPrefetch(nextPage: number) {
     return;
   }
   const reqSeq = mainRequestSeq;
+  const targetKey = getSongKey(song);
   const sort = store.commentSortType;
   prefetchedMainPageNum = nextPage;
   prefetchedMainResult = null;
   prefetchedMainPromise = kugouClient
     .getSongCommentsPaged(song, sort, nextPage, mainPageSize)
     .then((res) => {
-      if (reqSeq !== mainRequestSeq) return null;
+      if (reqSeq !== mainRequestSeq || getSongKey(targetSong.value) !== targetKey) {
+        return null;
+      }
       prefetchedMainResult = res;
       return res;
     })
@@ -294,6 +304,7 @@ async function loadMoreMainComments() {
   }
   isLoadingMoreMain.value = true;
   const reqSeq = mainRequestSeq;
+  const targetKey = getSongKey(song);
   const nextP = mainPage.value + 1;
   const sort = store.commentSortType;
 
@@ -309,7 +320,13 @@ async function loadMoreMainComments() {
     if (!res) {
       res = await kugouClient.getSongCommentsPaged(song, sort, nextP, mainPageSize);
     }
-    if (reqSeq !== mainRequestSeq || !res) return;
+    if (
+      reqSeq !== mainRequestSeq ||
+      getSongKey(targetSong.value) !== targetKey ||
+      !res
+    ) {
+      return;
+    }
 
     if (res.total > 0) {
       localMainTotal.value = Math.max(localMainTotal.value, res.total);
@@ -363,13 +380,16 @@ function scheduleSilentFloorPrefetch(nextPage: number) {
     return;
   }
   const reqSeq = floorRequestSeq;
+  const targetKey = getSongKey(song);
   const scid = root.specialChildId || resolvedSpecialChildId.value || "";
   prefetchedFloorPageNum = nextPage;
   prefetchedFloorResult = null;
   prefetchedFloorPromise = kugouClient
     .getCommentFloorRepliesPaged(song, root.id, scid, nextPage, floorPageSize)
     .then((res) => {
-      if (reqSeq !== floorRequestSeq) return null;
+      if (reqSeq !== floorRequestSeq || getSongKey(targetSong.value) !== targetKey) {
+        return null;
+      }
       prefetchedFloorResult = res;
       return res;
     })
@@ -390,6 +410,7 @@ async function loadMoreFloorReplies() {
   }
   isLoadingMoreFloor.value = true;
   const reqSeq = floorRequestSeq;
+  const targetKey = getSongKey(song);
   const nextP = floorPage.value + 1;
   const scid = root.specialChildId || resolvedSpecialChildId.value || "";
 
@@ -411,7 +432,13 @@ async function loadMoreFloorReplies() {
         floorPageSize
       );
     }
-    if (reqSeq !== floorRequestSeq || !res) return;
+    if (
+      reqSeq !== floorRequestSeq ||
+      getSongKey(targetSong.value) !== targetKey ||
+      !res
+    ) {
+      return;
+    }
 
     const seen = new Set(rawFloorReplies.value.map((r) => r.id));
     const unique = (res.comments || []).filter((r) => !seen.has(r.id));
@@ -465,6 +492,8 @@ async function prefetchInlineRepliesForCard(
     return;
   }
   inflightInlinePrefetchIds.add(commentId);
+  const reqSeq = mainRequestSeq;
+  const targetKey = getSongKey(song);
   try {
     const scid = cmt.specialChildId || resolvedSpecialChildId.value || "";
     const res = await kugouClient.getCommentFloorRepliesPaged(
@@ -474,6 +503,13 @@ async function prefetchInlineRepliesForCard(
       1,
       expandAll ? 20 : 8
     );
+    if (
+      reqSeq !== mainRequestSeq ||
+      !store.isCommentsModalOpen ||
+      getSongKey(targetSong.value) !== targetKey
+    ) {
+      return;
+    }
     if (res.comments && res.comments.length > 0) {
       cmt.replies = res.comments.slice(0, 6);
       store.floorRepliesMap[cmt.id] = res.comments;
@@ -692,6 +728,7 @@ async function switchSort(sort: "hot" | "new") {
   }
   mainRequestSeq += 1;
   const reqSeq = mainRequestSeq;
+  const targetKey = getSongKey(song);
   store.commentSortType = sort;
   resetMainPagingState();
   isSwitchingSort.value = true;
@@ -705,7 +742,9 @@ async function switchSort(sort: "hot" | "new") {
       1,
       mainPageSize
     );
-    if (reqSeq !== mainRequestSeq) return;
+    if (reqSeq !== mainRequestSeq || getSongKey(targetSong.value) !== targetKey) {
+      return;
+    }
     store.activeSongComments = res.comments || [];
     if (res.total > 0) {
       localMainTotal.value = res.total;
@@ -762,6 +801,7 @@ async function openFloorDetail(rootCmt: SongComment) {
 
   const song = targetSong.value;
   if (!song) return;
+  const targetKey = getSongKey(song);
 
   isLoadingFloor.value = true;
   try {
@@ -773,7 +813,9 @@ async function openFloorDetail(rootCmt: SongComment) {
       1,
       floorPageSize
     );
-    if (reqSeq !== floorRequestSeq) return;
+    if (reqSeq !== floorRequestSeq || getSongKey(targetSong.value) !== targetKey) {
+      return;
+    }
     const list = res.comments || [];
     if (list.length > 0) {
       rawFloorReplies.value = list;

@@ -293,6 +293,10 @@ fn set_webview_memory_target_low(_win: &tauri::WebviewWindow, _low: bool) {}
 fn sync_main_low_memory_state(win: &tauri::WebviewWindow, flag: &AtomicBool, low: bool) {
     if flag.swap(low, Ordering::Relaxed) != low {
         set_webview_memory_target_low(win, low);
+        let _ = win.emit(
+            "bm-main-window-visibility",
+            serde_json::json!({ "visible": !low }),
+        );
     }
 }
 
@@ -2506,6 +2510,175 @@ async fn parse_shared_music_cmd(
     raw_text: String,
 ) -> Result<SharedMusicResolved, String> {
     state.api.parse_shared_music_text(&raw_text).await
+}
+
+#[tauri::command]
+async fn enrich_song_for_share_cmd(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    song: Song,
+) -> Result<Song, String> {
+    ensure_main_window(&window)?;
+    Ok(state.api.enrich_song_for_share(&song).await)
+}
+
+#[tauri::command]
+async fn enrich_playlist_for_share_cmd(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    playlist: Playlist,
+) -> Result<Playlist, String> {
+    ensure_main_window(&window)?;
+    Ok(state.api.enrich_playlist_for_share(&playlist).await)
+}
+
+/// 校验外部打开 URL 安全性（阻断 file://、javascript:、cmd 注入、内网 IP 与 URL 凭据；仅放行公网 HTTP(S) 及酷狗官方唤端 Scheme）
+fn is_safe_external_open_url(raw_url: &str) -> bool {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() || trimmed.len() > 4096 || trimmed.bytes().any(|b| b < 0x20 || b == b'"')
+    {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("kugou://start.weixin?") || lower.starts_with("kugouyouth://start.weixin?")
+    {
+        return true;
+    }
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return false;
+    }
+    if !kugou::transport::KugouTransport::is_safe_external_url(trimmed, false) {
+        return false;
+    }
+    if let Ok(parsed) = reqwest::Url::parse(trimmed) {
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return false;
+        }
+        true
+    } else {
+        false
+    }
+}
+
+#[tauri::command]
+async fn open_external_url_cmd(
+    window: tauri::WebviewWindow,
+    url: String,
+) -> Result<bool, String> {
+    ensure_main_window(&window)?;
+    let trimmed = url.trim().to_string();
+    if !is_safe_external_open_url(&trimmed) {
+        return Err("已拦截不安全的外部链接地址".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "shell32")]
+        extern "system" {
+            fn ShellExecuteW(
+                hwnd: isize,
+                lp_operation: *const u16,
+                lp_file: *const u16,
+                lp_parameters: *const u16,
+                lp_directory: *const u16,
+                n_show_cmd: i32,
+            ) -> isize;
+        }
+        let op: Vec<u16> = OsStr::new("open").encode_wide().chain(Some(0)).collect();
+        let target: Vec<u16> = OsStr::new(&trimmed).encode_wide().chain(Some(0)).collect();
+        let rc = unsafe {
+            ShellExecuteW(
+                0,
+                op.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        if rc <= 32 {
+            return Err("无法调用系统默认浏览器打开该链接".to_string());
+        }
+        Ok(true)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = trimmed;
+        Err("当前平台暂不支持外部链接打开".to_string())
+    }
+}
+
+/// Windows 原生剪贴板文本安全读取（零第三方依赖、无 WebView2 弹窗授权拦截，受前端设置开关严格管控，上限 16384 字符）
+#[tauri::command]
+async fn read_clipboard_text_cmd(window: tauri::WebviewWindow) -> Result<String, String> {
+    ensure_main_window(&window)?;
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn OpenClipboard(hwnd_new_owner: isize) -> i32;
+            fn CloseClipboard() -> i32;
+            fn IsClipboardFormatAvailable(format: u32) -> i32;
+            fn GetClipboardData(u_format: u32) -> isize;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalLock(h_mem: isize) -> *const u16;
+            fn GlobalUnlock(h_mem: isize) -> i32;
+        }
+        const CF_UNICODETEXT: u32 = 13;
+        const MAX_CLIPBOARD_U16: usize = 16384;
+
+        let res = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut opened = false;
+            for _ in 0..4 {
+                if unsafe { OpenClipboard(0) } != 0 {
+                    opened = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(18));
+            }
+            if !opened {
+                return Ok(String::new());
+            }
+            let out = unsafe {
+                if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
+                    String::new()
+                } else {
+                    let handle = GetClipboardData(CF_UNICODETEXT);
+                    if handle == 0 {
+                        String::new()
+                    } else {
+                        let ptr = GlobalLock(handle);
+                        if ptr.is_null() {
+                            String::new()
+                        } else {
+                            let mut len = 0usize;
+                            while len < MAX_CLIPBOARD_U16 && *ptr.add(len) != 0 {
+                                len += 1;
+                            }
+                            let slice = std::slice::from_raw_parts(ptr, len);
+                            let text = String::from_utf16_lossy(slice);
+                            let _ = GlobalUnlock(handle);
+                            text
+                        }
+                    }
+                }
+            };
+            unsafe {
+                let _ = CloseClipboard();
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        Ok(res)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(String::new())
+    }
 }
 
 #[tauri::command]
@@ -6660,6 +6833,10 @@ pub fn run() {
             cancel_download_task_cmd,
             save_song_lyric_only_cmd,
             parse_shared_music_cmd,
+            enrich_song_for_share_cmd,
+            enrich_playlist_for_share_cmd,
+            open_external_url_cmd,
+            read_clipboard_text_cmd,
             resolve_song_url,
             resolve_song_accompaniment_cmd,
             get_song_detail_info_cmd,
@@ -7495,5 +7672,18 @@ mod settings_backend_tests {
 
             let _ = DestroyWindow(hwnd);
         }
+    }
+
+    #[test]
+    fn test_is_safe_external_open_url() {
+        assert!(is_safe_external_open_url("https://h5.kugou.com/v2/v-5a15aeb1/index.html?hash=abc"));
+        assert!(is_safe_external_open_url("https://m.kugou.com/share/?action=single&hash=abc"));
+        assert!(is_safe_external_open_url("kugou://start.weixin?%7B%22cmd%22%3A212%7D"));
+        assert!(is_safe_external_open_url("kugouyouth://start.weixin?%7B%22cmd%22%3A103301%7D"));
+        assert!(!is_safe_external_open_url("file:///C:/Windows/System32/calc.exe"));
+        assert!(!is_safe_external_open_url("javascript:alert(1)"));
+        assert!(!is_safe_external_open_url("http://127.0.0.1:8080/admin"));
+        assert!(!is_safe_external_open_url("https://user:pass@m.kugou.com/share/"));
+        assert!(!is_safe_external_open_url("https://m.kugou.com/share/\" && calc"));
     }
 }

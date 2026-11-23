@@ -1,5 +1,6 @@
 ﻿import { ref, reactive, watch, type Ref } from "vue";
 import { kugouClient } from "../../api/kugou";
+import { containsKugouShareSignal } from "../../utils/kugouShare";
 import type {
   AlbumItem,
   FollowedArtist,
@@ -266,6 +267,43 @@ export function createSearchModule(deps: SearchModuleDeps) {
 
     isSearching.value = true;
     try {
+      // 对齐 Android SearchViewModel：若搜索框粘贴的是酷狗分享链接 / 口令，优先直连解析单曲或歌单
+      if (containsKugouShareSignal(target)) {
+        try {
+          const resolved = await kugouClient.parseSharedMusic(target);
+          if (seq !== activeSearchSeq) return;
+          if (resolved.targetType === "song" && resolved.song) {
+            searchResultsSongs.value = [resolved.song];
+            searchTotals.songs = 1;
+            searchHasMore.songs = false;
+            isSearching.value = false;
+            notify(`已识别酷狗分享单曲：《${resolved.song.title}》`);
+            return;
+          }
+          if (resolved.targetType === "playlist" && (resolved.playlist || resolved.songs.length > 0)) {
+            if (resolved.playlist) {
+              searchResultsPlaylists.value = [resolved.playlist];
+              searchTotals.playlists = 1;
+              searchHasMore.playlists = false;
+            }
+            if (resolved.songs.length > 0) {
+              searchResultsSongs.value = resolved.songs;
+              searchTotals.songs = resolved.songs.length;
+              searchHasMore.songs = false;
+            }
+            isSearching.value = false;
+            notify(
+              resolved.playlist?.title
+                ? `已识别酷狗分享歌单：《${resolved.playlist.title}》`
+                : `已识别分享歌单（共 ${resolved.songs.length} 首曲目）`
+            );
+            return;
+          }
+        } catch {
+          // 分享解析未命中时自动回落至常规关键词搜索
+        }
+      }
+
       const songsTask = kugouClient
         .searchSongsPaged(target, 1, 30)
         .then((songsRes) => {

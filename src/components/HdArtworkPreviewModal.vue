@@ -13,7 +13,36 @@ const store = useAppStore();
 const { modalSurfaceStyle, accentPrimary, onAccentPrimary, isLightSurface } =
   useFloatingModalTheme("auto");
 
-const isVisible = computed(() => Boolean(store.hdArtworkPreviewUrl));
+const isVisible = computed(() =>
+  Boolean(store.hdArtworkPreviewTarget?.url || store.hdArtworkPreviewUrl)
+);
+const activePreviewTarget = computed(() => {
+  if (store.hdArtworkPreviewTarget?.url) {
+    return store.hdArtworkPreviewTarget;
+  }
+  if (store.hdArtworkPreviewUrl) {
+    return {
+      url: store.hdArtworkPreviewUrl,
+      title: "专辑封面预览",
+      artist: "高清封面画廊",
+      album: "",
+      rawCoverTemplate: store.hdArtworkPreviewUrl,
+      hdCoverCandidates: [] as string[],
+      song: null,
+      initialMetrics: null,
+    };
+  }
+  return null;
+});
+const previewTitle = computed(
+  () => activePreviewTarget.value?.title || activePreviewTarget.value?.song?.title || "专辑封面预览"
+);
+const previewArtist = computed(
+  () => activePreviewTarget.value?.artist || activePreviewTarget.value?.song?.artist || "高清封面画廊"
+);
+const previewAlbum = computed(
+  () => activePreviewTarget.value?.album || activePreviewTarget.value?.song?.album || ""
+);
 const displayUrl = ref<string>("");
 const imgMetrics = ref<{ width: number; height: number } | null>(null);
 const isProbingHd = ref(false);
@@ -29,6 +58,10 @@ let dragBasePanX = 0;
 let dragBasePanY = 0;
 let probeSeq = 0;
 
+function closePreview() {
+  store.closeHdArtworkPreview();
+}
+
 function resetViewport() {
   zoom.value = 1;
   panX.value = 0;
@@ -36,8 +69,12 @@ function resetViewport() {
 }
 
 watch(
-  () => store.hdArtworkPreviewUrl,
-  async (rawUrl) => {
+  () => [
+    activePreviewTarget.value?.url || "",
+    activePreviewTarget.value?.song?.hash || "",
+    activePreviewTarget.value?.song?.id || "",
+  ] as const,
+  async ([rawUrl]) => {
     resetViewport();
     imgMetrics.value = null;
     if (!rawUrl) {
@@ -47,26 +84,22 @@ watch(
     }
 
     const req = ++probeSeq;
-    const candidates = buildCoverResolutionCandidates(
-      store.currentSong?.rawCoverTemplate || rawUrl,
-      [
-        store.activeHighResCoverUrl,
-        ...(store.currentSong?.hdCoverCandidates || []),
-        rawUrl,
-      ]
-    );
+    const target = activePreviewTarget.value;
+    const seedTemplate = target?.rawCoverTemplate || rawUrl;
+    const extraCandidates = [
+      ...(target?.hdCoverCandidates || []),
+      rawUrl,
+    ];
+    const candidates = buildCoverResolutionCandidates(seedTemplate, extraCandidates);
     displayUrl.value = candidates[0] || rawUrl;
-    if (store.activeHighResCoverMetrics && store.activeHighResCoverUrl) {
-      displayUrl.value = store.activeHighResCoverUrl;
-      imgMetrics.value = { ...store.activeHighResCoverMetrics };
+    if (target?.initialMetrics && target.url) {
+      displayUrl.value = target.url;
+      imgMetrics.value = { ...target.initialMetrics };
     }
 
     isProbingHd.value = true;
     try {
-      const best = await resolveBestCoverWithMetrics(
-        store.currentSong?.rawCoverTemplate || rawUrl,
-        [...(store.currentSong?.hdCoverCandidates || []), rawUrl]
-      );
+      const best = await resolveBestCoverWithMetrics(seedTemplate, extraCandidates);
       if (req !== probeSeq) return;
       if (best) {
         displayUrl.value = best.url;
@@ -187,7 +220,7 @@ async function handleSaveArtwork() {
   if (isSaving.value || !displayUrl.value) return;
   isSaving.value = true;
   try {
-    const songTitle = sanitizeFilePart(store.currentSong?.title || "BreezeMusic_Cover");
+    const songTitle = sanitizeFilePart(previewTitle.value || "BreezeMusic_Cover");
     const suggested = `${songTitle}_HD.png`;
     const base64Data = await encodeUrlToPngBase64(displayUrl.value);
     if (base64Data) {
@@ -231,7 +264,7 @@ async function handleSaveArtwork() {
 function handleKeyDown(ev: KeyboardEvent) {
   if (!isVisible.value) return;
   if (ev.key === "Escape") {
-    store.hdArtworkPreviewUrl = null;
+    closePreview();
   } else if (ev.key === "+" || ev.key === "=") {
     stepZoom(0.25);
   } else if (ev.key === "-") {
@@ -271,7 +304,7 @@ const resolutionText = computed(() => {
         v-if="isVisible"
         class="hd-artwork-backdrop"
         :class="{ 'is-light': isLightSurface }"
-        @click.self="store.hdArtworkPreviewUrl = null"
+        @click.self="closePreview"
       >
         <div
           class="hd-artwork-window"
@@ -285,12 +318,12 @@ const resolutionText = computed(() => {
           <header class="hd-art-header">
             <div class="hd-art-title-wrap">
               <h3 class="hd-art-title">
-                {{ store.currentSong?.title || "专辑封面预览" }}
+                {{ previewTitle }}
               </h3>
               <span class="hd-art-sub">
-                {{ store.currentSong?.artist || "高清封面画廊" }}
-                <template v-if="store.currentSong?.album">
-                  · 《{{ store.currentSong.album }}》
+                {{ previewArtist }}
+                <template v-if="previewAlbum">
+                  · 《{{ previewAlbum }}》
                 </template>
               </span>
             </div>
@@ -303,7 +336,7 @@ const resolutionText = computed(() => {
                 type="button"
                 class="hd-icon-close"
                 aria-label="关闭预览"
-                @click="store.hdArtworkPreviewUrl = null"
+                @click="closePreview"
               >
                 <PlumpIcon name="close" :size="15" />
               </button>

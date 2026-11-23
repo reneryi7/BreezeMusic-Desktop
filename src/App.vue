@@ -29,6 +29,11 @@ import {
   normalizeMotionLevel,
   normalizeUiDensity,
 } from "./utils/motionRuntime";
+import {
+  ensureAppPowerVisibilityTracking,
+  isAppForegroundActive,
+  subscribeAppPowerVisibility,
+} from "./utils/windowPowerState";
 
 const FocusPodModal = defineAsyncComponent(
   () => import("./components/FocusPodModal.vue")
@@ -53,6 +58,12 @@ const HdArtworkPreviewModal = defineAsyncComponent(
 );
 const AddToPlaylistModal = defineAsyncComponent(
   () => import("./components/AddToPlaylistModal.vue")
+);
+const ShareMusicModal = defineAsyncComponent(
+  () => import("./components/ShareMusicModal.vue")
+);
+const DetectedShareLinkModal = defineAsyncComponent(
+  () => import("./components/DetectedShareLinkModal.vue")
 );
 const LibraryView = defineAsyncComponent(
   () => import("./views/LibraryView.vue")
@@ -803,6 +814,11 @@ const SEG_TAB_CONTAINER_SELECTOR = [
   ".fp-mode-tabs",
   ".ts-mode-switch-group",
   ".dl-pod-tabs",
+  ".bms-subtabs",
+  ".bms-pill-group",
+  ".bm-fd-scope-tabs",
+  ".bmd-filter-pills",
+  ".bm-share-edition-pills",
 ].join(", ");
 
 const TAB_CONTAINER_SELECTOR = [
@@ -938,6 +954,7 @@ function rgbToRgba(c: RgbColor, alpha: number): string {
 }
 
 function prefersReducedTabMotion(): boolean {
+  if (store.motionLevel === "none") return true;
   return (
     typeof window !== "undefined" &&
     window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
@@ -970,7 +987,8 @@ function isTabButtonActive(btn: HTMLElement): boolean {
   return (
     btn.classList.contains("active") ||
     btn.classList.contains("is-active") ||
-    btn.getAttribute("aria-selected") === "true"
+    btn.getAttribute("aria-selected") === "true" ||
+    btn.getAttribute("aria-checked") === "true"
   );
 }
 
@@ -1097,6 +1115,22 @@ function renderIndicatorFrame(
 
 function stepSpringLoop(now: number) {
   springLoopRafId = null;
+  if (!isAppForegroundActive()) {
+    for (const [container, state] of tabStates.entries()) {
+      if (!container.isConnected) {
+        tabResizeObserver?.unobserve(container);
+        tabStates.delete(container);
+        continue;
+      }
+      if (!state.activeAnim) continue;
+      state.animatedIndex = state.targetIndex;
+      state.velocity = 0;
+      state.activeAnim = false;
+      renderIndicatorFrame(state, 1);
+    }
+    lastSpringFrameMs = 0;
+    return;
+  }
   const rawDt =
     lastSpringFrameMs > 0 ? (now - lastSpringFrameMs) / 1000 : 1 / 60;
   lastSpringFrameMs = now;
@@ -2186,12 +2220,16 @@ function handleGlobalKeyDown(e: KeyboardEvent) {
       store.closeCommentsModal();
       return;
     }
-    if (store.hdArtworkPreviewUrl) {
-      store.hdArtworkPreviewUrl = null;
+    if (store.hdArtworkPreviewTarget || store.hdArtworkPreviewUrl) {
+      store.closeHdArtworkPreview();
       return;
     }
-    if (store.shareModalSong) {
-      store.shareModalSong = null;
+    if (store.detectedSharedTarget) {
+      store.dismissDetectedSharedTarget();
+      return;
+    }
+    if (store.shareModalSong || store.shareModalPlaylist) {
+      store.closeShareModal();
       return;
     }
     if (store.songDetailModalSong) {
@@ -2315,17 +2353,6 @@ function handleGlobalKeyDown(e: KeyboardEvent) {
   }
 }
 
-async function copyShareCommand(song: any) {
-  if (!song) return;
-  const text = `🎵 正在微风音乐概念版收听：${song.title} - ${song.artist}${song.album ? `《${song.album}》` : ""} #KGHash:${song.hash}#`;
-  try {
-    await navigator.clipboard.writeText(text);
-    store.notify("已复制微风音乐分享口令，可在「导入歌单」中直接解析播放 ✨");
-  } catch {
-    store.notify(text);
-  }
-}
-
 function handleGlobalMouseBack(e: MouseEvent) {
   if (isStandaloneSubWindow) return;
   if (e.button === 3) {
@@ -2363,17 +2390,46 @@ watch(
 
 let uninstallNativeGuard: (() => void) | null = null;
 let appearancePrefsChannel: BroadcastChannel | null = null;
+let unsubscribePowerVis: (() => void) | null = null;
 
-function handleAppVisibilityClassSync() {
-  if (typeof document === "undefined") return;
-  document.documentElement.classList.toggle("bm-window-hidden", document.hidden);
+function isPotentialTabMutationTarget(el: HTMLElement): boolean {
+  const tag = el.tagName;
+  if (tag === "BUTTON" || tag === "A" || tag === "LABEL") return true;
+  const role = el.getAttribute("role");
+  if (role === "tab" || role === "radio" || role === "tablist" || role === "radiogroup") {
+    return true;
+  }
+  const cls = typeof el.className === "string" ? el.className : "";
+  if (!cls) return false;
+  return (
+    cls.includes("tab") ||
+    cls.includes("pill") ||
+    cls.includes("seg") ||
+    cls.includes("mode") ||
+    cls.includes("filter") ||
+    cls.includes("nav") ||
+    cls.includes("cat")
+  );
 }
 
 onMounted(() => {
-  handleAppVisibilityClassSync();
-  if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", handleAppVisibilityClassSync);
-  }
+  ensureAppPowerVisibilityTracking();
+  unsubscribePowerVis = subscribeAppPowerVisibility((active) => {
+    if (!active) {
+      if (springLoopRafId !== null) {
+        cancelAnimationFrame(springLoopRafId);
+        springLoopRafId = null;
+        lastSpringFrameMs = 0;
+      }
+      if (dirtyTabRafId !== null) {
+        cancelAnimationFrame(dirtyTabRafId);
+        dirtyTabRafId = null;
+      }
+      hideSmartTooltip(true);
+    } else if (dirtyTabContainers.size > 0) {
+      scheduleDirtyTabGliders(false);
+    }
+  });
   uninstallNativeGuard = installDesktopNativeGuard({
     allowCustomInputMenu: !isStandaloneSubWindow,
   });
@@ -2440,10 +2496,13 @@ onMounted(() => {
           ) {
             normalizeSingleTitleNode(m.target);
           } else if (
-            (m.attributeName === "class" || m.attributeName === "aria-selected") &&
+            (m.attributeName === "class" ||
+              m.attributeName === "aria-selected" ||
+              m.attributeName === "aria-checked") &&
             m.target instanceof HTMLElement &&
             !m.target.classList.contains("immersive-tab-indicator") &&
-            !m.target.classList.contains("bm-seg-glider")
+            !m.target.classList.contains("bm-seg-glider") &&
+            isPotentialTabMutationTarget(m.target)
           ) {
             const container = m.target.closest(ALL_TAB_ENGINE_SELECTOR) as HTMLElement | null;
             if (container) {
@@ -2452,37 +2511,39 @@ onMounted(() => {
             }
           }
         } else if (m.type === "childList") {
-          m.addedNodes.forEach((node) => {
-            if (node instanceof HTMLElement) {
-              if (!isStandaloneSubWindow) {
-                stripNativeTitlesInSubtree(node);
-              }
-              if (
-                !node.classList.contains("immersive-tab-indicator") &&
-                !node.classList.contains("bm-seg-glider")
-              ) {
-                const closestHost = node.closest(ALL_TAB_ENGINE_SELECTOR) as HTMLElement | null;
-                if (closestHost) {
-                  dirtyTabContainers.add(closestHost);
-                  hasDirtyTabs = true;
-                } else if (node.matches(ALL_TAB_ENGINE_SELECTOR)) {
-                  dirtyTabContainers.add(node);
-                  hasDirtyTabs = true;
-                } else if (typeof node.querySelectorAll === "function") {
-                  const nested = node.querySelectorAll(ALL_TAB_ENGINE_SELECTOR);
-                  nested.forEach((el) => {
-                    if (el instanceof HTMLElement) {
-                      dirtyTabContainers.add(el);
-                      hasDirtyTabs = true;
-                    }
-                  });
-                }
+          for (let ni = 0; ni < m.addedNodes.length; ni++) {
+            const node = m.addedNodes[ni];
+            if (!(node instanceof HTMLElement)) continue;
+            if (!isStandaloneSubWindow) {
+              stripNativeTitlesInSubtree(node);
+            }
+            if (
+              !node.classList.contains("immersive-tab-indicator") &&
+              !node.classList.contains("bm-seg-glider")
+            ) {
+              const closestHost = isPotentialTabMutationTarget(node)
+                ? (node.closest(ALL_TAB_ENGINE_SELECTOR) as HTMLElement | null)
+                : null;
+              if (closestHost) {
+                dirtyTabContainers.add(closestHost);
+                hasDirtyTabs = true;
+              } else if (node.matches(ALL_TAB_ENGINE_SELECTOR)) {
+                dirtyTabContainers.add(node);
+                hasDirtyTabs = true;
+              } else if (node.childElementCount > 0) {
+                const nested = node.querySelectorAll(ALL_TAB_ENGINE_SELECTOR);
+                nested.forEach((el) => {
+                  if (el instanceof HTMLElement) {
+                    dirtyTabContainers.add(el);
+                    hasDirtyTabs = true;
+                  }
+                });
               }
             }
-          });
+          }
         }
       }
-      if (hasDirtyTabs) {
+      if (hasDirtyTabs && isAppForegroundActive()) {
         scheduleDirtyTabGliders(true);
       }
     });
@@ -2491,15 +2552,18 @@ onMounted(() => {
       childList: true,
       attributes: true,
       attributeFilter: isStandaloneSubWindow
-        ? ["class", "aria-selected"]
-        : ["title", "class", "aria-selected"],
+        ? ["class", "aria-selected", "aria-checked"]
+        : ["title", "class", "aria-selected", "aria-checked"],
     });
   }
 });
 
 onBeforeUnmount(() => {
+  if (unsubscribePowerVis) {
+    unsubscribePowerVis();
+    unsubscribePowerVis = null;
+  }
   if (typeof document !== "undefined") {
-    document.removeEventListener("visibilitychange", handleAppVisibilityClassSync);
     document.documentElement.classList.remove("bm-window-hidden");
   }
   dirtyTabContainers.clear();
@@ -2900,63 +2964,11 @@ onBeforeUnmount(() => {
     <HdArtworkPreviewModal />
     <AddToPlaylistModal />
 
-    <!-- 全局歌曲分享与口令生成弹窗 -->
-    <transition name="fade">
-      <div
-        v-if="store.shareModalSong"
-        class="modal-backdrop"
-        @click.self="store.shareModalSong = null"
-      >
-        <div class="compact-dialog glass-popover" @click.stop>
-          <div class="modal-top-bar">
-            <h3>分享歌曲与微风口令</h3>
-            <button class="icon-close-btn" @click="store.shareModalSong = null">
-              <PlumpIcon name="close" :size="15" />
-            </button>
-          </div>
-          <div class="share-song-card-preview">
-            <img
-              v-if="store.shareModalSong.coverUrl"
-              :src="store.shareModalSong.coverUrl"
-              class="share-song-cover"
-            />
-            <div class="share-song-meta">
-              <div class="share-song-title">{{ store.shareModalSong.title }}</div>
-              <div class="share-song-artist">{{ store.shareModalSong.artist }}</div>
-              <div class="share-song-hash">Hash: {{ store.shareModalSong.hash }}</div>
-            </div>
-          </div>
-          <p class="dialog-sub">
-            复制微风音乐口令给好友，对方在「我的 → 导入歌单」粘贴即可直连播放；或一键生成 2K 艺术歌词海报：
-          </p>
-          <div class="dialog-actions">
-            <button
-              class="tonal-pill-btn"
-              @click="
-                if (store.shareModalSong) {
-                  store.playSongFromList(store.shareModalSong);
-                }
-                store.shareModalSong = null;
-                store.isLyricPosterOpen = true;
-              "
-            >
-              <PlumpIcon name="poster" :size="15" />
-              <span>生成 2K 歌词海报</span>
-            </button>
-            <button
-              class="primary-btn"
-              @click="
-                copyShareCommand(store.shareModalSong);
-                store.shareModalSong = null;
-              "
-            >
-              <PlumpIcon name="copy" :size="15" color="#ffffff" />
-              <span>复制分享口令</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    </transition>
+    <!-- 全局酷狗双端唤醒分享弹窗（支持单曲 / 歌单） -->
+    <ShareMusicModal />
+
+    <!-- 剪贴板识别酷狗分享链接确认弹窗 -->
+    <DetectedShareLinkModal />
   </div>
 </template>
 

@@ -91,6 +91,8 @@ html[data-motion-level="none"] {
 /* 精准关闭无效果模式下的位移/旋转类过渡，保留按钮色彩反馈并避免 0.001ms 干扰事件回调 */
 html[data-motion-level="none"] .skyline-stage-viewport,
 html[data-motion-level="none"] .bms-switch-thumb,
+html[data-motion-level="none"] .bms-nav-glider,
+html[data-motion-level="none"] .bm-seg-glider,
 html[data-motion-level="none"] .plump-slider::before,
 html[data-motion-level="none"] .skyline-floating-center,
 html[data-motion-level="none"] .skyline-win-floating-capsule,
@@ -105,9 +107,9 @@ html[data-motion-level="none"] .np-immersive-win-controls {
 [data-color-scheme="dark"] {
   color-scheme: dark;
   /* D1 黑曜石与暗夜极光（极夜冷曜 #0C0E14 + 极光蓝青靛主调 + 纯冷冰川散景） */
-  --bm-text-1: #EEF2F6;
-  --bm-text-2: rgba(203, 213, 225, 0.82);
-  --bm-text-3: rgba(148, 163, 184, 0.76);
+  --bm-text-1: #EEF2F8;
+  --bm-text-2: rgba(203, 217, 234, 0.88);
+  --bm-text-3: rgba(154, 173, 198, 0.84);
   --bm-surface-row-hover: rgba(56, 189, 248, 0.065);
   --bm-surface-row-active: rgba(94, 106, 210, 0.16);
   --bm-accent-azure: #38BDF8;
@@ -133,8 +135,12 @@ html[data-motion-level="none"] .np-immersive-win-controls {
   /* 极光蓝青靛主色 + 五维多彩辅助色 */
   --primary: #5e6ad2;
   --primary-light: #818cf8;
+  --primary-text: #a5b4fc;
   --primary-deep: #4338ca;
   --primary-soft: rgba(94, 106, 210, 0.18);
+  --bms-neutral-control: rgba(226, 232, 240, 0.11);
+  --bms-neutral-control-hover: rgba(226, 232, 240, 0.18);
+  --bms-focus-grad: linear-gradient(135deg, #4f46e5 0%, #5e6ad2 62%, #4361ee 100%);
   --cyan: #38bdf8;
   --mint: #2dd4bf;
   --coral: #fb7185;
@@ -170,11 +176,11 @@ html[data-motion-level="none"] .np-immersive-win-controls {
   --accent-gold: #facc15;
   --accent-gold-soft: rgba(250, 204, 21, 0.18);
 
-  --text-primary: #eef2f6;
-  --text-main: #eef2f6;
-  --text-secondary: #94a3b8;
-  --text-sub: #94a3b8;
-  --text-muted: #64748b;
+  --text-primary: #eef2f8;
+  --text-main: #eef2f8;
+  --text-secondary: #b4c2d6;
+  --text-sub: #b4c2d6;
+  --text-muted: #8899b0;
 
   /* 100% 彻底零边框体系 */
   --border-subtle: transparent;
@@ -215,9 +221,9 @@ html[data-motion-level="none"] .np-immersive-win-controls {
 /* D2 丝绒暗紫与星云流光 (Velvet Nebula)：微醺苦巧天鹅绒基底 (#1A1116) + 落日玫瑰×琥珀流金主调 */
 .scheme-abyssal_dark.dark-variant-velvet_nebula,
 [data-theme="abyssal_dark"][data-dark-variant="velvet_nebula"] {
-  --bm-text-1: #F9EFE6;
-  --bm-text-2: rgba(235, 214, 205, 0.82);
-  --bm-text-3: rgba(190, 160, 173, 0.76);
+  --bm-text-1: #FAF1E8;
+  --bm-text-2: rgba(235, 215, 219, 0.90);
+  --bm-text-3: rgba(196, 166, 179, 0.84);
   --bm-surface-row-hover: rgba(244, 63, 94, 0.085);
   --bm-surface-row-active: rgba(244, 63, 94, 0.17);
   --bm-accent-azure: #67E8F9;
@@ -240,8 +246,12 @@ html[data-motion-level="none"] .np-immersive-win-controls {
 
   --primary: #F43F5E;
   --primary-light: #FB7185;
+  --primary-text: #FDA4AF;
   --primary-deep: #E11D48;
   --primary-soft: rgba(244, 63, 94, 0.18);
+  --bms-neutral-control: rgba(249, 239, 230, 0.11);
+  --bms-neutral-control-hover: rgba(249, 239, 230, 0.18);
+  --bms-focus-grad: linear-gradient(135deg, #BE123C 0%, #E11D48 58%, #C2410C 100%);
   --cyan: #67E8F9;
   --mint: #34D399;
   --coral: #FB923C;
@@ -271,11 +281,11 @@ html[data-motion-level="none"] .np-immersive-win-controls {
   --accent-gold: #F59E0B;
   --accent-gold-soft: rgba(245, 158, 11, 0.20);
 
-  --text-primary: #F9EFE6;
-  --text-main: #F9EFE6;
-  --text-secondary: #D4B8C2;
-  --text-sub: #D4B8C2;
-  --text-muted: #9E7B8B;
+  --text-primary: #FAF1E8;
+  --text-main: #FAF1E8;
+  --text-secondary: #DFC9CF;
+  --text-sub: #DFC9CF;
+  --text-muted: #B798A6;
 
   --pb-btn-hover-bg: rgba(244, 63, 94, 0.12);
   --pb-btn-hover-glow: rgba(245, 158, 11, 0.28);
@@ -321,8 +331,12 @@ html[data-motion-level="none"] .np-immersive-win-controls {
 
   --primary: #4f46e5;
   --primary-light: #6366f1;
+  --primary-text: #4f46e5;
   --primary-deep: #3730a3;
   --primary-soft: rgba(79, 70, 229, 0.12);
+  --bms-neutral-control: rgba(24, 24, 27, 0.075);
+  --bms-neutral-control-hover: rgba(24, 24, 27, 0.125);
+  --bms-focus-grad: var(--grad-kugou-primary);
   --cyan: #0284c7;
   --mint: #0d9488;
   --coral: #ec4899;
@@ -412,8 +426,12 @@ html[data-motion-level="none"] .np-immersive-win-controls {
   /* 北欧矿物青玉主调（松林深绿 #0F766E）+ 亚光矿物印泥点缀色 */
   --primary: #0F766E;
   --primary-light: #0D9488;
+  --primary-text: #0F766E;
   --primary-deep: #115E59;
   --primary-soft: rgba(15, 118, 110, 0.13);
+  --bms-neutral-control: #E5DDD0;
+  --bms-neutral-control-hover: #DBD1C1;
+  --bms-focus-grad: var(--grad-kugou-primary);
   --cyan: #0369A1;
   --mint: #0F766E;
   --coral: #BE123C;

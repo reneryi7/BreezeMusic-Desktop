@@ -297,8 +297,12 @@ async function handleClearHistory() {
       </button>
     </div>
 
+    <Transition
+      :name="store.motionLevel === 'none' ? '' : 'bms-pane-fade'"
+      mode="out-in"
+    >
     <!-- ==================== 子页 1：下载队列 ==================== -->
-    <template v-if="activeSubTab === 'queue'">
+    <div v-if="activeSubTab === 'queue'" key="queue" class="bms-panel-stack">
       <SettingsCard
         title="并发下载任务队列"
         :subtitle="
@@ -591,10 +595,10 @@ async function handleClearHistory() {
           <span>可在任意歌曲右键菜单或播放页「更多」中发起单曲与批量下载</span>
         </div>
       </SettingsCard>
-    </template>
+    </div>
 
     <!-- ==================== 子页 2：下载记录 ==================== -->
-    <template v-else-if="activeSubTab === 'history'">
+    <div v-else-if="activeSubTab === 'history'" key="history" class="bms-panel-stack">
       <SettingsCard
         title="下载历史归档"
         :subtitle="`已持久化记录 ${store.downloadHistory.length} 首（上限 500 条） · 累计体积 ${historyTotalSizeText}`"
@@ -773,10 +777,10 @@ async function handleClearHistory() {
           <span>下载完成的歌曲会自动在此留存记录，方便随时回播或定位文件</span>
         </div>
       </SettingsCard>
-    </template>
+    </div>
 
     <!-- ==================== 子页 3：下载偏好 ==================== -->
-    <template v-else>
+    <div v-else key="prefs" class="bms-panel-stack">
       <SettingsCard
         title="音质、目录与归档规则"
         subtitle="自定义音频与独立歌词的保存位置、命名方式与目录结构"
@@ -952,7 +956,8 @@ async function handleClearHistory() {
           <SettingsSwitch v-model="store.autoSyncLocalAfterDownload" />
         </SettingsRow>
       </SettingsCard>
-    </template>
+    </div>
+    </Transition>
   </div>
 </template>
 
@@ -970,7 +975,18 @@ async function handleClearHistory() {
   box-shadow: 0 0 24px -2px color-mix(in srgb, var(--primary) 45%, transparent);
 }
 
-.bmd-filter-pills,
+.bmd-filter-pills {
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: var(--bms-surface-well);
+  flex-wrap: wrap;
+}
+
 .bmd-batch-actions {
   display: flex;
   align-items: center;
@@ -979,19 +995,28 @@ async function handleClearHistory() {
 }
 
 .bmd-filter-btn {
+  position: relative;
+  z-index: 1;
   border: none;
   border-radius: var(--bm-r-pill, 999px);
   padding: 5px 12px;
-  background: var(--bg-surface);
+  background: transparent;
   color: var(--text-secondary);
   font-size: var(--bm-fs-micro, 11px);
   font-weight: var(--bm-fw-bold, 700);
   cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.18s ease, color 0.2s ease;
+}
+
+.bmd-filter-btn:hover:not(.active) {
+  color: var(--text-primary);
+  background: var(--bms-neutral-control, var(--bg-hover-square));
 }
 
 .bmd-filter-btn.active {
-  background: var(--primary-soft);
-  color: var(--primary);
+  background: var(--bms-focus-grad, var(--grad-kugou-primary));
+  color: #ffffff;
 }
 
 .bmd-queue-list,
@@ -1004,11 +1029,11 @@ async function handleClearHistory() {
 .bmd-queue-card {
   border-radius: var(--bm-r-lg, 18px);
   padding: 14px 16px;
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
 }
 
 .bmd-queue-card.is-error {
-  background: color-mix(in srgb, var(--coral) 9%, var(--bg-surface));
+  background: color-mix(in srgb, var(--coral) 11%, var(--bms-surface-row));
 }
 
 .bmd-q-head {
@@ -1097,7 +1122,7 @@ async function handleClearHistory() {
 }
 
 .bmd-speed {
-  color: var(--primary);
+  color: var(--primary-text, var(--primary));
   font-weight: var(--bm-fw-bold, 700);
   font-variant-numeric: tabular-nums;
 }
@@ -1116,7 +1141,7 @@ async function handleClearHistory() {
   min-block-size: 38px;
   padding: 5px 12px;
   border-radius: var(--bm-r-md, 14px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-well);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1137,7 +1162,7 @@ async function handleClearHistory() {
   gap: 13px;
   padding: 12px 15px;
   border-radius: var(--bm-r-lg, 18px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
   flex-wrap: wrap;
 }
 
@@ -1181,7 +1206,7 @@ async function handleClearHistory() {
 .bmd-empty-box {
   padding: 40px 20px;
   border-radius: var(--bm-r-lg, 18px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1205,16 +1230,15 @@ async function handleClearHistory() {
 /* L2 晨雾燕麦 / D2 丝绒星云特化 */
 .scheme-watercolor_light.light-variant-nordic_oat .bmd-queue-card,
 .scheme-watercolor_light.light-variant-nordic_oat .bmd-history-row,
-.scheme-watercolor_light.light-variant-nordic_oat .bmd-filter-btn,
-.scheme-watercolor_light.light-variant-nordic_oat .bmd-hist-search,
-.scheme-watercolor_light.light-variant-nordic_oat .bmd-empty-box {
-  background: #F2ECE1;
-}
-
+.scheme-watercolor_light.light-variant-nordic_oat .bmd-empty-box,
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bmd-queue-card,
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bmd-history-row,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .bmd-hist-search,
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bmd-empty-box {
-  background: rgba(34, 20, 29, 0.82);
+  background: var(--bms-surface-row);
+}
+
+.scheme-watercolor_light.light-variant-nordic_oat .bmd-hist-search,
+.scheme-abyssal_dark.dark-variant-velvet_nebula .bmd-hist-search {
+  background: var(--bms-surface-well);
 }
 </style>

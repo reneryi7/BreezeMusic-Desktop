@@ -502,6 +502,10 @@ import { formatDuration, normalizeConceptQuality } from "../api/kugou";
 import { CLASSIC_EQ_PRESETS } from "../utils/audioDsp";
 import { triggerOneShotClass } from "../utils/microMotionFx";
 import { getMotionRuntimeProfile } from "../utils/motionRuntime";
+import {
+  isAppForegroundActive,
+  subscribeAppPowerVisibility,
+} from "../utils/windowPowerState";
 import PlumpIcon from "./PlumpIcon.vue";
 import RollingCounter from "./RollingCounter.vue";
 
@@ -734,7 +738,7 @@ function startProgressClock() {
     progressRafId !== null ||
     !store.isPlaying ||
     store.isNowPlayingOpen ||
-    (typeof document !== "undefined" && document.hidden)
+    !isAppForegroundActive()
   ) {
     return;
   }
@@ -743,7 +747,7 @@ function startProgressClock() {
     if (
       !store.isPlaying ||
       store.isNowPlayingOpen ||
-      (typeof document !== "undefined" && document.hidden)
+      !isAppForegroundActive()
     ) {
       progressRafId = null;
       return;
@@ -764,7 +768,7 @@ watch(
   [() => store.isPlaying, () => store.isNowPlayingOpen],
   ([playing, npOpen]) => {
     syncEdgeTimelineDom(store.getLivePlaybackPositionMs());
-    if (playing && !npOpen && (typeof document === "undefined" || !document.hidden)) {
+    if (playing && !npOpen && isAppForegroundActive()) {
       startProgressClock();
     } else {
       stopProgressClock();
@@ -782,21 +786,18 @@ watch(
   }
 );
 
-function handlePlayerBarVisibilityChange() {
-  if (typeof document === "undefined") return;
-  if (document.hidden) {
-    stopProgressClock();
-  } else if (store.isPlaying && !store.isNowPlayingOpen) {
-    syncEdgeTimelineDom(store.getLivePlaybackPositionMs());
-    startProgressClock();
-  }
-}
+let unsubscribePowerVis: (() => void) | null = null;
 
 onMounted(() => {
   window.addEventListener("mousedown", handleOutsideMouseDown, true);
-  if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", handlePlayerBarVisibilityChange);
-  }
+  unsubscribePowerVis = subscribeAppPowerVisibility((active) => {
+    if (!active) {
+      stopProgressClock();
+    } else if (store.isPlaying && !store.isNowPlayingOpen) {
+      syncEdgeTimelineDom(store.getLivePlaybackPositionMs());
+      startProgressClock();
+    }
+  });
   syncEdgeTimelineDom(store.getLivePlaybackPositionMs());
 });
 
@@ -805,8 +806,9 @@ onBeforeUnmount(() => {
   clearVolumeTimers();
   stopStepRepeat();
   window.removeEventListener("mousedown", handleOutsideMouseDown, true);
-  if (typeof document !== "undefined") {
-    document.removeEventListener("visibilitychange", handlePlayerBarVisibilityChange);
+  if (unsubscribePowerVis) {
+    unsubscribePowerVis();
+    unsubscribePowerVis = null;
   }
 });
 

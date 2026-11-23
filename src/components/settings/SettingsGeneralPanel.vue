@@ -217,6 +217,24 @@ async function handleManualRefreshAll() {
       </SettingsRow>
 
       <SettingsRow
+        title="切回前台自动识别剪贴板酷狗分享链接"
+        description="复制官方酷狗音乐或酷狗概念版单曲/歌单分享链接后，切回微风音乐窗口时自动弹出快速播放与查看确认"
+        icon="link"
+        icon-color="var(--mint)"
+        :badge="store.clipboardShareDetectEnabled ? '自动识别' : '已关闭'"
+        :badge-tone="store.clipboardShareDetectEnabled ? 'mint' : 'muted'"
+        label-for="bms-sw-clipboard-share"
+        setting-id="general-clipboard-share"
+        :highlighted="highlightedId === 'general-clipboard-share'"
+      >
+        <SettingsSwitch
+          id="bms-sw-clipboard-share"
+          v-model="store.clipboardShareDetectEnabled"
+          aria-label="切回前台自动识别剪贴板酷狗分享链接"
+        />
+      </SettingsRow>
+
+      <SettingsRow
         title="Windows 开机自动启动"
         description="登录当前 Windows 用户桌面后自动运行微风音乐（写入当前用户级启动项，无需管理员权限）"
         icon="sparkles"
@@ -293,7 +311,7 @@ async function handleManualRefreshAll() {
   flex-wrap: wrap;
   padding: 16px 18px;
   border-radius: var(--bm-r-lg, 18px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
   transition: box-shadow 0.25s ease;
 }
 
@@ -302,11 +320,11 @@ async function handleManualRefreshAll() {
 }
 
 .scheme-watercolor_light.light-variant-nordic_oat .bms-account-hero {
-  background: #F2ECE1;
+  background: var(--bms-surface-row);
 }
 
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bms-account-hero {
-  background: rgba(34, 20, 29, 0.82);
+  background: var(--bms-surface-row);
 }
 
 .bms-account-left {

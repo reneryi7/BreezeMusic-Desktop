@@ -753,8 +753,12 @@ function measureTextWidthPx(
   return ctx.measureText(text).width;
 }
 
-// ==================== 60fps 零冻结高精度时钟插值（隐身/暂停立即停帧；纯 LRC 行式节流、KRC 逐字原生高刷） ====================
+// ==================== 60fps 零冻结高精度时钟插值（隐身/暂停立即停帧；纯 LRC 行式节流、KRC 逐字理性 60fps 封顶） ====================
+const hasAnyKrcWords = computed(() =>
+  lyricLines.value.some((l) => Boolean(l.words?.length))
+);
 let lastLrcStepPerfMs = 0;
+let lastKrcStepPerfMs = 0;
 
 function startClockLoop() {
   if (
@@ -766,6 +770,7 @@ function startClockLoop() {
     return;
   }
   lastLrcStepPerfMs = 0;
+  lastKrcStepPerfMs = 0;
   const tick = (nowPerf: number) => {
     if (
       !isPlaying.value ||
@@ -789,10 +794,14 @@ function startClockLoop() {
     const activeHasKrcWords =
       wordByWordEnabled.value &&
       ((curIdx >= 0 && Boolean(lines[curIdx]?.words?.length)) ||
-        lines.some((l) => Boolean(l.words?.length)));
+        hasAnyKrcWords.value);
 
     if (activeHasKrcWords) {
-      livePosMs.value = clampedPos;
+      // 封顶 60fps（16ms），防止 144Hz/240Hz 显示器在悬浮歌词独立窗口上无意义高倍重渲染
+      if (lastKrcStepPerfMs === 0 || nowPerf - lastKrcStepPerfMs >= 16) {
+        lastKrcStepPerfMs = nowPerf;
+        livePosMs.value = clampedPos;
+      }
     } else {
       const nextLine = curIdx + 1 < lines.length ? lines[curIdx + 1] : null;
       const effNext = clampedPos + lyricOffsetMs.value - bluetoothDelayMs.value;

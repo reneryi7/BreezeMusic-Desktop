@@ -403,6 +403,25 @@ async function confirmDeleteOrUncollect() {
             <button
               type="button"
               class="sdp-sec-btn"
+              :disabled="!playlist"
+              @click="
+                playlist &&
+                  store.openSharePlaylistModal({
+                    ...playlist,
+                    trackCount: Math.max(
+                      playlist.trackCount || 0,
+                      store.playlistSongs.length
+                    ),
+                    coverUrl: coverImage || playlist.coverUrl,
+                  })
+              "
+            >
+              <PlumpIcon name="share" :size="15" />
+              <span>分享</span>
+            </button>
+            <button
+              type="button"
+              class="sdp-sec-btn"
               :disabled="store.isLoadingLibrary"
               @click="store.refreshCurrentPlaylistOnly()"
             >

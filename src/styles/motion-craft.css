@@ -935,13 +935,15 @@ html[data-motion-level="none"] .fade-leave-active > * {
 }
 
 /* =========================================================================
- * 后台节能隔离：窗口不可见或被沉浸播放页完全遮盖时，暂停后台无限循环 CSS 动画
- * （绝不影响独立沉浸播放页本身）
+ * 后台节能隔离：窗口不可见（最小化/托盘隐藏/Mini 模式隐藏主窗）或被沉浸播放页完全遮盖时，
+ * 彻底暂停后台无限循环 CSS 动画与过渡，降低 Chromium 合成器与 GPU 唤醒频率
+ * （绝不影响独立沉浸播放页本身及后台音频播放）
  * ========================================================================= */
 html.bm-window-hidden *,
 html.bm-window-hidden *::before,
 html.bm-window-hidden *::after {
   animation-play-state: paused !important;
+  transition: none !important;
 }
 
 .app-root.is-now-playing-open .aurora-blob,

@@ -40,6 +40,11 @@ import {
   detectPhoneticLanguage,
   resolveLinePhoneticText,
 } from "../utils/lyricPhonetic";
+import { getMotionRuntimeProfile } from "../utils/motionRuntime";
+import {
+  isAppForegroundActive,
+  subscribeAppPowerVisibility,
+} from "../utils/windowPowerState";
 import NowPlayingCoverStage from "../components/NowPlayingCoverStage.vue";
 import NowPlayingDialogs from "../components/NowPlayingDialogs.vue";
 import PlumpIcon from "../components/PlumpIcon.vue";
@@ -512,12 +517,9 @@ const isAudioEffectActive = computed(
     store.acousticField.stageDepth > 0
 );
 
-// 评论计数角标格式化（1k 以下精确数字，1k+ 自动精简为 k / w）
+// 评论计数角标格式化（独立读取当前播放曲目评论数，与评论弹窗浏览解耦）
 const formattedCommentCount = computed(() => {
-  const count =
-    store.activeSongCommentTotal > 0
-      ? store.activeSongCommentTotal
-      : store.activeSongComments.length;
+  const count = store.currentSongCommentTotal || 0;
   if (count <= 0) return "";
   return formatCommentCount(count);
 });
@@ -753,11 +755,11 @@ const hoverTimelineFraction = ref<number | null>(null);
 const settledSeekTargetMs = ref(-1);
 const settledSeekWallMs = ref(0);
 let liveSampledPosMs = 0;
-const interpolatedPosMs = ref(0);
+let liveInterpolatedPosMs = 0;
 const displayElapsedSec = ref(0);
 let lastWrittenProgressFrac = -1;
 
-function computeProgressFrac(posMs = interpolatedPosMs.value): number {
+function computeProgressFrac(posMs = liveInterpolatedPosMs): number {
   if (isScrubbingProgress.value) return scrubFraction.value;
   if (store.durationMs <= 0) return 0;
   return Math.max(0, Math.min(1, posMs / store.durationMs));
@@ -828,6 +830,7 @@ function updateScrubFromClientX(clientX: number) {
     Math.min(1, (clientX - rect.left) / rect.width)
   );
   syncTimelineProgressDom(scrubFraction.value, true);
+  syncLyricRealtimeDom(getEffectiveLyricTimeMs(), true);
 }
 
 function handleTimelineMouseMove(e: MouseEvent) {
@@ -859,10 +862,11 @@ function handleProgressPointerDown(e: MouseEvent) {
     settledSeekTargetMs.value = targetMs;
     settledSeekWallMs.value = performance.now();
     liveSampledPosMs = targetMs;
-    interpolatedPosMs.value = targetMs;
+    liveInterpolatedPosMs = targetMs;
     syncDisplayElapsedSec(targetMs);
     isScrubbingProgress.value = false;
     syncTimelineProgressDom(computeProgressFrac(targetMs), true);
+    syncLyricRealtimeDom(getEffectiveLyricTimeMs(), true);
     store.seekToMs(targetMs);
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", onUp);
@@ -897,7 +901,15 @@ const lyricViewportRef = ref<HTMLElement | null>(null);
 const hoveredLyricIndex = ref<number | null>(null);
 const isUserScrollingLyrics = ref(false);
 let lyricScrubResetTimer: number | null = null;
-const breathingDotPhase = ref(0);
+let breathingDotPhaseVal = 0;
+const activeLineIndex = ref<number>(-1);
+const activeInterludeVisible = ref<boolean>(false);
+
+// 当前活跃行 DOM 直接驱动缓存（零每帧 Vue VDOM 重渲染，仅在换行或切歌时刷新一次引用）
+let cachedActiveLineIdx = -1;
+let cachedActiveWordEls: HTMLElement[] = [];
+let cachedActiveWordProgress: Float32Array = new Float32Array(0);
+let cachedInterludeDotEls: HTMLElement[] = [];
 
 // 60fps 阻尼弹簧滚动物理状态
 let lyricTargetScrollTop = 0;
@@ -905,27 +917,74 @@ let lyricCurrentScrollTop = 0;
 let lyricScrollVelocity = 0;
 let lyricScrollInitialized = false;
 
-// 采用 60fps 亚像素级插值时钟驱动逐字流光，彻底消除低频采样造成的逐字卡顿感
-const effectiveLyricTimeMs = computed(() => {
+function getEffectiveLyricTimeMs(): number {
   const baseMs =
     isScrubbingProgress.value && store.durationMs > 0
       ? scrubFraction.value * store.durationMs
-      : interpolatedPosMs.value;
-  return Math.max(
-    0,
-    baseMs + store.lyricOffsetMs - store.bluetoothDelayMs
-  );
-});
+      : liveInterpolatedPosMs;
+  return Math.max(0, baseMs + store.lyricOffsetMs - store.bluetoothDelayMs);
+}
 
-const activeLineIndex = computed(() => {
-  const lines = store.currentLyric?.lines || [];
-  if (!lines.length) return -1;
-  const pos = effectiveLyricTimeMs.value;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (pos >= lines[i].startTimeMs) return i;
+/** O(log N) 二分查找当前时间对应的歌词行号 */
+function findLyricLineIndexAt(posMs: number): number {
+  const lines = store.currentLyric?.lines;
+  if (!lines || lines.length === 0) return -1;
+  let lo = 0;
+  let hi = lines.length - 1;
+  let ans = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (posMs >= lines[mid].startTimeMs) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
   }
-  return 0;
-});
+  return ans;
+}
+
+function invalidateActiveLyricDomCache() {
+  cachedActiveLineIdx = -1;
+  cachedActiveWordEls = [];
+  cachedActiveWordProgress = new Float32Array(0);
+  cachedInterludeDotEls = [];
+}
+
+function ensureActiveLyricDomCache(lineIdx: number) {
+  if (lineIdx < 0) {
+    invalidateActiveLyricDomCache();
+    return;
+  }
+  if (
+    cachedActiveLineIdx === lineIdx &&
+    cachedActiveWordEls.length > 0 &&
+    cachedActiveWordEls[0]?.isConnected
+  ) {
+    return;
+  }
+  const viewport = lyricViewportRef.value;
+  if (!viewport) {
+    invalidateActiveLyricDomCache();
+    return;
+  }
+  const lineEl = viewport.querySelector(
+    `[data-lyric-idx="${lineIdx}"]`
+  ) as HTMLElement | null;
+  if (!lineEl) {
+    invalidateActiveLyricDomCache();
+    return;
+  }
+  const spans = Array.from(
+    lineEl.querySelectorAll<HTMLElement>(".np-karaoke-word-span")
+  );
+  cachedActiveLineIdx = lineIdx;
+  cachedActiveWordEls = spans;
+  cachedActiveWordProgress = new Float32Array(spans.length).fill(-1);
+  cachedInterludeDotEls = Array.from(
+    lineEl.querySelectorAll<HTMLElement>(".np-interlude-dot")
+  );
+}
 
 function scrollToActiveLyricLine(smooth = true) {
   if (isUserScrollingLyrics.value) return;
@@ -963,8 +1022,24 @@ function scrollToActiveLyricLine(smooth = true) {
 }
 
 watch(activeLineIndex, () => {
-  nextTick(() => scrollToActiveLyricLine(true));
+  invalidateActiveLyricDomCache();
+  nextTick(() => {
+    scrollToActiveLyricLine(true);
+    syncLyricRealtimeDom(getEffectiveLyricTimeMs(), true);
+  });
 });
+
+watch(
+  () => store.currentLyric,
+  () => {
+    invalidateActiveLyricDomCache();
+    activeLineIndex.value = findLyricLineIndexAt(getEffectiveLyricTimeMs());
+    nextTick(() => {
+      scrollToActiveLyricLine(false);
+      syncLyricRealtimeDom(getEffectiveLyricTimeMs(), true);
+    });
+  }
+);
 
 watch(
   [
@@ -975,7 +1050,34 @@ watch(
     () => store.playerStageStyle,
   ],
   () => {
-    nextTick(() => scrollToActiveLyricLine(true));
+    nextTick(() => {
+      scrollToActiveLyricLine(true);
+      syncLyricRealtimeDom(getEffectiveLyricTimeMs(), true);
+    });
+  }
+);
+
+watch(
+  [
+    () => store.lyricTheme,
+    () => store.lyricSungMode,
+    () => store.lyricWordByWord,
+    () => store.lyricWordBounceEnabled,
+    () => store.lyricGlowIntensity,
+    () => store.lyricInactiveOpacity,
+    () => store.lyricUnsungPreset,
+    () => store.lyricUnsungCustomHex,
+    () => store.lyricCustomPrimaryHex,
+    () => store.lyricCustomSecondaryHex,
+    () => store.lyricFontWeight,
+    () => store.isNowPlayingLightStage,
+    () => store.effectiveCoverPalette.dominantAccent,
+    () => store.effectiveCoverPalette.secondaryAccent,
+  ],
+  () => {
+    nextTick(() => {
+      syncLyricRealtimeDom(getEffectiveLyricTimeMs(), true);
+    });
   }
 );
 
@@ -990,10 +1092,15 @@ watch(
     audioAnchorPosMs = 0;
     audioAnchorWallMs = performance.now();
     liveSampledPosMs = store.currentPositionMs;
-    interpolatedPosMs.value = store.currentPositionMs;
+    liveInterpolatedPosMs = store.currentPositionMs;
+    invalidateActiveLyricDomCache();
+    activeLineIndex.value = findLyricLineIndexAt(getEffectiveLyricTimeMs());
     syncDisplayElapsedSec(store.currentPositionMs);
     syncTimelineProgressDom(computeProgressFrac(store.currentPositionMs), true);
-    nextTick(() => scrollToActiveLyricLine(false));
+    nextTick(() => {
+      scrollToActiveLyricLine(false);
+      syncLyricRealtimeDom(getEffectiveLyricTimeMs(), true);
+    });
   }
 );
 
@@ -1026,9 +1133,10 @@ function handleClickLyricLine(line: LyricLine) {
   settledSeekTargetMs.value = targetMs;
   settledSeekWallMs.value = performance.now();
   liveSampledPosMs = targetMs;
-  interpolatedPosMs.value = targetMs;
+  liveInterpolatedPosMs = targetMs;
   syncDisplayElapsedSec(targetMs);
   syncTimelineProgressDom(computeProgressFrac(targetMs), true);
+  syncLyricRealtimeDom(getEffectiveLyricTimeMs(), true);
   if (lyricViewportRef.value) {
     lyricCurrentScrollTop = lyricViewportRef.value.scrollTop;
     lyricScrollVelocity = 0;
@@ -1216,10 +1324,7 @@ function getTranslationLineStyle(idx: number) {
   };
 }
 
-function getKaraokeWordStyle(line: LyricLine, word: LyricWord, lineIdx: number) {
-  const isCurrentLine = lineIdx === activeLineIndex.value;
-  const isPastLine = lineIdx < activeLineIndex.value;
-  const isNextLine = lineIdx === activeLineIndex.value + 1;
+const karaokeRenderTokens = computed(() => {
   const isLight = store.isNowPlayingLightStage;
   const isDynamicCover = store.lyricTheme === "dynamic_cover";
   const isSolid = store.lyricSungMode === "solid";
@@ -1233,16 +1338,18 @@ function getKaraokeWordStyle(line: LyricLine, word: LyricWord, lineIdx: number) 
     : isLight
     ? secondary
     : lerpHex(secondary, "#FFFFFF", isDynamicCover ? 0.12 : 0.18);
+  const crestColor = isSolid
+    ? pearlPrimary
+    : isLight
+    ? lerpHex(pearlSecondary, pearlPrimary, 0.36)
+    : lerpHex(pearlSecondary, "#FFFFFF", 0.38);
 
-  // 未唱部分独立配色（支持 6 款精选未唱预设 + 自定义色 + 透明度）
   const unsungHex = lyricUnsungBaseHex.value;
   const baseUnsungOp = Math.max(0.18, Math.min(0.85, store.lyricInactiveOpacity || 0.36));
   const unsungColor = hexWithAlpha(unsungHex, Math.min(0.92, baseUnsungOp + 0.16));
-  const idleLineColor = isPastLine
-    ? hexWithAlpha(unsungHex, Math.min(0.86, baseUnsungOp + 0.34))
-    : isNextLine
-    ? hexWithAlpha(unsungHex, Math.min(0.96, baseUnsungOp + 0.52))
-    : hexWithAlpha(unsungHex, Math.min(0.9, baseUnsungOp + 0.44));
+  const pastColor = hexWithAlpha(unsungHex, Math.min(0.86, baseUnsungOp + 0.34));
+  const nextColor = hexWithAlpha(unsungHex, Math.min(0.96, baseUnsungOp + 0.52));
+  const farColor = hexWithAlpha(unsungHex, Math.min(0.9, baseUnsungOp + 0.44));
 
   const glowRatio = Math.max(0, Math.min(1.6, (store.lyricGlowIntensity ?? 100) / 100));
   const glowTint = isDynamicCover
@@ -1251,80 +1358,152 @@ function getKaraokeWordStyle(line: LyricLine, word: LyricWord, lineIdx: number) 
 
   const activeTypo = lyricTypographyActive.value;
   const inactiveTypo = lyricTypographyInactive.value;
+  const inactiveStroke = inactiveTypo.isHeavyOptical
+    ? `0.55px ${hexWithAlpha(unsungHex, 0.48)}`
+    : "0px transparent";
+  const heavyStrokeSung = activeTypo.isHeavyOptical
+    ? `0.55px ${hexWithAlpha(pearlPrimary, 0.56)}`
+    : "0px transparent";
+  const heavyStrokeUnsung = activeTypo.isHeavyOptical
+    ? `0.55px ${hexWithAlpha(unsungHex, 0.56)}`
+    : "0px transparent";
 
-  if (!isCurrentLine) {
-    return {
-      backgroundImage: `linear-gradient(90deg, ${idleLineColor} 0%, ${idleLineColor} 100%)`,
-      WebkitTextStroke: inactiveTypo.isHeavyOptical
-        ? `0.55px ${hexWithAlpha(unsungHex, 0.48)}`
-        : "0px transparent",
-      transform: "none",
-      filter: "none",
-    };
-  }
+  const lineGlowRadius = Math.round(14 * glowRatio);
+  const lineGlowAlpha = isLight
+    ? Math.min(0.18, glowTint.alpha * 0.65 * glowRatio)
+    : Math.min(0.32, glowTint.alpha * 0.9 * glowRatio);
 
-  if (!store.lyricWordByWord) {
-    const lineGlowRadius = Math.round(14 * glowRatio);
-    const lineGlowAlpha = isLight
-      ? Math.min(0.18, glowTint.alpha * 0.65 * glowRatio)
-      : Math.min(0.32, glowTint.alpha * 0.9 * glowRatio);
-    return {
-      backgroundImage: `linear-gradient(90deg, ${pearlPrimary} 0%, ${pearlSecondary} 100%)`,
-      WebkitTextStroke: activeTypo.opticalStrokeCss,
-      transform: "none",
-      filter:
-        glowRatio > 0.02
-          ? `drop-shadow(0 2px ${lineGlowRadius}px ${hexWithAlpha(glowTint.hex, lineGlowAlpha)})`
-          : "none",
-    };
-  }
+  const pastIdleStyle = {
+    backgroundImage: `linear-gradient(90deg, ${pastColor} 0%, ${pastColor} 100%)`,
+    WebkitTextStroke: inactiveStroke,
+    transform: "none",
+    filter: "none",
+  };
+  const nextIdleStyle = {
+    backgroundImage: `linear-gradient(90deg, ${nextColor} 0%, ${nextColor} 100%)`,
+    WebkitTextStroke: inactiveStroke,
+    transform: "none",
+    filter: "none",
+  };
+  const farIdleStyle = {
+    backgroundImage: `linear-gradient(90deg, ${farColor} 0%, ${farColor} 100%)`,
+    WebkitTextStroke: inactiveStroke,
+    transform: "none",
+    filter: "none",
+  };
+  const wholeLineActiveStyle = {
+    backgroundImage: `linear-gradient(90deg, ${pearlPrimary} 0%, ${pearlSecondary} 100%)`,
+    WebkitTextStroke: activeTypo.opticalStrokeCss,
+    transform: "none",
+    filter:
+      glowRatio > 0.02
+        ? `drop-shadow(0 2px ${lineGlowRadius}px ${hexWithAlpha(glowTint.hex, lineGlowAlpha)})`
+        : "none",
+  };
+  const unsungWordBg = `linear-gradient(90deg, ${unsungColor} 0%, ${unsungColor} 100%)`;
+  const sungWordBg = `linear-gradient(90deg, ${pearlPrimary} 0%, ${pearlSecondary} 100%)`;
+  const midDotColor = lerpOklabHex(primary, secondary, 0.5);
 
-  const pos = effectiveLyricTimeMs.value;
+  return {
+    primary,
+    secondary,
+    midDotColor,
+    dimDotColor: palette.value.lyricInactiveRgba || "rgba(255, 255, 255, 0.28)",
+    pearlPrimary,
+    pearlSecondary,
+    crestColor,
+    unsungColor,
+    unsungWordBg,
+    sungWordBg,
+    glowRatio,
+    glowTint,
+    bounceOn: store.lyricWordByWord && store.lyricWordBounceEnabled !== false,
+    wordByWord: Boolean(store.lyricWordByWord),
+    isHeavyOptical: activeTypo.isHeavyOptical,
+    heavyStrokeSung,
+    heavyStrokeUnsung,
+    pastIdleStyle,
+    nextIdleStyle,
+    farIdleStyle,
+    wholeLineActiveStyle,
+  };
+});
+
+function computeKaraokeWordCss(
+  line: LyricLine,
+  word: LyricWord,
+  posMs: number,
+  tok: (typeof karaokeRenderTokens)["value"]
+) {
   const wStart =
     word.startTimeMs >= line.startTimeMs
       ? word.startTimeMs
       : line.startTimeMs + word.startTimeMs;
   const wDur = Math.max(48, word.durationMs);
-  const rawProgress = (pos - wStart) / wDur;
-  const p = Math.max(0, Math.min(1, rawProgress));
+  const p = Math.max(0, Math.min(1, (posMs - wStart) / wDur));
 
   const smoothP = p * p * p * (p * (p * 6 - 15) + 10);
   const bell = Math.sin(p * Math.PI);
 
-  const feather = word.durationMs >= 360 ? 24 : 18;
-  const sweepCenter = -feather + smoothP * (100 + feather * 2);
-  const leftPct = Math.max(0, Math.min(100, sweepCenter - feather));
-  const crestPct = Math.max(0, Math.min(100, sweepCenter - feather * 0.15));
-  const rightPct = Math.max(0, Math.min(100, sweepCenter + feather));
-  const crestColor = isSolid
-    ? pearlPrimary
-    : isLight
-    ? lerpHex(pearlSecondary, pearlPrimary, 0.36)
-    : lerpHex(pearlSecondary, "#FFFFFF", 0.38);
+  let backgroundImage: string;
+  if (p <= 0.0005) {
+    backgroundImage = tok.unsungWordBg;
+  } else if (p >= 0.9995) {
+    backgroundImage = tok.sungWordBg;
+  } else {
+    const feather = word.durationMs >= 360 ? 24 : 18;
+    const sweepCenter = -feather + smoothP * (100 + feather * 2);
+    const leftPct = Math.max(0, Math.min(100, sweepCenter - feather));
+    const crestPct = Math.max(0, Math.min(100, sweepCenter - feather * 0.15));
+    const rightPct = Math.max(0, Math.min(100, sweepCenter + feather));
+    backgroundImage = `linear-gradient(90deg, ${tok.pearlPrimary} 0%, ${tok.pearlSecondary} ${leftPct.toFixed(
+      2
+    )}%, ${tok.crestColor} ${crestPct.toFixed(2)}%, ${tok.unsungColor} ${rightPct.toFixed(
+      2
+    )}%, ${tok.unsungColor} 100%)`;
+  }
 
-  const bounceOn = store.lyricWordByWord && store.lyricWordBounceEnabled !== false;
-  const ty = bounceOn ? -1.2 * smoothP - 1.15 * bell : 0;
-  const s = bounceOn ? 1.0 + 0.008 * smoothP + 0.016 * bell : 1.0;
+  const ty = tok.bounceOn ? -1.2 * smoothP - 1.15 * bell : 0;
+  const s = tok.bounceOn ? 1.0 + 0.008 * smoothP + 0.016 * bell : 1.0;
   const glowAlpha = Math.min(
     0.34,
-    (0.16 * smoothP + 0.14 * bell) * glowRatio * (glowTint.alpha / 0.24)
+    (0.16 * smoothP + 0.14 * bell) * tok.glowRatio * (tok.glowTint.alpha / 0.24)
   );
-  const glowRadius = Math.round((10 + 6 * bell) * Math.max(0.32, glowRatio));
+  const glowRadius = Math.round((10 + 6 * bell) * Math.max(0.32, tok.glowRatio));
 
   return {
-    backgroundImage: `linear-gradient(90deg, ${pearlPrimary} 0%, ${pearlSecondary} ${leftPct.toFixed(
-      2
-    )}%, ${crestColor} ${crestPct.toFixed(2)}%, ${unsungColor} ${rightPct.toFixed(
-      2
-    )}%, ${unsungColor} 100%)`,
-    WebkitTextStroke: activeTypo.isHeavyOptical
-      ? `0.55px ${hexWithAlpha(p > 0.45 ? pearlPrimary : unsungHex, 0.56)}`
-      : "0px transparent",
-    transform: bounceOn ? `translate3d(0, ${ty.toFixed(2)}px, 0) scale(${s.toFixed(4)})` : "none",
+    p,
+    backgroundImage,
+    WebkitTextStroke:
+      p > 0.45 ? tok.heavyStrokeSung : tok.heavyStrokeUnsung,
+    transform: tok.bounceOn
+      ? `translate3d(0, ${ty.toFixed(2)}px, 0) scale(${s.toFixed(4)})`
+      : "none",
     filter:
-      glowRatio > 0.02
-        ? `drop-shadow(0 2px ${glowRadius}px ${hexWithAlpha(glowTint.hex, glowAlpha)})`
+      tok.glowRatio > 0.02 && glowAlpha > 0.004
+        ? `drop-shadow(0 2px ${glowRadius}px ${hexWithAlpha(tok.glowTint.hex, glowAlpha)})`
         : "none",
+  };
+}
+
+/** 仅在换行、切歌或更改样式时由 Vue 渲染初始化样式；逐字高频扫唱完全由直接 DOM 引擎驱动，零 60fps 全组件 VDOM diff */
+function getKaraokeWordStyle(line: LyricLine, word: LyricWord, lineIdx: number) {
+  const tok = karaokeRenderTokens.value;
+  const activeIdx = activeLineIndex.value;
+  if (lineIdx !== activeIdx) {
+    if (lineIdx < activeIdx) return tok.pastIdleStyle;
+    if (lineIdx === activeIdx + 1) return tok.nextIdleStyle;
+    return tok.farIdleStyle;
+  }
+  if (!tok.wordByWord) {
+    return tok.wholeLineActiveStyle;
+  }
+  const css = computeKaraokeWordCss(line, word, getEffectiveLyricTimeMs(), tok);
+  return {
+    backgroundImage: css.backgroundImage,
+    WebkitTextStroke: css.WebkitTextStroke,
+    transform: css.transform,
+    filter: css.filter,
   };
 }
 
@@ -1343,16 +1522,18 @@ function getResolvedLineEndMs(idx: number): number {
   return curr.startTimeMs + Math.max(1200, curr.durationMs || 2500);
 }
 
-function shouldShowInterludeDots(idx: number): boolean {
-  if (store.lyricInterludeDotsEnabled === false) return false;
-  if (idx !== activeLineIndex.value) return false;
+function isInInterludeGapAt(idx: number, posMs: number): boolean {
+  if (store.lyricInterludeDotsEnabled === false || idx < 0) return false;
   const lines = store.currentLyric?.lines || [];
   if (idx + 1 >= lines.length) return false;
   const next = lines[idx + 1];
   const currEnd = getResolvedLineEndMs(idx);
   const gapMs = next.startTimeMs - currEnd;
-  const pos = effectiveLyricTimeMs.value;
-  return gapMs >= 4500 && pos >= currEnd && pos < next.startTimeMs;
+  return gapMs >= 4500 && posMs >= currEnd && posMs < next.startTimeMs;
+}
+
+function shouldShowInterludeDots(idx: number): boolean {
+  return idx === activeLineIndex.value && activeInterludeVisible.value;
 }
 
 function getInterludeDotStyle(idx: number, dotIndex: number) {
@@ -1364,7 +1545,7 @@ function getInterludeDotStyle(idx: number, dotIndex: number) {
   const gapMs = Math.max(1, next.startTimeMs - currEnd);
   const totalProg = Math.max(
     0,
-    Math.min(1, (effectiveLyricTimeMs.value - currEnd) / gapMs)
+    Math.min(1, (getEffectiveLyricTimeMs() - currEnd) / gapMs)
   );
   const segStart = dotIndex / 3;
   const segEnd = (dotIndex + 1) / 3;
@@ -1372,25 +1553,109 @@ function getInterludeDotStyle(idx: number, dotIndex: number) {
     0,
     Math.min(1, (totalProg - segStart) / (segEnd - segStart))
   );
-
-  const primary = lyricHighlightColors.value.primary;
-  const secondary = lyricHighlightColors.value.secondary;
+  const tok = karaokeRenderTokens.value;
   const dotColor =
-    dotIndex === 0
-      ? primary
-      : dotIndex === 1
-      ? lerpOklabHex(primary, secondary, 0.5)
-      : secondary;
-  const dim = palette.value.lyricInactiveRgba || "rgba(255, 255, 255, 0.28)";
-  const wave = Math.sin(breathingDotPhase.value - dotIndex * 0.75);
+    dotIndex === 0 ? tok.primary : dotIndex === 1 ? tok.midDotColor : tok.secondary;
+  const wave = Math.sin(breathingDotPhaseVal - dotIndex * 0.75);
   const ty = -2.2 * Math.max(0, wave) * (0.35 + 0.65 * dotProg);
   const s = 1 + 0.14 * Math.max(0, wave) * dotProg;
 
   return {
-    color: dotProg > 0.35 ? dotColor : dim,
+    color: dotProg > 0.35 ? dotColor : tok.dimDotColor,
     transform: `translateY(${ty.toFixed(2)}px) scale(${s.toFixed(3)})`,
     opacity: 0.45 + 0.55 * dotProg,
   };
+}
+
+/**
+ * 60/120fps 直接 DOM 歌词驱动器：
+ * 1. 二分查找行号，仅在真正换行时写 `activeLineIndex.value`（每秒 0.2 次 VDOM 更新）；
+ * 2. 仅对当前活跃行进度发生变化的词执行精准 DOM style 写入，已唱完/未开始字 0 DOM 写入；
+ * 3. 直接同步间奏呼吸圆点样式，全程零组件重渲染风暴。
+ */
+function syncLyricRealtimeDom(posMs: number, forceAll = false) {
+  const lines = store.currentLyric?.lines;
+  if (!lines || lines.length === 0) {
+    if (activeLineIndex.value !== -1) activeLineIndex.value = -1;
+    if (activeInterludeVisible.value) activeInterludeVisible.value = false;
+    return;
+  }
+
+  const nextIdx = findLyricLineIndexAt(posMs);
+  if (nextIdx !== activeLineIndex.value) {
+    activeLineIndex.value = nextIdx;
+    invalidateActiveLyricDomCache();
+  }
+
+  const inInterlude = isInInterludeGapAt(nextIdx, posMs);
+  if (inInterlude !== activeInterludeVisible.value) {
+    activeInterludeVisible.value = inInterlude;
+    cachedInterludeDotEls = [];
+  }
+
+  const tok = karaokeRenderTokens.value;
+  if (tok.wordByWord && nextIdx >= 0) {
+    ensureActiveLyricDomCache(nextIdx);
+    const words = resolvedLyricWordsList.value[nextIdx];
+    const line = lines[nextIdx];
+    if (
+      line &&
+      words &&
+      words.length > 0 &&
+      cachedActiveWordEls.length === words.length
+    ) {
+      for (let i = 0; i < words.length; i++) {
+        const w = words[i];
+        const wStart =
+          w.startTimeMs >= line.startTimeMs
+            ? w.startTimeMs
+            : line.startTimeMs + w.startTimeMs;
+        const wDur = Math.max(48, w.durationMs);
+        const p = Math.max(0, Math.min(1, (posMs - wStart) / wDur));
+        const prevP = cachedActiveWordProgress[i];
+        if (!forceAll && Math.abs(p - prevP) < 0.0012) {
+          continue;
+        }
+        cachedActiveWordProgress[i] = p;
+        const el = cachedActiveWordEls[i];
+        if (!el) continue;
+        const css = computeKaraokeWordCss(line, w, posMs, tok);
+        el.style.backgroundImage = css.backgroundImage;
+        el.style.webkitTextStroke = css.WebkitTextStroke;
+        el.style.transform = css.transform;
+        el.style.filter = css.filter;
+      }
+    }
+  }
+
+  if (inInterlude) {
+    if (cachedInterludeDotEls.length !== 3 || !cachedInterludeDotEls[0]?.isConnected) {
+      const viewport = lyricViewportRef.value;
+      const lineEl = viewport?.querySelector(
+        `[data-lyric-idx="${nextIdx}"]`
+      ) as HTMLElement | null;
+      cachedInterludeDotEls = lineEl
+        ? Array.from(lineEl.querySelectorAll<HTMLElement>(".np-interlude-dot"))
+        : [];
+    }
+    if (cachedInterludeDotEls.length === 3 && nextIdx + 1 < lines.length) {
+      const currEnd = getResolvedLineEndMs(nextIdx);
+      const gapMs = Math.max(1, lines[nextIdx + 1].startTimeMs - currEnd);
+      const totalProg = Math.max(0, Math.min(1, (posMs - currEnd) / gapMs));
+      const dotColors = [tok.primary, tok.midDotColor, tok.secondary];
+      for (let d = 0; d < 3; d++) {
+        const dotEl = cachedInterludeDotEls[d];
+        if (!dotEl) continue;
+        const dotProg = Math.max(0, Math.min(1, (totalProg - d / 3) * 3));
+        const wave = Math.sin(breathingDotPhaseVal - d * 0.75);
+        const ty = -2.2 * Math.max(0, wave) * (0.35 + 0.65 * dotProg);
+        const s = 1 + 0.14 * Math.max(0, wave) * dotProg;
+        dotEl.style.color = dotProg > 0.35 ? dotColors[d] : tok.dimDotColor;
+        dotEl.style.transform = `translateY(${ty.toFixed(2)}px) scale(${s.toFixed(3)})`;
+        dotEl.style.opacity = (0.45 + 0.55 * dotProg).toFixed(3);
+      }
+    }
+  }
 }
 
 // ================= 8. 主循环：驱动高刷时间采样、弹簧歌词滚动与光学背景 =================
@@ -1400,9 +1665,10 @@ let prevLoopWallMs = performance.now();
 let lastAudioSampleMs = -1;
 let audioAnchorPosMs = 0;
 let audioAnchorWallMs = performance.now();
+let unsubscribePowerVis: (() => void) | null = null;
 
 function startNowPlayingMasterLoop() {
-  if (typeof document !== "undefined" && document.hidden) return;
+  if (!isAppForegroundActive()) return;
   if (loopPauseTimer !== null) {
     window.clearTimeout(loopPauseTimer);
     loopPauseTimer = null;
@@ -1414,9 +1680,10 @@ function startNowPlayingMasterLoop() {
   audioAnchorPosMs = initialPos;
   audioAnchorWallMs = prevLoopWallMs;
   liveSampledPosMs = initialPos;
-  interpolatedPosMs.value = initialPos;
+  liveInterpolatedPosMs = initialPos;
   syncDisplayElapsedSec(initialPos);
   syncTimelineProgressDom(computeProgressFrac(initialPos), true);
+  syncLyricRealtimeDom(getEffectiveLyricTimeMs(), true);
   drawDynamicBackground(prevLoopWallMs, 0.016);
   if (mainLoopRafId === null) {
     mainLoopRafId = requestAnimationFrame(tickNowPlayingMasterLoop);
@@ -1435,13 +1702,14 @@ function stopNowPlayingMasterLoop() {
 }
 
 function tickNowPlayingMasterLoop(now: number) {
-  if (typeof document !== "undefined" && document.hidden) {
+  if (!isAppForegroundActive() || !store.isNowPlayingOpen) {
     mainLoopRafId = null;
     return;
   }
   const dtSec = Math.min(0.064, Math.max(0.001, (now - prevLoopWallMs) / 1000));
   prevLoopWallMs = now;
 
+  let posSettled = true;
   if (!isScrubbingProgress.value) {
     const rawPos = store.getLivePlaybackPositionMs();
     const effRate = store.getEffectivePlaybackRate();
@@ -1472,6 +1740,7 @@ function tickNowPlayingMasterLoop(now: number) {
     // 60fps/120fps 高刷硬件级采样 + 连续时间差锁相环 (PLL)：保持 KRC/LRC 逐字流光顺滑度
     const targetPos = liveSampledPosMs;
     if (store.isPlaying && store.durationMs > 0) {
+      posSettled = false;
       const elapsedSinceSample =
         settledSeekTargetMs.value >= 0
           ? 0
@@ -1483,32 +1752,47 @@ function tickNowPlayingMasterLoop(now: number) {
         baseAnchor + elapsedSinceSample * effRate
       );
       const rawAdvance = dtSec * 1000 * effRate;
-      const nextUnclamped = interpolatedPosMs.value + rawAdvance;
+      const nextUnclamped = liveInterpolatedPosMs + rawAdvance;
       const drift = continuousTargetPos - nextUnclamped;
 
       if (Math.abs(drift) > 220) {
-        interpolatedPosMs.value = continuousTargetPos;
+        liveInterpolatedPosMs = continuousTargetPos;
       } else {
         const correctedStep = rawAdvance + drift * Math.min(1, dtSec * 8.5);
         const monotonicStep = Math.max(
           0,
           Math.min(rawAdvance * 1.25, correctedStep)
         );
-        interpolatedPosMs.value = Math.min(
+        liveInterpolatedPosMs = Math.min(
           store.durationMs,
-          interpolatedPosMs.value + monotonicStep
+          liveInterpolatedPosMs + monotonicStep
         );
       }
-    } else if (Math.abs(targetPos - interpolatedPosMs.value) >= 0.5) {
-      interpolatedPosMs.value +=
-        (targetPos - interpolatedPosMs.value) * Math.min(1, dtSec * 16);
+    } else if (Math.abs(targetPos - liveInterpolatedPosMs) >= 0.5) {
+      posSettled = false;
+      liveInterpolatedPosMs +=
+        (targetPos - liveInterpolatedPosMs) * Math.min(1, dtSec * 16);
+    } else {
+      liveInterpolatedPosMs = targetPos;
     }
 
     syncDisplayElapsedSec(liveSampledPosMs);
     syncTimelineProgressDom(computeProgressFrac());
+  } else {
+    posSettled = false;
   }
 
+  // 直接 DOM 更新活跃行逐字流光与间奏呼吸点（零每帧 Vue 组件重渲染）
+  const effLyricMs = getEffectiveLyricTimeMs();
+  if (store.isPlaying && activeInterludeVisible.value) {
+    breathingDotPhaseVal =
+      (breathingDotPhaseVal + dtSec * ((2 * Math.PI) / 1.4)) %
+      (Math.PI * 2);
+  }
+  syncLyricRealtimeDom(effLyricMs, false);
+
   // 临界阻尼弹簧驱动歌词视口平滑滚动
+  let scrollSettled = true;
   const viewport = lyricViewportRef.value;
   if (viewport && !isUserScrollingLyrics.value) {
     if (!lyricScrollInitialized) {
@@ -1516,6 +1800,7 @@ function tickNowPlayingMasterLoop(now: number) {
     } else {
       const disp = lyricTargetScrollTop - lyricCurrentScrollTop;
       if (Math.abs(disp) > 0.15 || Math.abs(lyricScrollVelocity) > 0.4) {
+        scrollSettled = false;
         const stiffness = 132;
         const damping = 22.8;
         const accel = disp * stiffness - lyricScrollVelocity * damping;
@@ -1530,13 +1815,15 @@ function tickNowPlayingMasterLoop(now: number) {
     }
   }
 
-  if (store.isPlaying && shouldShowInterludeDots(activeLineIndex.value)) {
-    breathingDotPhase.value =
-      (breathingDotPhase.value + dtSec * ((2 * Math.PI) / 1.4)) %
-      (Math.PI * 2);
+  drawDynamicBackground(now, dtSec);
+
+  // 无动效模式且暂停、歌词滚动与进度收敛时自动停帧，做到 0% 静止 CPU/GPU 占用
+  const motion = getMotionRuntimeProfile();
+  if (!store.isPlaying && posSettled && scrollSettled && motion.effectiveLevel === "none") {
+    mainLoopRafId = null;
+    return;
   }
 
-  drawDynamicBackground(now, dtSec);
   mainLoopRafId = requestAnimationFrame(tickNowPlayingMasterLoop);
 }
 
@@ -1660,26 +1947,40 @@ watch([titleViewportRef, qualityViewportRef], ([tEl, qEl]) => {
   });
 });
 
-function handleDocumentVisibilityChange() {
-  if (typeof document === "undefined") return;
-  if (document.hidden) {
-    stopNowPlayingMasterLoop();
-  } else if (store.isNowPlayingOpen) {
-    startNowPlayingMasterLoop();
+watch(
+  [
+    () => store.isPlaying,
+    () => store.playerBgStyle,
+    () => store.motionLevel,
+    () => store.isNowPlayingLightStage,
+    () => store.coverColorStageMode,
+    () => store.effectiveCoverPalette.dominantAccent,
+    () => store.effectiveCoverPalette.secondaryAccent,
+    () => store.lyricBackgroundDim,
+  ],
+  () => {
+    if (store.isNowPlayingOpen && isAppForegroundActive() && mainLoopRafId === null) {
+      startNowPlayingMasterLoop();
+    }
   }
-}
+);
 
 onMounted(() => {
   prevLoopWallMs = performance.now();
   const initPos = store.getLivePlaybackPositionMs();
   liveSampledPosMs = initPos;
-  interpolatedPosMs.value = initPos;
+  liveInterpolatedPosMs = initPos;
+  activeLineIndex.value = findLyricLineIndexAt(getEffectiveLyricTimeMs());
   syncDisplayElapsedSec(initPos);
   syncTimelineProgressDom(computeProgressFrac(initPos), true);
   measureCoverFocusPoint();
-  if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", handleDocumentVisibilityChange);
-  }
+  unsubscribePowerVis = subscribeAppPowerVisibility((active) => {
+    if (!active) {
+      stopNowPlayingMasterLoop();
+    } else if (store.isNowPlayingOpen) {
+      startNowPlayingMasterLoop();
+    }
+  });
   if (typeof ResizeObserver !== "undefined") {
     metaResizeObserver = new ResizeObserver(() => {
       measureMetaOverflow();
@@ -1692,6 +1993,7 @@ onMounted(() => {
   nextTick(() => {
     measureMetaOverflow();
     measureCoverFocusPoint();
+    syncLyricRealtimeDom(getEffectiveLyricTimeMs(), true);
   });
   if (store.isNowPlayingOpen) {
     ensureBgEngineAttached();
@@ -1702,9 +2004,11 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
-  if (typeof document !== "undefined") {
-    document.removeEventListener("visibilitychange", handleDocumentVisibilityChange);
+  if (unsubscribePowerVis) {
+    unsubscribePowerVis();
+    unsubscribePowerVis = null;
   }
+  invalidateActiveLyricDomCache();
   stopNowPlayingMasterLoop();
   bgEngineAttached = false;
   bgEngine.dispose();

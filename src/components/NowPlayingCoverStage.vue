@@ -9,16 +9,28 @@ import {
 } from "vue";
 import { useAppStore } from "../stores/appStore";
 import { hexToRgb, lerpHex } from "../utils/coverPalette";
+import {
+  isAppForegroundActive,
+  subscribeAppPowerVisibility,
+} from "../utils/windowPowerState";
 
 const store = useAppStore();
 
 const isVinyl = computed(() => store.playerStageStyle === "vinyl_turntable");
 
-// 双击封面：直接打开高清封面大图预览（优取已探测的最高分原图）
+// 双击封面：直接打开高清封面大图预览（锁定当前播放曲目快照，切歌绝不串台）
 function openHdCoverPreview() {
   const best = store.activeHighResCoverUrl || store.currentSong?.coverUrl;
   if (!best) return;
-  store.hdArtworkPreviewUrl = best;
+  if (store.currentSong) {
+    store.openHdArtworkPreview(
+      store.currentSong,
+      best,
+      store.activeHighResCoverMetrics
+    );
+  } else {
+    store.openHdArtworkPreview(best, best, store.activeHighResCoverMetrics);
+  }
 }
 
 // ================= 切歌换碟状态机：旧碟从左侧退场，新碟从右侧进场 =================
@@ -767,7 +779,7 @@ function drawRoundedCoverAura() {
 }
 
 function tickCoverStageAnimation(now: number) {
-  if (typeof document !== "undefined" && document.hidden) {
+  if (!isAppForegroundActive()) {
     stageRafId = null;
     return;
   }
@@ -931,9 +943,10 @@ const coverAmbientStyle = computed(() => {
 });
 
 let stagePauseTimer: number | null = null;
+let unsubscribePowerVis: (() => void) | null = null;
 
 function startCoverStageLoop() {
-  if (typeof document !== "undefined" && document.hidden) return;
+  if (!isAppForegroundActive()) return;
   if (stagePauseTimer !== null) {
     window.clearTimeout(stagePauseTimer);
     stagePauseTimer = null;
@@ -964,22 +977,10 @@ function stopCoverStageLoop() {
   }
 }
 
-function handleCoverStageVisibilityChange() {
-  if (typeof document === "undefined") return;
-  if (document.hidden) {
-    stopCoverStageLoop();
-  } else if (store.isNowPlayingOpen) {
-    startCoverStageLoop();
-  }
-}
-
 watch(
   [() => store.isPlaying, isVinyl, () => isDiscSwapping.value],
   () => {
-    if (
-      store.isNowPlayingOpen &&
-      (typeof document === "undefined" || !document.hidden)
-    ) {
+    if (store.isNowPlayingOpen && isAppForegroundActive()) {
       startCoverStageLoop();
     }
   }
@@ -1031,17 +1032,22 @@ onMounted(() => {
   applyRotorTransform();
   drawVinylTonearm(true);
   drawRoundedCoverAura();
-  if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", handleCoverStageVisibilityChange);
-  }
+  unsubscribePowerVis = subscribeAppPowerVisibility((active) => {
+    if (!active) {
+      stopCoverStageLoop();
+    } else if (store.isNowPlayingOpen) {
+      startCoverStageLoop();
+    }
+  });
   if (store.isNowPlayingOpen) {
     startCoverStageLoop();
   }
 });
 
 onBeforeUnmount(() => {
-  if (typeof document !== "undefined") {
-    document.removeEventListener("visibilitychange", handleCoverStageVisibilityChange);
+  if (unsubscribePowerVis) {
+    unsubscribePowerVis();
+    unsubscribePowerVis = null;
   }
   stopCoverStageLoop();
   if (discSwapTimer) window.clearTimeout(discSwapTimer);

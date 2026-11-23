@@ -636,7 +636,7 @@ function handleDensityChange(density: UiDensityMode) {
   padding: 13px;
   border: none;
   border-radius: var(--bm-r-lg, 18px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
   cursor: pointer;
   transition:
     transform 0.24s var(--ease-fluid),
@@ -646,12 +646,12 @@ function handleDensityChange(density: UiDensityMode) {
 
 .ts-preset-card:hover {
   transform: translateY(-2px);
-  background: var(--bg-card-hover);
+  background: var(--bms-surface-row-hover);
 }
 
 .ts-preset-card.is-active {
-  background: color-mix(in srgb, var(--primary) 13%, var(--bg-surface));
-  box-shadow: 0 14px 28px -12px color-mix(in srgb, var(--primary) 38%, transparent);
+  background: color-mix(in srgb, var(--primary) 16%, var(--bms-surface-row));
+  box-shadow: 0 14px 28px -12px color-mix(in srgb, var(--primary) 42%, transparent);
 }
 
 .ts-mini-canvas {
@@ -813,7 +813,7 @@ function handleDensityChange(density: UiDensityMode) {
 .ts-preset-code {
   font-size: var(--bm-fs-micro, 11px);
   font-weight: var(--bm-fw-bold, 700);
-  color: var(--primary);
+  color: var(--primary-text, var(--primary));
 }
 
 .ts-active-chip {
@@ -822,7 +822,7 @@ function handleDensityChange(density: UiDensityMode) {
   gap: 3px;
   padding: 2px 8px;
   border-radius: 999px;
-  background: var(--grad-kugou-primary);
+  background: var(--bms-focus-grad, var(--grad-kugou-primary));
   color: #ffffff;
   font-size: var(--bm-fs-micro, 11px);
   font-weight: var(--bm-fw-bold, 700);
@@ -859,7 +859,7 @@ function handleDensityChange(density: UiDensityMode) {
 }
 
 .ts-palette-trigger.is-open {
-  background: color-mix(in srgb, var(--primary) 8%, var(--bg-surface));
+  background: color-mix(in srgb, var(--primary) 10%, var(--bms-surface-row));
 }
 
 .ts-palette-summary-left {
@@ -906,7 +906,7 @@ function handleDensityChange(density: UiDensityMode) {
 }
 
 .ts-disclosure-toggle.is-open {
-  color: var(--primary);
+  color: var(--primary-text, var(--primary));
 }
 
 .ts-disclosure-label {
@@ -921,7 +921,7 @@ function handleDensityChange(density: UiDensityMode) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  background: var(--bms-neutral-control, color-mix(in srgb, var(--text-primary) 6%, transparent));
   transition:
     transform 0.34s var(--ease-apple-fluid, cubic-bezier(0.22, 1, 0.36, 1)),
     background-color 0.24s ease,
@@ -930,8 +930,8 @@ function handleDensityChange(density: UiDensityMode) {
 
 .ts-disclosure-toggle.is-open .ts-disclosure-chevron {
   transform: rotate(180deg);
-  background: color-mix(in srgb, var(--primary) 16%, transparent);
-  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 20%, transparent);
+  color: var(--primary-text, var(--primary));
 }
 
 /* CSS Grid 0fr -> 1fr 平滑折叠容器（无任何布局突跳或硬边框） */
@@ -988,7 +988,7 @@ function handleDensityChange(density: UiDensityMode) {
   gap: 10px;
   padding: 10px 12px;
   border-radius: var(--bm-r-md, 14px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
   opacity: 0;
   transform: translate3d(0, 6px, 0);
   transition:
@@ -1052,7 +1052,7 @@ function handleDensityChange(density: UiDensityMode) {
   flex-wrap: wrap;
   padding: 10px 14px;
   border-radius: var(--bm-r-md, 14px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
 }
 
 .ts-showcase-label {
@@ -1089,17 +1089,14 @@ function handleDensityChange(density: UiDensityMode) {
 /* L2 / D2 特化 */
 .scheme-watercolor_light.light-variant-nordic_oat .ts-preset-card,
 .scheme-watercolor_light.light-variant-nordic_oat .ts-swatch-card,
-.scheme-watercolor_light.light-variant-nordic_oat .ts-jelly-showcase {
-  background: #F2ECE1;
+.scheme-watercolor_light.light-variant-nordic_oat .ts-jelly-showcase,
+.scheme-abyssal_dark.dark-variant-velvet_nebula .ts-preset-card,
+.scheme-abyssal_dark.dark-variant-velvet_nebula .ts-swatch-card,
+.scheme-abyssal_dark.dark-variant-velvet_nebula .ts-jelly-showcase {
+  background: var(--bms-surface-row);
 }
 
 .scheme-watercolor_light.light-variant-nordic_oat .ts-preset-card.is-active {
   background: color-mix(in srgb, var(--primary) 13%, #FAF6EE);
-}
-
-.scheme-abyssal_dark.dark-variant-velvet_nebula .ts-preset-card,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .ts-swatch-card,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .ts-jelly-showcase {
-  background: rgba(34, 20, 29, 0.82);
 }
 </style>

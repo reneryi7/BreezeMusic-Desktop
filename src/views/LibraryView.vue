@@ -1379,13 +1379,13 @@ onBeforeUnmount(() => {
         >
           <h3>导入外部歌单与分享口令</h3>
           <p class="dialog-sub">
-            支持粘贴酷狗分享短链 (t1.kugou.com)、歌单码、global_collection_id、微风口令或「歌名 - 歌手」文本列表：
+            支持粘贴官方酷狗音乐 / 酷狗概念版分享短链 (t1.kugou.com / kgurl.cn)、歌单页链接 (songlist/gcid_xxx / plist)、单曲链接、kugou:// 唤醒协议、微风口令或「歌名 - 歌手」文本列表：
           </p>
           <textarea
             v-model="importInputText"
             class="dialog-input"
             style="height: 110px; padding: 12px 14px; resize: none; line-height: 1.5"
-            placeholder="粘贴酷狗分享链接、口令或多行「歌名 - 歌手」列表..."
+            placeholder="粘贴酷狗音乐/概念版分享链接、唤醒口令、集合 ID 或多行「歌名 - 歌手」列表..."
           ></textarea>
           <div class="dialog-actions">
             <button class="frameless-hover-btn" @click="showImportModal = false">

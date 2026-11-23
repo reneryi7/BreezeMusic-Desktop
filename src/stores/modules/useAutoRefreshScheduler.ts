@@ -1,4 +1,8 @@
 import { ref, type ComputedRef, type Ref } from "vue";
+import {
+  isAppForegroundActive,
+  subscribeAppPowerVisibility,
+} from "../../utils/windowPowerState";
 
 export interface AutoRefreshSchedulerDeps {
   isLoggedIn: ComputedRef<boolean>;
@@ -139,13 +143,21 @@ export function createAutoRefreshScheduler(deps: AutoRefreshSchedulerDeps) {
     }, 1250);
   }
 
+  let pendingDeferredRefresh = false;
+  let unsubscribePowerVis: (() => void) | null = null;
+
   /**
-   * 周期性（每小时）后台全量静默刷新：低并发错峰推进，绝不抢占音频线程与主线程渲染帧
+   * 周期性（每小时）后台全量静默刷新：低并发错峰推进，绝不抢占音频线程与主线程渲染帧；
+   * 若应用正处于托盘/最小化后台态，则延迟至下次切回前台再执行，避免后台唤醒网络与磁盘扫描。
    */
   async function runHourlySilentRefresh() {
     if (deps.isStandaloneSubWindow) return;
-    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    if (!isAppForegroundActive()) {
+      pendingDeferredRefresh = true;
+      return;
+    }
     if (isBackgroundRefreshing.value) return;
+    pendingDeferredRefresh = false;
     // 若用户正在执行批量多选编辑，延后本次刷新避免列表状态抖动
     if (isUserMidBatchEdit()) {
       window.setTimeout(() => {
@@ -206,19 +218,17 @@ export function createAutoRefreshScheduler(deps: AutoRefreshSchedulerDeps) {
     }
   }
 
-  function handleVisibilityChange() {
-    if (typeof document === "undefined") return;
-    if (document.visibilityState === "hidden") {
+  function handleAppPowerVisibilityChange(active: boolean) {
+    if (!active) {
       stopClockTimer();
       return;
     }
-    if (document.visibilityState !== "visible") return;
     tickClockNow();
     startClockTimer();
     const elapsed = Date.now() - lastFullRefreshAt.value;
-    if (lastFullRefreshAt.value > 0 && elapsed >= ONE_HOUR_MS) {
+    if (pendingDeferredRefresh || (lastFullRefreshAt.value > 0 && elapsed >= ONE_HOUR_MS)) {
       if (wakeupTimerId !== null) window.clearTimeout(wakeupTimerId);
-      // 休眠唤醒后等待 2 秒让系统网卡与音频设备恢复就绪，再静默补刷
+      // 休眠或后台切回前台后等待 2 秒让系统网卡与渲染稳态就绪，再静默补刷
       wakeupTimerId = window.setTimeout(() => {
         wakeupTimerId = null;
         void runHourlySilentRefresh();
@@ -229,7 +239,7 @@ export function createAutoRefreshScheduler(deps: AutoRefreshSchedulerDeps) {
   function startScheduler() {
     if (deps.isStandaloneSubWindow || typeof window === "undefined") return;
 
-    if (typeof document === "undefined" || document.visibilityState === "visible") {
+    if (isAppForegroundActive()) {
       startClockTimer();
     }
     if (hourlyTimerId === null) {
@@ -238,7 +248,7 @@ export function createAutoRefreshScheduler(deps: AutoRefreshSchedulerDeps) {
       }, ONE_HOUR_MS);
     }
     if (!visibilityBound && typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", handleVisibilityChange);
+      unsubscribePowerVis = subscribeAppPowerVisibility(handleAppPowerVisibilityChange);
       visibilityBound = true;
     }
   }
@@ -276,8 +286,11 @@ export function createAutoRefreshScheduler(deps: AutoRefreshSchedulerDeps) {
       window.clearTimeout(startupStage3Timer);
       startupStage3Timer = null;
     }
-    if (visibilityBound && typeof document !== "undefined") {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    if (visibilityBound) {
+      if (unsubscribePowerVis) {
+        unsubscribePowerVis();
+        unsubscribePowerVis = null;
+      }
       visibilityBound = false;
     }
   }

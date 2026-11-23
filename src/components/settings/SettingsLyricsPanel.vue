@@ -137,9 +137,14 @@ function handleResetStageLyric() {
       </button>
     </div>
 
+    <Transition
+      :name="store.motionLevel === 'none' ? '' : 'bms-pane-fade'"
+      mode="out-in"
+    >
     <!-- 1. 独立透明桌面悬浮歌词 -->
     <SettingsCard
       v-if="activeTab === 'desktop'"
+      key="desktop"
       title="独立透明桌面悬浮歌词"
       subtitle="独立进程级无框置顶透明窗口，支持硬件级鼠标穿透、KRC 逐字流光与双语展示"
       icon="lyric"
@@ -356,7 +361,8 @@ function handleResetStageLyric() {
 
     <!-- 2. 沉浸播放页歌词默认偏好 -->
     <SettingsCard
-      v-if="activeTab === 'stage'"
+      v-else
+      key="stage"
       title="沉浸播放页歌词偏好"
       subtitle="与全屏播放页内部歌词设置弹窗完全同步，支持实时预览与随时微调"
       icon="lyric-sliders"
@@ -550,6 +556,7 @@ function handleResetStageLyric() {
         </label>
       </div>
     </SettingsCard>
+    </Transition>
   </div>
 </template>
 
@@ -619,18 +626,20 @@ function handleResetStageLyric() {
   gap: 10px;
   padding: 11px 14px;
   border-radius: var(--bm-r-md, 14px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
   font-size: var(--bm-fs-caption, 12.5px);
   font-weight: 800;
   color: var(--text-primary);
   cursor: pointer;
+  transition: background 0.18s ease;
 }
 
-.scheme-watercolor_light.light-variant-nordic_oat .bms-mini-toggle-card {
-  background: #F2ECE1;
+.bms-mini-toggle-card:hover {
+  background: var(--bms-surface-row-hover);
 }
 
+.scheme-watercolor_light.light-variant-nordic_oat .bms-mini-toggle-card,
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bms-mini-toggle-card {
-  background: rgba(34, 20, 29, 0.82);
+  background: var(--bms-surface-row);
 }
 </style>

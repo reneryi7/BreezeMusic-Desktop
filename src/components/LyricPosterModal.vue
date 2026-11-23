@@ -2,6 +2,7 @@
 import { ref, computed, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../stores/appStore";
+import type { CoverExtractedPalette, LyricLine, Song } from "../types";
 import {
   buildCoverResolutionCandidates,
   hexWithAlpha,
@@ -23,6 +24,36 @@ const {
 const readablePrimary = accentPrimary;
 const readableSecondary = accentSecondary;
 
+// 打开歌词海报时冻结目标歌曲、歌词与色板快照，彻底防止制作/导出期间后台切歌串台
+const lockedPosterSong = ref<Song | null>(null);
+const lockedPosterCoverUrl = ref<string>("");
+const lockedPosterLyrics = ref<LyricLine[]>([]);
+const lockedPosterPalette = ref<CoverExtractedPalette | null>(null);
+const lockedPosterAccents = ref<{ primary: string; secondary: string } | null>(null);
+
+function isSamePosterTrack(a: Song | null | undefined, b: Song | null | undefined): boolean {
+  if (!a || !b) return false;
+  const ha = String(a.hash || "").trim().toLowerCase();
+  const hb = String(b.hash || "").trim().toLowerCase();
+  if (ha && hb) return ha === hb;
+  if (a.id && b.id) return a.id === b.id;
+  return false;
+}
+
+const posterSong = computed<Song | null>(
+  () => lockedPosterSong.value || store.lyricPosterTargetSong || store.currentSong
+);
+const posterLyricLines = computed<LyricLine[]>(() => lockedPosterLyrics.value);
+const effectivePosterPalette = computed<CoverExtractedPalette>(
+  () => lockedPosterPalette.value || palette.value
+);
+const effectivePosterPrimary = computed(
+  () => lockedPosterAccents.value?.primary || readablePrimary.value
+);
+const effectivePosterSecondary = computed(
+  () => lockedPosterAccents.value?.secondary || readableSecondary.value
+);
+
 const selectedLineIndices = ref<number[]>([0, 1, 2]);
 const activeTemplate = ref<
   "dynamic_cover" | "vinyl" | "vanguard" | "oriental" | "polaroid" | "cyber"
@@ -41,12 +72,13 @@ const floatingWindowStyle = computed(() => ({
 }));
 
 const templates = computed(() => {
-  const c1 = readablePrimary.value;
-  const c2 = readableSecondary.value;
-  const isDynLight = Boolean(palette.value.isLightStage);
-  const m1 = palette.value.meshPrimary || (isDynLight ? "#F6F8FC" : "#14223E");
-  const m2 = palette.value.meshSecondary || (isDynLight ? "#ECF2FB" : "#0D1A30");
-  const m3 = palette.value.meshTertiary || (isDynLight ? "#F5ECF6" : "#16142E");
+  const pal = effectivePosterPalette.value;
+  const c1 = effectivePosterPrimary.value;
+  const c2 = effectivePosterSecondary.value;
+  const isDynLight = Boolean(pal.isLightStage);
+  const m1 = pal.meshPrimary || (isDynLight ? "#F6F8FC" : "#14223E");
+  const m2 = pal.meshSecondary || (isDynLight ? "#ECF2FB" : "#0D1A30");
+  const m3 = pal.meshTertiary || (isDynLight ? "#F5ECF6" : "#16142E");
   const dynStart = isDynLight ? lerpHex(m1, c1, 0.08) : lerpHex(m1, c1, 0.34);
   const dynMid = isDynLight ? lerpHex(m2, c2, 0.07) : lerpHex(m2, c2, 0.24);
   const dynEnd = isDynLight ? lerpHex(m3, c1, 0.1) : lerpHex(m3, "#060911", 0.62);
@@ -133,27 +165,72 @@ const currentTpl = computed(
 );
 
 const posterCoverUrl = computed(
-  () => store.activeHighResCoverUrl || store.currentSong?.coverUrl || ""
+  () => lockedPosterCoverUrl.value || posterSong.value?.coverUrl || ""
 );
 const rawCoverUrl = posterCoverUrl;
+
+function pickDefaultSelectedLines(lines: LyricLine[], positionMs: number) {
+  if (lines.length === 0) {
+    selectedLineIndices.value = [];
+    return;
+  }
+  const activeIdx = lines.findIndex(
+    (l, idx, arr) =>
+      positionMs >= l.startTimeMs &&
+      (idx === arr.length - 1 || positionMs < arr[idx + 1].startTimeMs)
+  );
+  const start =
+    activeIdx >= 0
+      ? Math.max(0, activeIdx - 1)
+      : Math.max(0, Math.floor(lines.length / 3));
+  selectedLineIndices.value = [start, start + 1, start + 2].filter(
+    (i) => i < lines.length
+  );
+}
 
 watch(
   () => store.isLyricPosterOpen,
   (open) => {
-    if (open && store.currentLyric.lines.length > 0) {
-      const activeIdx = store.currentLyric.lines.findIndex(
-        (l, idx, arr) =>
-          store.currentPositionMs >= l.startTimeMs &&
-          (idx === arr.length - 1 ||
-            store.currentPositionMs < arr[idx + 1].startTimeMs)
-      );
-      const start =
-        activeIdx >= 0
-          ? Math.max(0, activeIdx - 1)
-          : Math.max(0, Math.floor(store.currentLyric.lines.length / 3));
-      selectedLineIndices.value = [start, start + 1, start + 2].filter(
-        (i) => i < store.currentLyric.lines.length
-      );
+    if (!open) {
+      store.lyricPosterTargetSong = null;
+      return;
+    }
+    const target = store.lyricPosterTargetSong || store.currentSong;
+    lockedPosterSong.value = target ? { ...target } : null;
+    const sameAsCurrent = isSamePosterTrack(lockedPosterSong.value, store.currentSong);
+    lockedPosterCoverUrl.value = sameAsCurrent
+      ? store.activeHighResCoverUrl || lockedPosterSong.value?.coverUrl || ""
+      : lockedPosterSong.value?.coverUrl || "";
+    lockedPosterPalette.value = { ...palette.value };
+    lockedPosterAccents.value = {
+      primary: readablePrimary.value,
+      secondary: readableSecondary.value,
+    };
+    const initialLines = sameAsCurrent ? [...(store.currentLyric.lines || [])] : [];
+    lockedPosterLyrics.value = initialLines;
+    pickDefaultSelectedLines(
+      initialLines,
+      sameAsCurrent ? store.currentPositionMs : 0
+    );
+  },
+  { immediate: true }
+);
+
+// 仅当打开海报瞬间目标曲自身歌词仍在异步加载时（例如分享弹窗切入），回填一次即永久锁定
+watch(
+  () => store.currentLyric.lines,
+  (lines) => {
+    if (
+      !store.isLyricPosterOpen ||
+      lockedPosterLyrics.value.length > 0 ||
+      !lines ||
+      lines.length === 0
+    ) {
+      return;
+    }
+    if (isSamePosterTrack(lockedPosterSong.value, store.currentSong)) {
+      lockedPosterLyrics.value = [...lines];
+      pickDefaultSelectedLines(lockedPosterLyrics.value, store.currentPositionMs);
     }
   }
 );
@@ -175,7 +252,7 @@ function toggleLineSelection(idx: number) {
 }
 
 const selectedLyrics = computed(() => {
-  if (store.currentLyric.lines.length === 0) {
+  if (posterLyricLines.value.length === 0) {
     return [
       {
         text: "耳畔微风起 · 帧享真无损",
@@ -184,7 +261,7 @@ const selectedLyrics = computed(() => {
     ];
   }
   return selectedLineIndices.value
-    .map((i) => store.currentLyric.lines[i])
+    .map((i) => posterLyricLines.value[i])
     .filter(Boolean);
 });
 
@@ -193,12 +270,12 @@ function buildCoverUrlCandidates(raw: string): string[] {
   if (raw.trim()) {
     merged.add(raw.trim());
   }
-  if (store.currentSong) {
-    const baseSeed =
-      store.currentSong.rawCoverTemplate || store.currentSong.coverUrl;
+  const song = posterSong.value;
+  if (song) {
+    const baseSeed = song.rawCoverTemplate || song.coverUrl;
     for (const url of buildCoverResolutionCandidates(
       baseSeed,
-      store.currentSong.hdCoverCandidates || []
+      song.hdCoverCandidates || []
     )) {
       if (url) merged.add(url);
     }
@@ -457,9 +534,9 @@ async function renderPosterToCanvas(): Promise<{
 
   const tpl = currentTpl.value;
   const isLight = tpl.isLight;
-  const songTitle = store.currentSong?.title || "微风音乐";
-  const songArtist = store.currentSong?.artist || "BreezeMusic";
-  const songAlbum = store.currentSong?.album || "Concept Hi-Res";
+  const songTitle = posterSong.value?.title || "微风音乐";
+  const songArtist = posterSong.value?.artist || "BreezeMusic";
+  const songAlbum = posterSong.value?.album || "Concept Hi-Res";
 
   const [coverImg] = await Promise.all([
     loadCoverImageForCanvas(rawCoverUrl.value),
@@ -1140,10 +1217,10 @@ async function copyPosterToClipboard() {
                 <div class="pfw-vinyl-meta">
                   <span class="pfw-vinyl-tag">SIDE A · 33⅓ RPM</span>
                   <div class="pfw-card-song">
-                    {{ store.currentSong?.title || "微风音乐" }}
+                    {{ posterSong?.title || "微风音乐" }}
                   </div>
                   <div class="pfw-card-artist">
-                    {{ store.currentSong?.artist || "BreezeMusic" }}
+                    {{ posterSong?.artist || "BreezeMusic" }}
                   </div>
                 </div>
               </div>
@@ -1164,10 +1241,10 @@ async function copyPosterToClipboard() {
                 </div>
                 <div class="pfw-polaroid-caption">
                   <div class="pfw-card-song">
-                    {{ store.currentSong?.title || "微风音乐" }}
+                    {{ posterSong?.title || "微风音乐" }}
                   </div>
                   <div class="pfw-card-artist">
-                    {{ store.currentSong?.artist || "BreezeMusic" }}
+                    {{ posterSong?.artist || "BreezeMusic" }}
                   </div>
                 </div>
               </div>
@@ -1193,7 +1270,7 @@ async function copyPosterToClipboard() {
                     SYS.AUDIO // 4K UHD
                   </span>
                   <div class="pfw-card-song">
-                    {{ store.currentSong?.title || "微风音乐" }}
+                    {{ posterSong?.title || "微风音乐" }}
                   </div>
                   <div
                     class="pfw-card-artist"
@@ -1203,10 +1280,10 @@ async function copyPosterToClipboard() {
                         : 'rgba(255,255,255,0.74)',
                     }"
                   >
-                    {{ store.currentSong?.artist || "BreezeMusic" }}
+                    {{ posterSong?.artist || "BreezeMusic" }}
                   </div>
                   <div
-                    v-if="store.currentSong?.album"
+                    v-if="posterSong?.album"
                     class="pfw-card-album"
                     :style="{
                       color: currentTpl.isLight
@@ -1214,7 +1291,7 @@ async function copyPosterToClipboard() {
                         : 'rgba(255,255,255,0.52)',
                     }"
                   >
-                    《{{ store.currentSong.album }}》
+                    《{{ posterSong.album }}》
                   </div>
                 </div>
               </div>
@@ -1340,7 +1417,7 @@ async function copyPosterToClipboard() {
 
               <div class="pfw-lyric-list">
                 <button
-                  v-for="(l, idx) in store.currentLyric.lines"
+                  v-for="(l, idx) in posterLyricLines"
                   :key="idx"
                   type="button"
                   class="pfw-lyric-row"

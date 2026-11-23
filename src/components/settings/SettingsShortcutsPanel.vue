@@ -184,9 +184,14 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
+    <Transition
+      :name="store.motionLevel === 'none' ? '' : 'bms-pane-fade'"
+      mode="out-in"
+    >
     <!-- 1. 系统级全局热键总控 -->
     <SettingsCard
       v-if="activeTab === 'global'"
+      key="global"
       title="系统级后台全局热键"
       subtitle="基于 Windows 原生 RegisterHotKey 驱动，应用最小化至托盘或全屏游戏时依然随时响应"
       icon="sliders"
@@ -315,7 +320,8 @@ onBeforeUnmount(() => {
 
     <!-- 2. 应用内快捷键自定义 -->
     <SettingsCard
-      v-if="activeTab === 'inApp'"
+      v-else
+      key="inApp"
       title="应用内快捷键"
       subtitle="在微风音乐主窗口获得焦点时生效（文本输入框内自动避让，不影响打字）；点击键帽即可改键"
       icon="sparkles"
@@ -394,6 +400,7 @@ onBeforeUnmount(() => {
         </span>
       </div>
     </SettingsCard>
+    </Transition>
   </div>
 </template>
 
@@ -404,7 +411,7 @@ onBeforeUnmount(() => {
   gap: 10px;
   padding: 11px 15px;
   border-radius: var(--bm-r-md, 14px);
-  background: color-mix(in srgb, var(--primary) 16%, var(--bg-surface));
+  background: color-mix(in srgb, var(--primary) 16%, var(--bms-surface-row));
   color: var(--text-primary);
   font-size: var(--bm-fs-caption, 12.5px);
   font-weight: 800;
@@ -451,17 +458,21 @@ onBeforeUnmount(() => {
   gap: 14px;
   padding: 12px 15px;
   border-radius: var(--bm-r-lg, 18px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
   transition: background 0.2s ease, box-shadow 0.2s ease;
 }
 
+.bms-hk-row:hover {
+  background: var(--bms-surface-row-hover);
+}
+
 .bms-hk-row.is-recording {
-  background: color-mix(in srgb, var(--primary) 14%, var(--bg-surface));
+  background: color-mix(in srgb, var(--primary) 16%, var(--bms-surface-row));
   box-shadow: 0 10px 24px -10px color-mix(in srgb, var(--primary) 42%, transparent);
 }
 
 .bms-hk-row.is-conflict {
-  background: color-mix(in srgb, var(--coral) 10%, var(--bg-surface));
+  background: color-mix(in srgb, var(--coral) 12%, var(--bms-surface-row));
 }
 
 .bms-hk-copy {
@@ -502,7 +513,7 @@ onBeforeUnmount(() => {
   padding: 5px 12px;
   border: none;
   border-radius: var(--bm-r-md, 14px);
-  background: var(--bg-card);
+  background: var(--bms-surface-well);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -512,18 +523,18 @@ onBeforeUnmount(() => {
 }
 
 .bms-keycap-recorder:hover {
-  background: var(--bg-card-hover);
+  background: var(--bms-neutral-control-hover, var(--bg-card-hover));
   transform: translateY(-1px);
 }
 
 .bms-keycap-recorder:focus-visible,
 .bms-hk-clear-btn:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--primary-text, var(--primary));
   outline-offset: 2px;
 }
 
 .bms-keycap-recorder.is-recording {
-  background: var(--grad-kugou-primary);
+  background: var(--bms-focus-grad, var(--grad-kugou-primary));
   color: #ffffff;
   box-shadow: 0 8px 20px -6px color-mix(in srgb, var(--primary) 54%, transparent);
 }
@@ -549,7 +560,7 @@ onBeforeUnmount(() => {
   padding: 0 8px;
   border-radius: 7px;
   background: var(--primary-soft);
-  color: var(--primary);
+  color: var(--primary-text, var(--primary));
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   font-weight: 800;
@@ -564,7 +575,7 @@ onBeforeUnmount(() => {
 }
 
 .scheme-abyssal_dark .bms-kbd {
-  color: var(--primary-light);
+  color: var(--primary-text, var(--primary-light));
   background: color-mix(in srgb, var(--primary) 24%, transparent);
 }
 
@@ -573,7 +584,7 @@ onBeforeUnmount(() => {
   height: 28px;
   border: none;
   border-radius: 50%;
-  background: var(--bg-pill);
+  background: var(--bms-neutral-control, var(--bg-pill));
   color: var(--text-secondary);
   display: inline-flex;
   align-items: center;
@@ -592,7 +603,7 @@ onBeforeUnmount(() => {
   gap: 10px;
   padding: 12px 15px;
   border-radius: var(--bm-r-md, 14px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
   font-size: var(--bm-fs-caption, 12.5px);
   line-height: 1.55;
   color: var(--text-secondary);
@@ -603,17 +614,14 @@ onBeforeUnmount(() => {
 }
 
 .scheme-watercolor_light.light-variant-nordic_oat .bms-hk-row,
-.scheme-watercolor_light.light-variant-nordic_oat .bms-media-keys-note {
-  background: #F2ECE1;
+.scheme-watercolor_light.light-variant-nordic_oat .bms-media-keys-note,
+.scheme-abyssal_dark.dark-variant-velvet_nebula .bms-hk-row,
+.scheme-abyssal_dark.dark-variant-velvet_nebula .bms-media-keys-note {
+  background: var(--bms-surface-row);
 }
 
 .scheme-watercolor_light.light-variant-nordic_oat .bms-keycap-recorder {
   background: #FAF6EE;
-}
-
-.scheme-abyssal_dark.dark-variant-velvet_nebula .bms-hk-row,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .bms-media-keys-note {
-  background: rgba(34, 20, 29, 0.82);
 }
 
 @media (max-width: 680px) {

@@ -490,7 +490,7 @@ async function handleResetVisualDefaults() {
   width: 100%;
   height: 10px;
   border-radius: var(--bm-r-pill, 999px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-well);
   overflow: hidden;
   display: flex;
   gap: 2px;
@@ -509,7 +509,7 @@ async function handleResetVisualDefaults() {
   gap: 12px;
   padding: 13px 15px;
   border-radius: var(--bm-r-lg, 18px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
 }
 
 .bms-cache-card-left {
@@ -568,7 +568,7 @@ async function handleResetVisualDefaults() {
   flex-wrap: wrap;
   padding: 12px 15px;
   border-radius: var(--bm-r-lg, 18px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
 }
 
 .bms-diag-pill {
@@ -616,7 +616,7 @@ async function handleResetVisualDefaults() {
   border: none;
   padding: 11px 14px;
   border-radius: var(--bm-r-md, 14px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -626,18 +626,18 @@ async function handleResetVisualDefaults() {
 }
 
 .bms-id-chip:hover {
-  background: var(--bg-card-hover);
+  background: var(--bms-surface-row-hover);
 }
 
 .bms-id-chip:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--primary-text, var(--primary));
   outline-offset: 2px;
 }
 
 .bms-id-k {
   font-size: var(--bm-fs-micro, 11px);
   font-weight: 900;
-  color: var(--primary);
+  color: var(--primary-text, var(--primary));
   letter-spacing: 0.05em;
 }
 
@@ -656,13 +656,13 @@ async function handleResetVisualDefaults() {
 .scheme-watercolor_light.light-variant-nordic_oat .bms-cache-card,
 .scheme-watercolor_light.light-variant-nordic_oat .bms-diag-status-row,
 .scheme-watercolor_light.light-variant-nordic_oat .bms-id-chip,
-.scheme-watercolor_light.light-variant-nordic_oat .bms-cache-bar {
-  background: #F2ECE1;
-}
-
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bms-cache-card,
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bms-diag-status-row,
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bms-id-chip {
-  background: rgba(34, 20, 29, 0.82);
+  background: var(--bms-surface-row);
+}
+
+.scheme-watercolor_light.light-variant-nordic_oat .bms-cache-bar {
+  background: var(--bms-surface-well);
 }
 </style>

@@ -426,7 +426,7 @@ function setDesktopLyricMode(mode: TypographyDesktopLyricMode) {
 .bmt-slot-card {
   border-radius: var(--bm-r-lg, 18px);
   padding: 16px 18px;
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -472,7 +472,7 @@ function setDesktopLyricMode(mode: TypographyDesktopLyricMode) {
   border: none;
   border-radius: var(--bm-r-pill, 999px);
   padding: 3px 9px;
-  background: var(--bg-card);
+  background: var(--bms-surface-well);
   color: var(--text-secondary);
   font-size: var(--bm-fs-micro, 11px);
   font-weight: var(--bm-fw-semibold, 600);
@@ -481,7 +481,7 @@ function setDesktopLyricMode(mode: TypographyDesktopLyricMode) {
 
 .bmt-mini-pill.active {
   background: var(--primary-soft);
-  color: var(--primary);
+  color: var(--primary-text, var(--primary));
 }
 
 .bmt-slot-actions {
@@ -518,7 +518,7 @@ function setDesktopLyricMode(mode: TypographyDesktopLyricMode) {
   gap: 16px;
   padding: 10px 14px;
   border-radius: var(--bm-r-md, 14px);
-  background: var(--bg-card);
+  background: var(--bms-surface-well);
 }
 
 .bmt-ws-item {
@@ -527,17 +527,14 @@ function setDesktopLyricMode(mode: TypographyDesktopLyricMode) {
 }
 
 /* L2 晨雾燕麦 / D2 丝绒星云特化 */
-.scheme-watercolor_light.light-variant-nordic_oat .bmt-slot-card {
-  background: #F2ECE1;
+.scheme-watercolor_light.light-variant-nordic_oat .bmt-slot-card,
+.scheme-abyssal_dark.dark-variant-velvet_nebula .bmt-slot-card {
+  background: var(--bms-surface-row);
 }
 
 .scheme-watercolor_light.light-variant-nordic_oat .bmt-mini-pill,
 .scheme-watercolor_light.light-variant-nordic_oat .bmt-weight-strip {
   background: #FAF6EE;
-}
-
-.scheme-abyssal_dark.dark-variant-velvet_nebula .bmt-slot-card {
-  background: rgba(34, 20, 29, 0.82);
 }
 
 @container settings-stage (max-width: 820px) {

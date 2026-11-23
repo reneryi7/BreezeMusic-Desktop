@@ -557,41 +557,42 @@ export function createDiscoverAndFmModule(deps: DiscoverAndFmDeps) {
     }
   }
 
+  let activeFmStationSeq = 0;
+
   async function loadFmStationSongs(
     channelId: string,
     append = false,
     autoPlay = false
   ) {
+    const reqSeq = ++activeFmStationSeq;
     const found = fmChannels.value.find((c) => c.id === channelId);
     if (found) activeFmChannel.value = found;
+    const channelLabel = found?.name || activeFmChannel.value?.name || "电台";
     isLoadingFmStation.value = true;
     try {
       const batch = await kugouClient.getFmSongs(channelId);
+      if (reqSeq !== activeFmStationSeq) return;
       if (append) {
         const seen = new Set(fmStationSongs.value.map((s) => s.hash));
         const extra = batch.filter((s) => !seen.has(s.hash));
         fmStationSongs.value = [...fmStationSongs.value, ...extra];
-        notify(
-          `已追加 ${extra.length} 首「${activeFmChannel.value?.name || "电台"}」漫游新曲`
-        );
+        notify(`已追加 ${extra.length} 首「${channelLabel}」漫游新曲`);
       } else {
         fmStationSongs.value = batch;
         if (autoPlay && batch.length > 0) {
-          playSongFromList(
-            batch[0],
-            batch,
-            `FM · ${activeFmChannel.value?.name || "场景电台"}`
-          );
+          playSongFromList(batch[0], batch, `FM · ${channelLabel}`);
         } else if (batch.length > 0) {
-          notify(
-            `已焕新「${activeFmChannel.value?.name || "电台"}」曲目（共 ${batch.length} 首）`
-          );
+          notify(`已焕新「${channelLabel}」曲目（共 ${batch.length} 首）`);
         }
       }
     } catch (e: any) {
-      notify(`调频电台加载失败：${String(e)}`);
+      if (reqSeq === activeFmStationSeq) {
+        notify(`调频电台加载失败：${String(e)}`);
+      }
     } finally {
-      isLoadingFmStation.value = false;
+      if (reqSeq === activeFmStationSeq) {
+        isLoadingFmStation.value = false;
+      }
     }
   }
 

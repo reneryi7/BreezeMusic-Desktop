@@ -598,14 +598,23 @@ function chooseSleepPreset(mins: number) {
 
 // ================= 6. 详情模型映射 (添加到歌单已统一抽离至 AddToPlaylistModal.vue) =================
 
-const moreAudioDetail = computed(() =>
-  buildAudioDetailModel(
-    store.currentSong,
-    store.currentSongDetailInfo || store.activeSongDetailInfo,
+const moreAudioDetail = computed(() => {
+  const cur = store.currentSong;
+  const modalTarget = store.songDetailModalSong;
+  const isModalSameAsCurrent =
+    Boolean(cur && modalTarget) &&
+    ((cur?.hash && cur.hash === modalTarget?.hash) ||
+      (cur?.id && cur.id === modalTarget?.id));
+  const detail =
+    store.currentSongDetailInfo ||
+    (isModalSameAsCurrent ? store.activeSongDetailInfo : null);
+  return buildAudioDetailModel(
+    cur,
+    detail,
     store.currentPlaybackInfo,
     currentQualityLabel.value
-  )
-);
+  );
+});
 
 const modalAudioDetail = computed(() => {
   const target = store.songDetailModalSong;
@@ -1958,9 +1967,33 @@ function handleJumpToTuner() {
               </button>
 
               <button
+                type="button"
+                class="nfw-bento-card"
+                :class="{ 'is-span-full': !store.downloadFeatureUnlocked }"
+                :style="activeTileStyle(false)"
+                @click="
+                  emit('update:showMoreSheet', false);
+                  if (store.currentSong)
+                    store.openShareSongModal(store.currentSong);
+                "
+              >
+                <div class="nfw-bento-icon-orb">
+                  <PlumpIcon
+                    name="share"
+                    :size="17"
+                    :color="readablePrimary"
+                  />
+                </div>
+                <div class="nfw-bento-meta">
+                  <span class="nfw-bento-name">分享单曲与唤醒链</span>
+                  <span class="nfw-bento-desc">酷狗双端 · 歌词海报</span>
+                </div>
+              </button>
+
+              <button
                 v-if="store.downloadFeatureUnlocked"
                 type="button"
-                class="nfw-bento-card is-span-full"
+                class="nfw-bento-card"
                 :style="activeTileStyle(false)"
                 @click="
                   emit('update:showMoreSheet', false);

@@ -617,6 +617,70 @@ export function createLibraryAndDetailModule(deps: LibraryAndDetailDeps) {
     await selectPlaylist(pl, true);
   }
 
+  async function openResolvedSharedPlaylist(
+    pl: Playlist | null | undefined,
+    fallbackSongs: Song[] = []
+  ) {
+    const cleanSongs = (fallbackSongs || []).filter(Boolean);
+    const effectivePl: Playlist = pl
+      ? {
+          ...pl,
+          title: pl.title || pl.name || "酷狗分享歌单",
+          name: pl.name || pl.title || "酷狗分享歌单",
+          coverUrl: pl.coverUrl || cleanSongs[0]?.coverUrl || "",
+          trackCount: Math.max(pl.trackCount || 0, cleanSongs.length),
+        }
+      : {
+          id: `shared_playlist_${Date.now()}`,
+          title: "酷狗分享歌单",
+          name: "酷狗分享歌单",
+          coverUrl: cleanSongs[0]?.coverUrl || "",
+          trackCount: cleanSongs.length,
+          description: "来自酷狗分享链接",
+          creatorName: "酷狗音乐分享",
+          isCreatedByMe: false,
+          isFavorite: false,
+          isLiked: false,
+          listId: 0,
+          globalCollectionId: "",
+        };
+
+    const cacheKey =
+      effectivePl.globalCollectionId ||
+      effectivePl.specialId ||
+      effectivePl.id ||
+      "";
+    if (cacheKey && cleanSongs.length > 0) {
+      playlistSwrCache.set(cacheKey, {
+        playlist: effectivePl,
+        songs: [...cleanSongs],
+      });
+    }
+
+    const hasRemoteLookupId =
+      Boolean(effectivePl.globalCollectionId) ||
+      Boolean(effectivePl.specialId) ||
+      (Boolean(effectivePl.id) && !effectivePl.id.startsWith("shared_playlist_"));
+
+    if (hasRemoteLookupId) {
+      await selectPlaylist(effectivePl, true);
+      if (playlistSongs.value.length === 0 && cleanSongs.length > 0) {
+        selectedPlaylist.value = effectivePl;
+        playlistSongs.value = [...cleanSongs];
+      }
+      return;
+    }
+
+    pushNavHistory();
+    activeTab.value = "playlist_detail";
+    isNowPlayingOpen.value = false;
+    isSearchPaletteOpen.value = false;
+    scrollStageToTop();
+    selectedPlaylist.value = effectivePl;
+    playlistSongs.value = [...cleanSongs];
+    isLoadingLibrary.value = false;
+  }
+
   async function openLikedSongsDetail() {
     if (!isLoggedIn.value) {
       isLoginModalOpen.value = true;
@@ -977,6 +1041,53 @@ export function createLibraryAndDetailModule(deps: LibraryAndDetailDeps) {
     }
   }
 
+  async function importSongsAsNewPlaylist(
+    title: string,
+    songsToImport: Song[]
+  ): Promise<number> {
+    if (!isLoggedIn.value) {
+      isLoginModalOpen.value = true;
+      return 0;
+    }
+    const cleanList = (songsToImport || []).filter((s) => Boolean(s?.hash || s?.albumAudioId));
+    if (cleanList.length === 0) {
+      notify("没有可导入的有效曲目");
+      return 0;
+    }
+    const resolvedTitle =
+      title.trim() || `导入歌单 ${new Date().toLocaleDateString()}`;
+    await kugouClient.createUserPlaylist(resolvedTitle);
+    await loadUserPlaylists();
+    const target = userPlaylists.value.find((p) => p.title === resolvedTitle);
+    let matchedCount = 0;
+
+    if (target?.listId) {
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < cleanList.length; i += BATCH_SIZE) {
+        const batch = cleanList.slice(i, i + BATCH_SIZE);
+        try {
+          const added = await kugouClient.addSongsToPlaylistBatch(target.listId, batch);
+          matchedCount += added > 0 ? added : batch.length;
+        } catch {
+          for (const song of batch) {
+            try {
+              await kugouClient.addSongToPlaylist(target.listId, song);
+              matchedCount += 1;
+            } catch {
+              // ignore single failure
+            }
+          }
+        }
+      }
+    }
+    await loadUserPlaylists();
+    if (target) {
+      await selectPlaylist(target);
+    }
+    notify(`歌单「${resolvedTitle}」导入完成，成功同步 ${matchedCount} 首曲目`);
+    return matchedCount;
+  }
+
   async function importExternalPlaylist(nameOrRawText: string, rawTextArg?: string) {
     if (!isLoggedIn.value) {
       isLoginModalOpen.value = true;
@@ -986,28 +1097,45 @@ export function createLibraryAndDetailModule(deps: LibraryAndDetailDeps) {
     const rawText = (rawTextArg !== undefined ? rawTextArg : nameOrRawText).trim();
     if (!rawText) return 0;
 
-    notify("正在解析分享链接 / 口令 / 歌单曲目...");
+    notify("正在解析酷狗分享链接 / 口令 / 歌单曲目...");
     let songsToImport: Song[] = [];
     let resolvedTitle = customName || `导入歌单 ${new Date().toLocaleDateString()}`;
+    let parsedPlaylist: Playlist | null = null;
 
     try {
       const parsed = await kugouClient.parseSharedMusic(rawText);
+      parsedPlaylist = parsed.playlist || null;
       if (parsed.songs && parsed.songs.length > 0) {
         songsToImport = parsed.songs;
         if (!customName && parsed.playlist?.title) {
           resolvedTitle = parsed.playlist.title;
         }
+      } else if (parsed.song) {
+        songsToImport = [parsed.song];
       }
     } catch {
       // 回退至逐行搜索匹配
+    }
+
+    if (songsToImport.length === 0 && parsedPlaylist) {
+      try {
+        const collected = await kugouClient.collectPlaylist(parsedPlaylist);
+        if (collected) {
+          await loadUserPlaylists();
+          notify(`已成功解析并收藏歌单「${parsedPlaylist.title}」`);
+          return Math.max(1, parsedPlaylist.trackCount || 0);
+        }
+      } catch {
+        // continue fallback
+      }
     }
 
     if (songsToImport.length === 0) {
       const lines = rawText
         .split(/\r?\n/)
         .map((l) => l.trim())
-        .filter((l) => l.length > 1);
-      for (const line of lines.slice(0, 35)) {
+        .filter((l) => l.length > 1 && !/^https?:\/\//i.test(l));
+      for (const line of lines.slice(0, 50)) {
         try {
           const res = await kugouClient.searchSongs(line, 1, 2);
           if (res.length > 0) {
@@ -1024,27 +1152,7 @@ export function createLibraryAndDetailModule(deps: LibraryAndDetailDeps) {
       return 0;
     }
 
-    await kugouClient.createUserPlaylist(resolvedTitle);
-    await loadUserPlaylists();
-    const target = userPlaylists.value.find((p) => p.title === resolvedTitle);
-    let matchedCount = 0;
-
-    if (target?.listId) {
-      for (const song of songsToImport.slice(0, 60)) {
-        try {
-          await kugouClient.addSongToPlaylist(target.listId, song);
-          matchedCount += 1;
-        } catch {
-          // ignore single failure
-        }
-      }
-    }
-    await loadUserPlaylists();
-    if (target) {
-      await selectPlaylist(target);
-    }
-    notify(`歌单「${resolvedTitle}」导入完成，成功同步 ${matchedCount} 首曲目`);
-    return matchedCount;
+    return importSongsAsNewPlaylist(resolvedTitle, songsToImport);
   }
 
   function isSamePlaylistIdentity(a: Playlist, b: Playlist): boolean {
@@ -1744,15 +1852,30 @@ export function createLibraryAndDetailModule(deps: LibraryAndDetailDeps) {
     }
   }
 
+  let artistAlbumSortSeq = 0;
+
   async function switchArtistAlbumSort(sort: "new" | "hot") {
     if (artistAlbumsSort.value === sort && activeArtistAlbums.value.length > 0) return;
     artistAlbumsSort.value = sort;
     artistAlbumsPage.value = 1;
     const aid = activeArtistDetail.value?.artistId || activeArtistDetail.value?.singerId;
     if (aid && aid !== "0") {
+      const targetAid = String(aid);
+      const artistSeq = activeArtistReqSeq;
+      const sortSeq = ++artistAlbumSortSeq;
       isLoadingMoreArtistAlbums.value = true;
       try {
-        const albums = await kugouClient.getArtistAlbums(String(aid), 1, sort);
+        const albums = await kugouClient.getArtistAlbums(targetAid, 1, sort);
+        const curAid = String(
+          activeArtistDetail.value?.artistId || activeArtistDetail.value?.singerId || ""
+        );
+        if (
+          artistSeq !== activeArtistReqSeq ||
+          sortSeq !== artistAlbumSortSeq ||
+          curAid !== targetAid
+        ) {
+          return;
+        }
         activeArtistAlbums.value = albums;
         const totalAlbums = activeArtistDetail.value?.albumCount || 0;
         artistAlbumsHasMore.value =
@@ -1761,7 +1884,9 @@ export function createLibraryAndDetailModule(deps: LibraryAndDetailDeps) {
         notify(sort === "hot" ? "已切换为最热专辑排序" : "已切换为最新发行专辑排序");
       } catch {
       } finally {
-        isLoadingMoreArtistAlbums.value = false;
+        if (artistSeq === activeArtistReqSeq && sortSeq === artistAlbumSortSeq) {
+          isLoadingMoreArtistAlbums.value = false;
+        }
       }
     }
   }
@@ -1920,13 +2045,28 @@ export function createLibraryAndDetailModule(deps: LibraryAndDetailDeps) {
   }
 
 
+  let artistSongSortSeq = 0;
+
   async function switchArtistSongSort(sort: "hot" | "new") {
     artistSongsSort.value = sort;
     artistSongsPage.value = 1;
     const aid = activeArtistDetail.value?.artistId || activeArtistDetail.value?.singerId;
     if (aid && aid !== "0") {
+      const targetAid = String(aid);
+      const artistSeq = activeArtistReqSeq;
+      const sortSeq = ++artistSongSortSeq;
       try {
-        const songs = await kugouClient.getArtistSongs(String(aid), sort, 1);
+        const songs = await kugouClient.getArtistSongs(targetAid, sort, 1);
+        const curAid = String(
+          activeArtistDetail.value?.artistId || activeArtistDetail.value?.singerId || ""
+        );
+        if (
+          artistSeq !== activeArtistReqSeq ||
+          sortSeq !== artistSongSortSeq ||
+          curAid !== targetAid
+        ) {
+          return;
+        }
         activeArtistSongs.value = songs;
         const totalSongs = activeArtistDetail.value?.songCount || 0;
         artistSongsHasMore.value =
@@ -2305,6 +2445,7 @@ export function createLibraryAndDetailModule(deps: LibraryAndDetailDeps) {
     openSoundMixerFromPlayer,
     selectPlaylist,
     openPlaylistDetail,
+    openResolvedSharedPlaylist,
     openLikedSongsDetail,
     openRecentHistoryDetail,
     openPurchasedSongsDetail,
@@ -2317,6 +2458,7 @@ export function createLibraryAndDetailModule(deps: LibraryAndDetailDeps) {
     createNewPlaylist,
     deletePlaylist,
     removeSongFromCurrentPlaylist,
+    importSongsAsNewPlaylist,
     importExternalPlaylist,
     isPlaylistCollected,
     toggleCollectPlaylist,

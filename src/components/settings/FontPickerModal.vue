@@ -653,15 +653,19 @@ onBeforeUnmount(() => {
 }
 
 .bm-fd-scope-tabs {
+  position: relative;
+  isolation: isolate;
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 3px;
   border-radius: var(--bm-r-pill, 999px);
-  background: var(--bg-surface);
+  background: var(--bms-surface-well);
 }
 
 .bm-fd-scope-btn {
+  position: relative;
+  z-index: 1;
   border: none;
   border-radius: var(--bm-r-pill, 999px);
   padding: 5px 12px;
@@ -670,11 +674,17 @@ onBeforeUnmount(() => {
   font-size: var(--bm-fs-caption, 12.5px);
   font-weight: var(--bm-fw-bold, 700);
   cursor: pointer;
+  white-space: nowrap;
   transition: background 0.18s ease, color 0.18s ease;
 }
 
+.bm-fd-scope-btn:hover:not([aria-selected="true"]) {
+  color: var(--text-primary);
+  background: var(--bms-neutral-control, var(--bg-hover-square));
+}
+
 .bm-fd-scope-btn[aria-selected="true"] {
-  background: var(--grad-kugou-primary);
+  background: var(--bms-focus-grad, var(--grad-kugou-primary));
   color: #ffffff;
 }
 
@@ -744,7 +754,7 @@ onBeforeUnmount(() => {
   border: none;
   border-radius: var(--bm-r-pill, 999px);
   padding: 5px 11px;
-  background: var(--bg-surface);
+  background: var(--bms-neutral-control, var(--bg-surface));
   color: var(--text-secondary);
   font-size: var(--bm-fs-micro, 11px);
   font-weight: var(--bm-fw-bold, 700);
@@ -756,7 +766,7 @@ onBeforeUnmount(() => {
 
 .bm-fd-filter-pill.active {
   background: var(--primary-soft);
-  color: var(--primary);
+  color: var(--primary-text, var(--primary));
 }
 
 .bm-fd-count {
@@ -1050,13 +1060,16 @@ onBeforeUnmount(() => {
 
 /* D2 丝绒星云苦巧天鹅绒特化 */
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bm-font-dialog {
-  background: #281822;
+  background: var(--bms-surface-card);
 }
 
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bm-fd-font-card,
-.scheme-abyssal_dark.dark-variant-velvet_nebula .bm-fd-preview-pane,
+.scheme-abyssal_dark.dark-variant-velvet_nebula .bm-fd-preview-pane {
+  background: var(--bms-surface-row);
+}
+
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bm-fd-search {
-  background: rgba(34, 20, 29, 0.9);
+  background: var(--bms-surface-well);
 }
 
 @media (max-width: 760px) {

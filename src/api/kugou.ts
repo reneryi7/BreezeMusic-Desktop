@@ -1221,6 +1221,29 @@ export const kugouClient = {
     };
   },
 
+  /** 分享歌曲前实时校准官方 128k MP3 hash、各档位体积与真实 album_audio_id */
+  async enrichSongForShare(song: Song): Promise<Song> {
+    const res = await invoke<Song>("enrich_song_for_share_cmd", {
+      song: normSong(song),
+    });
+    return normSong(res);
+  },
+
+  /** 分享歌单前实时补全 globalCollectionId / specialId / 创建者元数据 */
+  enrichPlaylistForShare(playlist: Playlist): Promise<Playlist> {
+    return invoke<Playlist>("enrich_playlist_for_share_cmd", { playlist });
+  },
+
+  /** 使用系统默认浏览器或官方协议打开安全外部链接 */
+  openExternalUrl(url: string): Promise<boolean> {
+    return invoke<boolean>("open_external_url_cmd", { url });
+  },
+
+  /** Windows 原生安全读取剪贴板文本（无 WebView2 权限弹窗阻塞，受设置开关控制） */
+  readClipboardText(): Promise<string> {
+    return invoke<string>("read_clipboard_text_cmd");
+  },
+
   /** 解析歌曲真实播放音源 URL + 硬件级 STREAMINFO 采样率/位深探测 */
   async resolveSongUrl(
     song: Song,

@@ -20,14 +20,16 @@ import {
   loadCoverSoftPixelsResilient,
 } from "./coverPalette";
 import { getMotionRuntimeProfile } from "./motionRuntime";
+import { isAppForegroundActive } from "./windowPowerState";
 
 /**
- * 光学清晰度配置（方案 3：极限锐利模式；若后续需退回方案 1 标准清晰，只需切换 `ultraSharpOptics = false`）
+ * 光学清晰度与能效平衡配置：
+ * - `maxDpr: 1.5` 在 2K/4K 高分屏下保持长虹玻璃棱线与驻波光丝锐利，同时避免 4K 2.0x 填充率爆显存与风扇狂转；
+ * - `fluidScale: 0.72` 针对低频丝绸流场使用 WebGL 双线性硬件放大，画质等效无锯齿且像素着色量直降 48%。
  */
 const SHARP_OPTICS_PROFILE = {
-  /** 释放原生 HiDPI 分辨率上限（2.0x）且全背景 1.0x 原生像素渲染，杜绝降采样糊化 */
-  maxDpr: 2.0,
-  fluidScale: 1.0,
+  maxDpr: 1.5,
+  fluidScale: 0.72,
   /** 极限锐利模式：收紧长虹玻璃磨砂微散射、提锐玻璃高光棱线与驻波光丝（可一键切回 false 退回方案 1） */
   ultraSharpOptics: true,
 } as const;
@@ -641,6 +643,11 @@ export class NowPlayingBgEngine {
   ];
   private pulseCursor = 2;
   private pulseUniformBuf = new Float32Array(24);
+  private c1UniformBuf = new Float32Array(3);
+  private c2UniformBuf = new Float32Array(3);
+  private c3UniformBuf = new Float32Array(3);
+  private bgUniformBuf = new Float32Array(3);
+  private lastUniformColorSig = "";
   private stars: StarDreamParticle[] = createStarDreamField();
   private lastRenderTsMs = 0;
   private lastPhysicsTsMs = 0;
@@ -1078,7 +1085,7 @@ export class NowPlayingBgEngine {
   }
 
   renderFrame(input: NowPlayingBgFrameInput) {
-    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+    if (!isAppForegroundActive()) {
       return;
     }
 
@@ -1124,10 +1131,10 @@ export class NowPlayingBgEngine {
     } else {
       this.lastStaticSignature = "";
       const minIntervalMs = !input.isPlaying
-        ? 66 // 暂停态统一降至 15fps
+        ? 84 // 暂停态降至 ~12fps 轻柔呼吸，大幅降低静止 GPU 功耗
         : motion.effectiveLevel === "standard"
-        ? 32 // 普通动效 30fps
-        : 8.0; // 最佳动效播放态封顶 120fps
+        ? 33 // 普通动效 30fps
+        : 16.0; // 最佳动效播放态理性封顶 60fps（前景歌词/UI 仍享原生高刷），避免 144/240Hz 空烧着色器
       const stateChanged = stateSig !== this.lastVisualStateSig;
       if (!stateChanged && nowMs - this.lastRenderTsMs < minIntervalMs) {
         return;
@@ -1210,10 +1217,26 @@ export class NowPlayingBgEngine {
     gl.useProgram(prog);
     gl.bindVertexArray(this.quadVao);
 
-    const c1 = hexToFloat3(this.curC1Hex);
-    const c2 = hexToFloat3(this.curC2Hex);
-    const c3 = hexToFloat3(this.curC3Hex);
-    const bg = hexToFloat3(this.curBgHex);
+    const colorSig = `${this.curC1Hex}|${this.curC2Hex}|${this.curC3Hex}|${this.curBgHex}`;
+    if (colorSig !== this.lastUniformColorSig) {
+      this.lastUniformColorSig = colorSig;
+      const c1 = hexToRgb(this.curC1Hex);
+      const c2 = hexToRgb(this.curC2Hex);
+      const c3 = hexToRgb(this.curC3Hex);
+      const bg = hexToRgb(this.curBgHex);
+      this.c1UniformBuf[0] = c1.r / 255;
+      this.c1UniformBuf[1] = c1.g / 255;
+      this.c1UniformBuf[2] = c1.b / 255;
+      this.c2UniformBuf[0] = c2.r / 255;
+      this.c2UniformBuf[1] = c2.g / 255;
+      this.c2UniformBuf[2] = c2.b / 255;
+      this.c3UniformBuf[0] = c3.r / 255;
+      this.c3UniformBuf[1] = c3.g / 255;
+      this.c3UniformBuf[2] = c3.b / 255;
+      this.bgUniformBuf[0] = bg.r / 255;
+      this.bgUniformBuf[1] = bg.g / 255;
+      this.bgUniformBuf[2] = bg.b / 255;
+    }
 
     gl.uniform2f(u.uRes, rw, rh);
     gl.uniform1f(u.uTime, this.simTime);
@@ -1225,10 +1248,10 @@ export class NowPlayingBgEngine {
     gl.uniform1f(u.uDim, dim);
     gl.uniform1f(u.uLightMix, this.curLightMix);
     gl.uniform1f(u.uCoverMix, this.curCoverMix);
-    gl.uniform3fv(u.uC1, c1);
-    gl.uniform3fv(u.uC2, c2);
-    gl.uniform3fv(u.uC3, c3);
-    gl.uniform3fv(u.uBg, bg);
+    gl.uniform3fv(u.uC1, this.c1UniformBuf);
+    gl.uniform3fv(u.uC2, this.c2UniformBuf);
+    gl.uniform3fv(u.uC3, this.c3UniformBuf);
+    gl.uniform3fv(u.uBg, this.bgUniformBuf);
     gl.uniform2f(u.uB0, this.blobs[0].x, this.blobs[0].y);
     gl.uniform2f(u.uB1, this.blobs[1].x, this.blobs[1].y);
     gl.uniform2f(u.uB2, this.blobs[2].x, this.blobs[2].y);
@@ -1258,7 +1281,7 @@ export class NowPlayingBgEngine {
 
     const w = Math.max(2, this.c2dCssW || window.innerWidth || 1280);
     const h = Math.max(2, this.c2dCssH || window.innerHeight || 720);
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, SHARP_OPTICS_PROFILE.maxDpr);
     const rw = Math.max(2, Math.round(w * dpr));
     const rh = Math.max(2, Math.round(h * dpr));
     if (canvas.width !== rw || canvas.height !== rh) {

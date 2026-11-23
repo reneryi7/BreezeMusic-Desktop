@@ -1145,3 +1145,14 @@ export interface GlobalHotkeySyncReport {
   registeredCount: number;
   failedActions: string[];
 }
+
+export interface HdArtworkPreviewTarget {
+  url: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  rawCoverTemplate?: string;
+  hdCoverCandidates?: string[];
+  song?: Song | null;
+  initialMetrics?: { width: number; height: number } | null;
+}

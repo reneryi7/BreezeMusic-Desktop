@@ -301,7 +301,7 @@ function goLocalMusicView() {
 .bml-hero-summary {
   border-radius: var(--bm-r-xl, 24px);
   padding: 20px 24px;
-  background: var(--bg-card);
+  background: var(--bms-surface-card);
   box-shadow: var(--shadow-soft);
   display: flex;
   align-items: center;
@@ -351,7 +351,7 @@ function goLocalMusicView() {
 .bml-dir-item {
   border-radius: var(--bm-r-lg, 18px);
   padding: 13px 16px;
-  background: var(--bg-surface);
+  background: var(--bms-surface-row);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -360,7 +360,7 @@ function goLocalMusicView() {
 }
 
 .bml-dir-item.is-active {
-  background: color-mix(in srgb, var(--primary) 10%, var(--bg-surface));
+  background: color-mix(in srgb, var(--primary) 12%, var(--bms-surface-row));
 }
 
 .bml-dir-info {
@@ -399,19 +399,13 @@ function goLocalMusicView() {
 }
 
 /* L2 晨雾燕麦 / D2 丝绒星云特化 */
-.scheme-watercolor_light.light-variant-nordic_oat .bml-hero-summary {
-  background: #FAF6EE;
-}
-
-.scheme-watercolor_light.light-variant-nordic_oat .bml-dir-item {
-  background: #F2ECE1;
-}
-
+.scheme-watercolor_light.light-variant-nordic_oat .bml-hero-summary,
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bml-hero-summary {
-  background: rgba(46, 27, 38, 0.88);
+  background: var(--bms-surface-card);
 }
 
+.scheme-watercolor_light.light-variant-nordic_oat .bml-dir-item,
 .scheme-abyssal_dark.dark-variant-velvet_nebula .bml-dir-item {
-  background: rgba(34, 20, 29, 0.82);
+  background: var(--bms-surface-row);
 }
 </style>

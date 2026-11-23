@@ -27,8 +27,17 @@ const store = useAppStore();
 const searchQuery = ref("");
 const highlightedSettingId = ref("");
 const detailStageRef = ref<HTMLElement | null>(null);
+const navGroupsRef = ref<HTMLElement | null>(null);
+const navGliderRef = ref<HTMLElement | null>(null);
 const tabButtonRefs = ref<Record<string, HTMLButtonElement | null>>({});
 let highlightTimer: ReturnType<typeof setTimeout> | null = null;
+let navResizeObserver: ResizeObserver | null = null;
+let navGliderRafId: number | null = null;
+let navGliderInitialized = false;
+
+const navGliderStyle = ref<Record<string, string>>({
+  opacity: "0",
+});
 
 const visibleNavItems = computed<SettingsNavItem[]>(() =>
   SETTINGS_NAV_ITEMS.filter(
@@ -157,6 +166,84 @@ function setTabBtnRef(id: string, el: unknown) {
   tabButtonRefs.value[id] = el instanceof HTMLButtonElement ? el : null;
 }
 
+function prefersReducedNavMotion(): boolean {
+  if (store.motionLevel === "none") return true;
+  return (
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
+  );
+}
+
+function syncNavGlider(allowAnimate = true, ensureVisible = false) {
+  const container = navGroupsRef.value;
+  if (!container) return;
+
+  if (isSearching.value) {
+    navGliderStyle.value = {
+      ...navGliderStyle.value,
+      opacity: "0",
+    };
+    return;
+  }
+
+  const activeBtn = tabButtonRefs.value[activeSection.value];
+  if (!activeBtn) {
+    navGliderStyle.value = {
+      ...navGliderStyle.value,
+      opacity: "0",
+    };
+    return;
+  }
+
+  const cRect = container.getBoundingClientRect();
+  const bRect = activeBtn.getBoundingClientRect();
+  if (bRect.width <= 0 || bRect.height <= 0) return;
+
+  const left = bRect.left - cRect.left + container.scrollLeft;
+  const top = bRect.top - cRect.top + container.scrollTop;
+  const shouldSnap = !allowAnimate || !navGliderInitialized || prefersReducedNavMotion();
+
+  const gliderEl = navGliderRef.value;
+  if (gliderEl && shouldSnap) {
+    gliderEl.style.transition = "none";
+  }
+
+  navGliderStyle.value = {
+    width: `${bRect.width.toFixed(2)}px`,
+    height: `${bRect.height.toFixed(2)}px`,
+    transform: `translate3d(${left.toFixed(2)}px, ${top.toFixed(2)}px, 0)`,
+    opacity: "1",
+  };
+
+  if (gliderEl && shouldSnap) {
+    nextTick(() => {
+      if (!navGliderRef.value) return;
+      void navGliderRef.value.offsetWidth;
+      navGliderRef.value.style.transition = "";
+    });
+  }
+
+  navGliderInitialized = true;
+
+  if (ensureVisible) {
+    activeBtn.scrollIntoView({
+      block: "nearest",
+      inline: "nearest",
+      behavior: prefersReducedNavMotion() ? "auto" : "smooth",
+    });
+  }
+}
+
+function scheduleNavGliderSync(allowAnimate = true, ensureVisible = false) {
+  if (navGliderRafId !== null) {
+    cancelAnimationFrame(navGliderRafId);
+  }
+  navGliderRafId = requestAnimationFrame(() => {
+    navGliderRafId = null;
+    syncNavGlider(allowAnimate, ensureVisible);
+  });
+}
+
 function scrollDetailToTop(smooth = false) {
   const stage = detailStageRef.value;
   if (!stage) return;
@@ -178,7 +265,23 @@ function selectSection(id: SettingsSectionId) {
 
 watch(activeSection, () => {
   scrollDetailToTop(false);
+  nextTick(() => scheduleNavGliderSync(true, true));
 });
+
+watch(isSearching, () => {
+  nextTick(() => scheduleNavGliderSync(true, false));
+});
+
+watch(
+  () => [
+    store.downloadFeatureUnlocked,
+    store.uiDensity,
+    store.typographyConfig.uiFontScale,
+  ],
+  () => {
+    nextTick(() => scheduleNavGliderSync(false, false));
+  }
+);
 
 function handleTabKeyDown(e: KeyboardEvent, currentId: SettingsSectionId) {
   const list = visibleNavItems.value;
@@ -252,12 +355,29 @@ function handleSearchKeyDown(e: KeyboardEvent) {
 onMounted(() => {
   store.refreshCacheStats();
   store.refreshAutostartState();
+  nextTick(() => {
+    scheduleNavGliderSync(false, false);
+    if (typeof ResizeObserver !== "undefined" && navGroupsRef.value) {
+      navResizeObserver = new ResizeObserver(() => {
+        scheduleNavGliderSync(false, false);
+      });
+      navResizeObserver.observe(navGroupsRef.value);
+    }
+  });
 });
 
 onBeforeUnmount(() => {
   if (highlightTimer) {
     clearTimeout(highlightTimer);
     highlightTimer = null;
+  }
+  if (navGliderRafId !== null) {
+    cancelAnimationFrame(navGliderRafId);
+    navGliderRafId = null;
+  }
+  if (navResizeObserver) {
+    navResizeObserver.disconnect();
+    navResizeObserver = null;
   }
 });
 </script>
@@ -305,11 +425,20 @@ onBeforeUnmount(() => {
       </search>
 
       <div
+        ref="navGroupsRef"
         class="bms-nav-groups"
         role="tablist"
         aria-label="设置分类"
         aria-orientation="vertical"
       >
+        <span
+          ref="navGliderRef"
+          class="bms-nav-glider"
+          :style="navGliderStyle"
+          aria-hidden="true"
+        >
+          <span class="bms-nav-glider-bar"></span>
+        </span>
         <div
           v-for="group in groupedNavItems"
           :key="group.id"
@@ -331,7 +460,6 @@ onBeforeUnmount(() => {
             @click="selectSection(item.id)"
             @keydown="handleTabKeyDown($event, item.id)"
           >
-            <span class="bms-nav-pill-bar" aria-hidden="true"></span>
             <span class="bms-nav-icon-box">
               <PlumpIcon
                 :name="item.icon"

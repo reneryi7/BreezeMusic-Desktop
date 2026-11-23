@@ -3645,12 +3645,19 @@ impl KugouApiService {
 
     /// 校验分享链接是否属于酷狗官方受信任域名白名单且非内网/回环 IP（防御 SSRF 探测内网与非受信外链请求）
     pub fn is_trusted_kugou_share_url(raw_url: &str) -> bool {
-        if !crate::kugou::transport::KugouTransport::is_safe_external_url(raw_url, true) {
+        let trimmed = raw_url.trim();
+        if trimmed.is_empty() || trimmed.len() > 4096 || trimmed.bytes().any(|b| b < 0x20) {
             return false;
         }
-        let Ok(parsed) = reqwest::Url::parse(raw_url.trim()) else {
+        if !crate::kugou::transport::KugouTransport::is_safe_external_url(trimmed, false) {
+            return false;
+        }
+        let Ok(parsed) = reqwest::Url::parse(trimmed) else {
             return false;
         };
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return false;
+        }
         let scheme = parsed.scheme();
         if scheme != "http" && scheme != "https" {
             return false;
@@ -3659,188 +3666,2105 @@ impl KugouApiService {
             return false;
         };
         let lower_host = host.trim_end_matches('.').to_ascii_lowercase();
+        if lower_host == "a.app.qq.com" {
+            return true;
+        }
         const ALLOWED_DOMAINS: [&str; 3] = ["kugou.com", "kgurl.cn", "kugou.cn"];
         ALLOWED_DOMAINS.iter().any(|&domain| {
             lower_host == domain || lower_host.ends_with(&format!(".{}", domain))
         })
     }
 
-    /// 39. 解析酷狗音乐/概念版分享链接、口令、global_collection_id 或歌单文本 (对齐 Android KugouShareLinkParser & resolveSharedMusicText)
-    pub async fn parse_shared_music_text(&self, raw_text: &str) -> Result<SharedMusicResolved, String> {
+    /// 解码酷狗 H5 URL 中带 2 位校验后缀的 Base36 编码 ID（如 `e_album_audio_id=xrojbed` -> `56718839`、`/plist/list/3sf9931/` -> `6364989`）
+    pub fn decode_kugou_base36_with_checksum(raw: &str) -> String {
+        let clean = raw.trim().to_ascii_lowercase();
+        if clean.len() <= 2 {
+            return String::new();
+        }
+        let body = &clean[..clean.len() - 2];
+        if !body.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'z').contains(&b)) {
+            return String::new();
+        }
+        match u64::from_str_radix(body, 36) {
+            Ok(val) if val > 0 => val.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// 解码酷狗音乐歌单分享链接中的 `gcid_xxx`（采用 `z` 作分隔符 + Base35 编码 + 2 位校验后缀）：
+    /// 如 `gcid_3z15kqlufz7yz04d` -> `collection_3_2132029040_279_0`
+    pub fn decode_kugou_gcid_to_collection_id(raw_gcid: &str) -> String {
+        let lowered = raw_gcid.trim().to_ascii_lowercase();
+        let clean = lowered.strip_prefix("gcid_").unwrap_or(&lowered);
+        if clean.len() <= 4 || !clean.contains('z') {
+            return String::new();
+        }
+        let body = &clean[..clean.len() - 2];
+        let parts: Vec<&str> = body.split('z').collect();
+        if parts.len() < 3 {
+            return String::new();
+        }
+        let mut decoded_parts = Vec::with_capacity(parts.len());
+        for part in parts {
+            if part.is_empty()
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'y').contains(&b))
+            {
+                return String::new();
+            }
+            let Ok(num) = u64::from_str_radix(part, 35) else {
+                return String::new();
+            };
+            decoded_parts.push(num.to_string());
+        }
+        format!("collection_{}", decoded_parts.join("_"))
+    }
+
+    fn percent_decode_utf8(raw: &str) -> String {
+        let bytes = raw.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0usize;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'+' => {
+                    out.push(b' ');
+                    i += 1;
+                }
+                b'%' if i + 2 < bytes.len() => {
+                    let h1 = (bytes[i + 1] as char).to_digit(16);
+                    let h2 = (bytes[i + 2] as char).to_digit(16);
+                    if let (Some(a), Some(b)) = (h1, h2) {
+                        out.push(((a << 4) | b) as u8);
+                        i += 3;
+                    } else {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+                b => {
+                    out.push(b);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8(out).unwrap_or_else(|_| raw.to_string())
+    }
+
+    fn url_decode_repeatedly(raw: &str, max_depth: usize) -> String {
+        let mut current = raw.trim().to_string();
+        for _ in 0..max_depth {
+            let decoded = Self::percent_decode_utf8(&current);
+            if decoded == current {
+                break;
+            }
+            current = decoded;
+        }
+        current
+    }
+
+    fn clean_share_trailing_punct(url: &str) -> String {
+        url.trim()
+            .trim_end_matches(&[
+                ',', '.', '!', '?', ';', ':', ')', ']', '}', '>', '"', '\'', '，', '。', '！', '？',
+                '；', '：', '）', '】', '》',
+            ][..])
+            .to_string()
+    }
+
+    fn parse_query_kv(query: &str) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            if let Some(eq_idx) = pair.find('=') {
+                let k = pair[..eq_idx].trim();
+                let v = pair[eq_idx + 1..].trim();
+                if !k.is_empty() {
+                    map.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+        map
+    }
+
+    fn split_artist_and_title(raw_name: &str) -> (String, String) {
+        let clean = raw_name.trim();
+        if clean.is_empty() {
+            return (String::new(), String::new());
+        }
+        if let Some(idx) = clean.find(" - ") {
+            (
+                clean[..idx].trim().to_string(),
+                clean[idx + 3..].trim().to_string(),
+            )
+        } else {
+            (String::new(), clean.to_string())
+        }
+    }
+
+    fn is_hex32(raw: &str) -> bool {
+        let t = raw.trim();
+        t.len() == 32 && t.bytes().all(|b| b.is_ascii_hexdigit()) && !t.bytes().all(|b| b == b'0')
+    }
+
+    fn extract_balanced_json_object(text: &str, variable_anchor: &str) -> Option<String> {
+        let anchor_idx = text.find(variable_anchor)?;
+        let search_start = anchor_idx + variable_anchor.len();
+        let rel_brace = text[search_start..].find('{')?;
+        let start_idx = search_start + rel_brace;
+
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (offset, ch) in text[start_idx..].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && in_string {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = !in_string;
+                continue;
+            }
+            if !in_string {
+                if ch == '{' {
+                    depth += 1;
+                } else if ch == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(text[start_idx..start_idx + offset + 1].to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn extract_share_candidate_urls(raw_text: &str) -> Vec<String> {
+        static SCHEME_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+            regex::Regex::new(r#"(?i)kugou(?:youth|url)?://start\.(?:weixin|music)\?[^\s"'<>]+"#)
+                .unwrap()
+        });
+        static HTTP_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+            regex::Regex::new(r#"(?i)https?://[^\s"'<>|，。！？、；：（）【】《》“”‘’]+"#).unwrap()
+        });
+
+        let mut results = Vec::new();
+        for m in SCHEME_RE.find_iter(raw_text) {
+            let cleaned = Self::clean_share_trailing_punct(m.as_str());
+            if !cleaned.is_empty() && !results.contains(&cleaned) {
+                results.push(cleaned);
+            }
+        }
+        for m in HTTP_RE.find_iter(raw_text) {
+            let cleaned = Self::clean_share_trailing_punct(m.as_str());
+            if Self::is_trusted_kugou_share_url(&cleaned) && !results.contains(&cleaned) {
+                results.push(cleaned);
+            }
+        }
+        results
+    }
+
+    fn parse_wakeup_json_payload(json_text: &str, source_url: &str) -> Option<ParsedShareDescriptor> {
+        let root: Value = serde_json::from_str(json_text.trim()).ok()?;
+        if !root.is_object() {
+            return None;
+        }
+        let cmd_str = Self::val_str(&root, "cmd");
+        let inner_owned: Option<Value> = root.get("jsonStr").and_then(|el| {
+            if el.is_object() {
+                Some(el.clone())
+            } else if let Some(s) = el.as_str() {
+                let decoded = Self::url_decode_repeatedly(s, 3);
+                serde_json::from_str::<Value>(decoded.trim())
+                    .ok()
+                    .filter(|v| v.is_object())
+            } else {
+                None
+            }
+        });
+        let inner = inner_owned.as_ref().unwrap_or(&root);
+
+        let raw_gcid = [
+            Self::val_str(inner, "globalCollectionId"),
+            Self::val_str(inner, "global_collection_id"),
+            Self::val_str(inner, "gcid"),
+        ]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+        let gcid = if raw_gcid.to_ascii_lowercase().starts_with("gcid_") {
+            let decoded = Self::decode_kugou_gcid_to_collection_id(&raw_gcid);
+            if decoded.is_empty() { raw_gcid } else { decoded }
+        } else {
+            raw_gcid
+        };
+        let special_id = [
+            Self::val_str(inner, "specialID"),
+            Self::val_str(inner, "specialid"),
+            Self::val_str(inner, "special_id"),
+        ]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+        let list_id = [
+            Self::val_str(inner, "listID"),
+            Self::val_str(inner, "listid"),
+        ]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+        let list_name = [
+            Self::val_str(inner, "listName"),
+            Self::val_str(inner, "specialname"),
+        ]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+        let user_id = [
+            Self::val_str(inner, "userID"),
+            Self::val_str(inner, "userid"),
+            Self::val_str(inner, "uid"),
+        ]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+
+        if matches!(cmd_str.as_str(), "302" | "103302" | "314")
+            || !gcid.is_empty()
+            || (!special_id.is_empty() && special_id != "0")
+        {
+            let clean_special_id = if !special_id.is_empty() && special_id != "0" {
+                special_id
+            } else if !list_id.is_empty() && list_id != "0" && list_id != "2" {
+                list_id.clone()
+            } else if gcid.to_ascii_lowercase().starts_with("collection_") {
+                gcid.split('_')
+                    .nth(3)
+                    .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                String::new()
+            };
+            return Some(ParsedShareDescriptor::Playlist(SharedPlaylistDescriptor {
+                global_collection_id: gcid,
+                special_id: clean_special_id,
+                list_id,
+                uid: user_id,
+                title_hint: list_name,
+                creator_name_hint: String::new(),
+                cover_url_hint: String::new(),
+                embedded_songs: Vec::new(),
+                source_url: source_url.to_string(),
+            }));
+        }
+
+        let hash = [Self::val_str(inner, "hash"), Self::val_str(inner, "Hash")]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        let hash320 = Self::val_str(inner, "320hash").to_ascii_uppercase();
+        let hash_flac = Self::val_str(inner, "sqhash").to_ascii_uppercase();
+        let album_audio_id = [
+            Self::val_str(inner, "album_audio_id"),
+            Self::val_str(inner, "albumAudioId"),
+            Self::val_str(inner, "mixsongid"),
+        ]
+        .into_iter()
+        .find(|s| !s.is_empty() && s != "0")
+        .unwrap_or_default();
+        let album_id = [
+            Self::val_str(inner, "album_id"),
+            Self::val_str(inner, "albumId"),
+        ]
+        .into_iter()
+        .find(|s| !s.is_empty() && s != "0")
+        .unwrap_or_default();
+        let file_name = [
+            Self::val_str(inner, "filename"),
+            Self::val_str(inner, "songname"),
+        ]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+        let duration_sec = Self::val_i64(inner, "duration")
+            .filter(|&v| v > 0)
+            .or_else(|| Self::val_i64(inner, "timelength").filter(|&v| v > 0))
+            .unwrap_or(0);
+
+        if matches!(cmd_str.as_str(), "212" | "103301" | "103326")
+            || Self::is_hex32(&hash)
+            || !album_audio_id.is_empty()
+        {
+            let (artist_hint, title_hint) = Self::split_artist_and_title(&file_name);
+            return Some(ParsedShareDescriptor::Song(SharedSongDescriptor {
+                hash: if Self::is_hex32(&hash) { hash } else { String::new() },
+                hash320: if Self::is_hex32(&hash320) { hash320 } else { String::new() },
+                hash_flac: if Self::is_hex32(&hash_flac) { hash_flac } else { String::new() },
+                album_id,
+                album_audio_id,
+                audio_id: String::new(),
+                title_hint,
+                artist_hint,
+                album_name_hint: String::new(),
+                cover_url_hint: String::new(),
+                duration_sec_hint: if duration_sec > 10000 { duration_sec / 1000 } else { duration_sec },
+                source_url: source_url.to_string(),
+            }));
+        }
+
+        let nested_url = Self::val_str(inner, "url");
+        if !nested_url.is_empty() {
+            if let Some(d) = Self::parse_share_url_parameters_only(&nested_url) {
+                return Some(d);
+            }
+        }
+        None
+    }
+
+    fn parse_share_scheme_uri(scheme_uri: &str) -> Option<ParsedShareDescriptor> {
+        let q_idx = scheme_uri.find('?')?;
+        if q_idx + 1 >= scheme_uri.len() {
+            return None;
+        }
+        let raw_query = &scheme_uri[q_idx + 1..];
+        let decoded = Self::url_decode_repeatedly(raw_query, 3);
+        if decoded.trim_start().starts_with('{') {
+            if let Some(desc) = Self::parse_wakeup_json_payload(decoded.trim(), scheme_uri) {
+                return Some(desc);
+            }
+        }
+        let query_map = Self::parse_query_kv(raw_query);
+        for key in ["data", "params", "json", "Json", "jsonStr"] {
+            if let Some(v) = query_map.get(key) {
+                let decoded_val = Self::url_decode_repeatedly(v, 3);
+                if decoded_val.trim_start().starts_with('{') {
+                    if let Some(desc) =
+                        Self::parse_wakeup_json_payload(decoded_val.trim(), scheme_uri)
+                    {
+                        return Some(desc);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn parse_share_url_parameters_only(url: &str) -> Option<ParsedShareDescriptor> {
+        static SONGLIST_GCID_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"(?i)/songlist/(gcid_[a-zA-Z0-9_]+)"#).unwrap()
+            });
+        static PLIST_PATH_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"(?i)/plist/list/([a-zA-Z0-9_]+)"#).unwrap()
+            });
+        static MIXSONG_PATH_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"(?i)/mixsong/([a-zA-Z0-9]+)\.html"#).unwrap()
+            });
+
+        let (before_frag, frag_part) = match url.split_once('#') {
+            Some((a, b)) => (a, b),
+            None => (url, ""),
+        };
+        let query_part = before_frag.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let mut params = Self::parse_query_kv(query_part);
+        if !frag_part.trim().is_empty() {
+            let clean_frag = frag_part.trim_start_matches('?').trim_start_matches('/');
+            for (k, v) in Self::parse_query_kv(clean_frag) {
+                params.entry(k).or_insert(v);
+            }
+        }
+
+        // 1) 应用宝微下载 android_schema 参数
+        if let Some(schema_param) = params.get("android_schema") {
+            let decoded_schema = Self::url_decode_repeatedly(schema_param, 3);
+            if let Some(desc) = Self::parse_share_scheme_uri(&decoded_schema) {
+                return Some(desc);
+            }
+            if decoded_schema.trim_start().starts_with('{') {
+                if let Some(desc) = Self::parse_wakeup_json_payload(decoded_schema.trim(), url) {
+                    return Some(desc);
+                }
+            }
+        }
+
+        // 2) weixin.html / middle2native 中的 JSON 参数
+        for json_key in ["data", "params", "jsonStr", "Json"] {
+            if let Some(raw_json) = params.get(json_key) {
+                let decoded_json = Self::url_decode_repeatedly(raw_json, 3);
+                if decoded_json.trim_start().starts_with('{') {
+                    if let Some(desc) = Self::parse_wakeup_json_payload(decoded_json.trim(), url) {
+                        return Some(desc);
+                    }
+                }
+            }
+        }
+
+        // 3) 歌单标识（global_collection_id / global_specialid / gcid / src_cid / specialid / listid / /songlist/gcid_xxx / /plist/list/xxx）
+        let lower_url = url.to_ascii_lowercase();
+        let path_gcid = SONGLIST_GCID_RE
+            .captures(url)
+            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            .unwrap_or_default();
+        let plist_path_id = PLIST_PATH_RE
+            .captures(url)
+            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            .unwrap_or_default();
+        let raw_src_cid = params
+            .get("src_cid")
+            .map(|s| Self::url_decode_repeatedly(s, 2))
+            .unwrap_or_default();
+        let normalized_src_cid = if raw_src_cid.is_empty() {
+            String::new()
+        } else if raw_src_cid.to_ascii_lowercase().starts_with("gcid_")
+            || raw_src_cid.to_ascii_lowercase().starts_with("collection_")
+        {
+            raw_src_cid
+        } else if lower_url.contains("/songlist/") {
+            format!("gcid_{}", raw_src_cid)
+        } else {
+            String::new()
+        };
+
+        let raw_gcid = [
+            params.get("global_collection_id").cloned(),
+            params.get("global_specialid").cloned(),
+            params.get("gcid").cloned(),
+            params.get("globalCollectionId").cloned(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|v| Self::url_decode_repeatedly(&v, 2))
+        .find(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if !path_gcid.is_empty() {
+                path_gcid
+            } else if !normalized_src_cid.is_empty() {
+                normalized_src_cid
+            } else if plist_path_id.to_ascii_lowercase().starts_with("collection_")
+                || plist_path_id.to_ascii_lowercase().starts_with("gcid_")
+            {
+                plist_path_id.clone()
+            } else {
+                String::new()
+            }
+        });
+
+        let gcid = if raw_gcid.to_ascii_lowercase().starts_with("gcid_") {
+            let decoded = Self::decode_kugou_gcid_to_collection_id(&raw_gcid);
+            if decoded.is_empty() { raw_gcid } else { decoded }
+        } else {
+            raw_gcid
+        };
+
+        let mut special_id = [
+            params.get("specialid"),
+            params.get("special_id"),
+            params.get("specialID"),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty() && s != "0")
+        .unwrap_or_default();
+
+        if special_id.is_empty() && !plist_path_id.is_empty() {
+            let lower_p = plist_path_id.to_ascii_lowercase();
+            if plist_path_id.chars().all(|c| c.is_ascii_digit()) {
+                special_id = plist_path_id.clone();
+            } else if !lower_p.starts_with("collection_") && !lower_p.starts_with("gcid_") {
+                special_id = Self::decode_kugou_base36_with_checksum(&plist_path_id);
+            }
+        }
+
+        let list_id = [
+            params.get("listid"),
+            params.get("list_id"),
+            params.get("listID"),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+        let uid = [
+            params.get("uid"),
+            params.get("userid"),
+            params.get("userID"),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+
+        let is_playlist_path = lower_url.contains("zlist.html")
+            || lower_url.contains("/plist/")
+            || lower_url.contains("/songlist/")
+            || lower_url.contains("v-a00a45b0")
+            || params
+                .get("share_type")
+                .map(|v| v.eq_ignore_ascii_case("collect"))
+                .unwrap_or(false)
+            || params.get("ctype").map(|v| v == "1").unwrap_or(false)
+            || params.get("cType").map(|v| v == "1").unwrap_or(false);
+
+        if !gcid.is_empty() || !special_id.is_empty() || (is_playlist_path && !list_id.is_empty()) {
+            let resolved_special_id = if !special_id.is_empty() {
+                special_id
+            } else if gcid.to_ascii_lowercase().starts_with("collection_") {
+                gcid.split('_')
+                    .nth(3)
+                    .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+                    .unwrap_or("")
+                    .to_string()
+            } else if list_id.chars().all(|c| c.is_ascii_digit()) && list_id != "2" && list_id != "0"
+            {
+                list_id.clone()
+            } else {
+                String::new()
+            };
+            return Some(ParsedShareDescriptor::Playlist(SharedPlaylistDescriptor {
+                global_collection_id: gcid,
+                special_id: resolved_special_id,
+                list_id,
+                uid,
+                title_hint: String::new(),
+                creator_name_hint: String::new(),
+                cover_url_hint: String::new(),
+                embedded_songs: Vec::new(),
+                source_url: url.to_string(),
+            }));
+        }
+
+        // 4) 单曲标识（hash / album_audio_id / e_album_audio_id / mixsongid / /mixsong/xxx.html）
+        let hash = [
+            params.get("hash"),
+            params.get("Hash"),
+            params.get("fileHash"),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim().to_ascii_uppercase())
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+        let album_id = [
+            params.get("album_id"),
+            params.get("albumId"),
+            params.get("albumid"),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty() && s != "0")
+        .unwrap_or_default();
+        let mixsong_token = MIXSONG_PATH_RE
+            .captures(url)
+            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            .unwrap_or_default();
+        let decoded_mix_id = params
+            .get("e_album_audio_id")
+            .map(|v| Self::decode_kugou_base36_with_checksum(v))
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                if mixsong_token.is_empty() {
+                    None
+                } else if mixsong_token.chars().all(|c| c.is_ascii_digit()) {
+                    Some(mixsong_token)
+                } else {
+                    let dec = Self::decode_kugou_base36_with_checksum(&mixsong_token);
+                    if dec.is_empty() { None } else { Some(dec) }
+                }
+            })
+            .unwrap_or_default();
+        let album_audio_id = [
+            params.get("album_audio_id").cloned(),
+            params.get("albumAudioId").cloned(),
+            params.get("mixsongid").cloned(),
+            params.get("mix_song_id").cloned(),
+            if decoded_mix_id.is_empty() { None } else { Some(decoded_mix_id) },
+        ]
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty() && s != "0")
+        .unwrap_or_default();
+        let audio_id = [params.get("audio_id"), params.get("audioId")]
+            .into_iter()
+            .flatten()
+            .map(|s| s.trim().to_string())
+            .find(|s| !s.is_empty() && s != "0")
+            .unwrap_or_default();
+
+        if Self::is_hex32(&hash)
+            || (!album_audio_id.is_empty() && album_audio_id.chars().all(|c| c.is_ascii_digit()))
+        {
+            return Some(ParsedShareDescriptor::Song(SharedSongDescriptor {
+                hash: if Self::is_hex32(&hash) { hash } else { String::new() },
+                hash320: String::new(),
+                hash_flac: String::new(),
+                album_id,
+                album_audio_id,
+                audio_id,
+                title_hint: String::new(),
+                artist_hint: String::new(),
+                album_name_hint: String::new(),
+                cover_url_hint: String::new(),
+                duration_sec_hint: 0,
+                source_url: url.to_string(),
+            }));
+        }
+
+        None
+    }
+
+    /// 第一级（纯本地零网络开销）：直接从分享文本、Scheme、Query、Fragment、微风口令中解包歌曲或歌单标识
+    pub(crate) fn parse_share_text_directly(raw_text: &str) -> Option<ParsedShareDescriptor> {
+        static KGHASH_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+            regex::Regex::new(r#"(?i)#KGHash:([0-9a-fA-F]{32})#"#).unwrap()
+        });
+        static BARE_COLL_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"\b(collection_\d+_\d+_\d+_\d+)\b"#).unwrap()
+            });
+        static BARE_GCID_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"(?i)\b(gcid_[0-9a-z_]{6,})\b"#).unwrap()
+            });
+
         let text = raw_text.trim();
+        if text.is_empty() {
+            return None;
+        }
+
+        // 1. 候选 Scheme 与受信任 URL 逐个解析
+        for url in Self::extract_share_candidate_urls(text) {
+            if url.to_ascii_lowercase().starts_with("kugou") {
+                if let Some(desc) = Self::parse_share_scheme_uri(&url) {
+                    return Some(desc);
+                }
+            } else if let Some(desc) = Self::parse_share_url_parameters_only(&url) {
+                return Some(desc);
+            }
+        }
+
+        // 2. 兼容旧版微风口令 `#KGHash:<32hex>#`
+        if let Some(caps) = KGHASH_RE.captures(text) {
+            if let Some(m) = caps.get(1) {
+                let h = m.as_str().to_ascii_uppercase();
+                if Self::is_hex32(&h) {
+                    return Some(ParsedShareDescriptor::Song(SharedSongDescriptor {
+                        hash: h,
+                        ..Default::default()
+                    }));
+                }
+            }
+        }
+
+        // 3. 裸 JSON
+        if text.starts_with('{') && text.ends_with('}') {
+            if let Some(desc) = Self::parse_wakeup_json_payload(text, "") {
+                return Some(desc);
+            }
+        }
+
+        // 4. 裸 collection_xxx / gcid_xxx / 纯数字 specialId
+        if let Some(caps) = BARE_COLL_RE.captures(text) {
+            let gcid = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+            let sp = gcid
+                .split('_')
+                .nth(3)
+                .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or("")
+                .to_string();
+            return Some(ParsedShareDescriptor::Playlist(SharedPlaylistDescriptor {
+                global_collection_id: gcid,
+                special_id: sp,
+                ..Default::default()
+            }));
+        }
+        if let Some(caps) = BARE_GCID_RE.captures(text) {
+            let raw_g = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let decoded = Self::decode_kugou_gcid_to_collection_id(raw_g);
+            if !decoded.is_empty() {
+                let sp = decoded
+                    .split('_')
+                    .nth(3)
+                    .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
+                    .unwrap_or("")
+                    .to_string();
+                return Some(ParsedShareDescriptor::Playlist(SharedPlaylistDescriptor {
+                    global_collection_id: decoded,
+                    special_id: sp,
+                    ..Default::default()
+                }));
+            }
+        }
+        if text.len() >= 4 && text.len() <= 16 && text.chars().all(|c| c.is_ascii_digit()) {
+            return Some(ParsedShareDescriptor::Playlist(SharedPlaylistDescriptor {
+                special_id: text.to_string(),
+                ..Default::default()
+            }));
+        }
+
+        None
+    }
+
+    /// 第三级（HTML 落地页解析）：支持 `window.$output`、`var phpParam`（优先 `album_img` 过滤 `singerimg`）、
+    /// `var globalCollectionId`、`data-global-collection-id` (Base64)、`var specialid`、`var dataFromSmarty`
+    pub(crate) fn parse_share_html_content(
+        html: &str,
+        current_url: &str,
+    ) -> Option<ParsedShareDescriptor> {
+        use base64::Engine as _;
+
+        static PHP_PARAM_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"(?s)var\s+phpParam\s*=\s*(\{.*?\})\s*;"#).unwrap()
+            });
+        static SMARTY_DATA_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"(?s)var\s+dataFromSmarty\s*=\s*(\[.*?\])\s*;"#).unwrap()
+            });
+        static GCID_VAR_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"(?:var\s+)?globalCollectionId\s*=\s*["']([^"']+)["']"#)
+                    .unwrap()
+            });
+        static SPECIAL_ID_VAR_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(
+                    r#"(?:var\s+)?specialid\s*=\s*(?:Number\(\s*)?["']?(\d+)["']?\s*\)?"#,
+                )
+                .unwrap()
+            });
+        static SPECIAL_NAME_VAR_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"(?:var\s+)?specialname\s*=\s*["']([^"']*)["']"#).unwrap()
+            });
+        static DATA_GCID_ATTR_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"data-global-collection-id\s*=\s*["']([^"']+)["']"#).unwrap()
+            });
+        static JSON_SPECIAL_ID_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r#"(?i)"specialid"\s*:\s*["']?(\d{4,})["']?"#).unwrap()
+            });
+        static JSON_GCID_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(
+                    r#"(?i)"global_(?:special|collection)_id"\s*:\s*["'](collection_[^"']+)["']"#,
+                )
+                .unwrap()
+            });
+
+        if html.trim().is_empty() {
+            return None;
+        }
+
+        // 0. 官方酷狗音乐歌单分享页 `window.$output = {...}`
+        if let Some(output_json_str) = Self::extract_balanced_json_object(html, "window.$output") {
+            if let Ok(root_obj) = serde_json::from_str::<Value>(&output_json_str) {
+                let raw_gcid = Self::val_str(&root_obj, "gcid");
+                let gcid = if raw_gcid.to_ascii_lowercase().starts_with("gcid_") {
+                    let dec = Self::decode_kugou_gcid_to_collection_id(&raw_gcid);
+                    if dec.is_empty() { raw_gcid } else { dec }
+                } else {
+                    raw_gcid
+                };
+                let info_obj = root_obj.get("info");
+                let list_info = info_obj.and_then(|v| v.get("listinfo"));
+                let special_id = list_info
+                    .map(|v| Self::val_str(v, "specialid"))
+                    .filter(|s| !s.is_empty() && s != "0")
+                    .unwrap_or_else(|| {
+                        let s = Self::val_str(&root_obj, "specialid");
+                        if s != "0" { s } else { String::new() }
+                    });
+                let title = list_info
+                    .map(|v| {
+                        let n = Self::val_str(v, "name");
+                        if !n.is_empty() { n } else { Self::val_str(v, "specialname") }
+                    })
+                    .unwrap_or_default();
+                let creator = list_info
+                    .map(|v| {
+                        let u = Self::val_str(v, "username");
+                        if !u.is_empty() { u } else { Self::val_str(v, "nickname") }
+                    })
+                    .unwrap_or_default();
+                let cover = list_info
+                    .map(|v| {
+                        let img = Self::val_str(v, "img");
+                        let raw = if !img.is_empty() { img } else { Self::val_str(v, "pic") };
+                        raw.replace("{size}", "480")
+                    })
+                    .unwrap_or_default();
+
+                let mut embedded_songs = Vec::new();
+                if let Some(list_arr) = info_obj.and_then(|v| v.get("list")).and_then(|v| v.as_array()) {
+                    for s_obj in list_arr {
+                        if !s_obj.is_object() {
+                            continue;
+                        }
+                        let h = Self::val_str(s_obj, "hash").to_ascii_uppercase();
+                        let raw_name = {
+                            let n = Self::val_str(s_obj, "name");
+                            if !n.is_empty() { n } else { Self::val_str(s_obj, "filename") }
+                        };
+                        let (s_artist, s_title) = Self::split_artist_and_title(&raw_name);
+                        let a_id = Self::val_str(s_obj, "album_id");
+                        let au_id = Self::val_str(s_obj, "audio_id");
+                        let mix_id = {
+                            let m1 = Self::val_str(s_obj, "album_audio_id");
+                            if !m1.is_empty() { m1 } else { Self::val_str(s_obj, "mixsongid") }
+                        };
+                        let timelen = Self::val_i64(s_obj, "timelen")
+                            .filter(|&v| v > 0)
+                            .or_else(|| Self::val_i64(s_obj, "duration"))
+                            .unwrap_or(0);
+                        let dur_sec = if timelen > 1000 { timelen / 1000 } else { timelen };
+                        let s_cover = s_obj
+                            .get("trans_param")
+                            .map(|tp| Self::val_str(tp, "union_cover").replace("{size}", "480"))
+                            .unwrap_or_default();
+                        if Self::is_hex32(&h) || !mix_id.is_empty() || !au_id.is_empty() {
+                            embedded_songs.push(SharedSongDescriptor {
+                                hash: if Self::is_hex32(&h) { h } else { String::new() },
+                                album_id: if a_id != "0" { a_id } else { String::new() },
+                                album_audio_id: if mix_id != "0" { mix_id } else { String::new() },
+                                audio_id: if au_id != "0" { au_id } else { String::new() },
+                                title_hint: if s_title.is_empty() { raw_name } else { s_title },
+                                artist_hint: s_artist,
+                                cover_url_hint: s_cover,
+                                duration_sec_hint: dur_sec,
+                                source_url: current_url.to_string(),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+
+                if !special_id.is_empty() || !gcid.is_empty() || !embedded_songs.is_empty() {
+                    return Some(ParsedShareDescriptor::Playlist(SharedPlaylistDescriptor {
+                        global_collection_id: gcid,
+                        special_id,
+                        list_id: String::new(),
+                        uid: String::new(),
+                        title_hint: title,
+                        creator_name_hint: creator,
+                        cover_url_hint: cover,
+                        embedded_songs,
+                        source_url: current_url.to_string(),
+                    }));
+                }
+            }
+        }
+
+        // 1. 移动端单曲页 `var phpParam = {...};`（严格优先 album_img，过滤 singerimg 歌手头像）
+        let php_json_str = PHP_PARAM_RE
+            .captures(html)
+            .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+            .or_else(|| Self::extract_balanced_json_object(html, "phpParam"));
+        if let Some(json_str) = php_json_str {
+            if let Ok(obj) = serde_json::from_str::<Value>(&json_str) {
+                let song_info_data = obj.get("song_info").and_then(|v| v.get("data"));
+                let hash = {
+                    let h1 = Self::val_str(&obj, "hash");
+                    let raw = if !h1.is_empty() {
+                        h1
+                    } else {
+                        song_info_data.map(|d| Self::val_str(d, "hash")).unwrap_or_default()
+                    };
+                    raw.to_ascii_uppercase()
+                };
+                let hash320 = song_info_data
+                    .map(|d| Self::val_str(d, "320hash").to_ascii_uppercase())
+                    .unwrap_or_default();
+                let hash_flac = song_info_data
+                    .map(|d| Self::val_str(d, "sqhash").to_ascii_uppercase())
+                    .unwrap_or_default();
+                let album_id = {
+                    let a1 = Self::val_str(&obj, "album_id");
+                    if !a1.is_empty() && a1 != "0" {
+                        a1
+                    } else {
+                        song_info_data
+                            .map(|d| Self::val_str(d, "album_id"))
+                            .filter(|s| s != "0")
+                            .unwrap_or_default()
+                    }
+                };
+                let album_audio_id = {
+                    let a1 = Self::val_str(&obj, "album_audio_id");
+                    if !a1.is_empty() && a1 != "0" {
+                        a1
+                    } else {
+                        song_info_data
+                            .map(|d| Self::val_str(d, "album_audio_id"))
+                            .filter(|s| s != "0")
+                            .unwrap_or_default()
+                    }
+                };
+                let audio_id = song_info_data
+                    .map(|d| Self::val_str(d, "audio_id"))
+                    .filter(|s| s != "0")
+                    .unwrap_or_default();
+                let file_name = song_info_data
+                    .map(|d| Self::val_str(d, "fileName"))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| Self::val_str(&obj, "song_name"));
+                let song_name = song_info_data
+                    .map(|d| Self::val_str(d, "songName"))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| Self::val_str(&obj, "song_name"));
+                let singer_name = song_info_data
+                    .map(|d| {
+                        let s = Self::val_str(d, "singerName");
+                        if !s.is_empty() { s } else { Self::val_str(d, "author_name") }
+                    })
+                    .unwrap_or_default();
+                let album_name = song_info_data
+                    .map(|d| Self::val_str(d, "album_name"))
+                    .unwrap_or_default();
+                let raw_album_img = song_info_data
+                    .map(|d| Self::val_str(d, "album_img"))
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        let s = Self::val_str(&obj, "album_img");
+                        if s.is_empty() { None } else { Some(s) }
+                    });
+                let raw_img_url = song_info_data
+                    .map(|d| Self::val_str(d, "imgUrl"))
+                    .filter(|s| !s.is_empty() && !s.to_ascii_lowercase().contains("singerimg"));
+                let img_url = raw_album_img
+                    .or(raw_img_url)
+                    .unwrap_or_default()
+                    .replace("{size}", "480");
+                let duration_sec = song_info_data
+                    .and_then(|d| Self::val_i64(d, "timeLength"))
+                    .unwrap_or(0);
+                let (parsed_artist, parsed_title) = Self::split_artist_and_title(&file_name);
+                let final_title = if !song_name.is_empty() { song_name } else { parsed_title };
+                let final_artist = if !singer_name.is_empty() { singer_name } else { parsed_artist };
+
+                if Self::is_hex32(&hash) || !album_audio_id.is_empty() {
+                    return Some(ParsedShareDescriptor::Song(SharedSongDescriptor {
+                        hash: if Self::is_hex32(&hash) { hash } else { String::new() },
+                        hash320: if Self::is_hex32(&hash320) { hash320 } else { String::new() },
+                        hash_flac: if Self::is_hex32(&hash_flac) { hash_flac } else { String::new() },
+                        album_id,
+                        album_audio_id,
+                        audio_id,
+                        title_hint: final_title,
+                        artist_hint: final_artist,
+                        album_name_hint: album_name,
+                        cover_url_hint: img_url,
+                        duration_sec_hint: duration_sec,
+                        source_url: current_url.to_string(),
+                    }));
+                }
+            }
+        }
+
+        // 2. 移动端歌单页内嵌变量 / Base64 属性 / JSON
+        let gcid_var = GCID_VAR_RE
+            .captures(html)
+            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            .unwrap_or_default();
+        let gcid_b64 = DATA_GCID_ATTR_RE
+            .captures(html)
+            .and_then(|c| c.get(1))
+            .and_then(|m| base64::engine::general_purpose::STANDARD.decode(m.as_str().trim()).ok())
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let gcid_json = JSON_GCID_RE
+            .captures(html)
+            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            .unwrap_or_default();
+        let special_id_var = SPECIAL_ID_VAR_RE
+            .captures(html)
+            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            .filter(|s| s != "0")
+            .or_else(|| {
+                JSON_SPECIAL_ID_RE
+                    .captures(html)
+                    .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            })
+            .unwrap_or_default();
+        let special_name_var = SPECIAL_NAME_VAR_RE
+            .captures(html)
+            .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            .unwrap_or_default();
+
+        let resolved_gcid = [gcid_var, gcid_b64, gcid_json]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .map(|g| {
+                if g.to_ascii_lowercase().starts_with("gcid_") {
+                    let dec = Self::decode_kugou_gcid_to_collection_id(&g);
+                    if dec.is_empty() { g } else { dec }
+                } else {
+                    g
+                }
+            })
+            .unwrap_or_default();
+
+        if !resolved_gcid.is_empty() || (!special_id_var.is_empty() && special_id_var != "0") {
+            return Some(ParsedShareDescriptor::Playlist(SharedPlaylistDescriptor {
+                global_collection_id: resolved_gcid,
+                special_id: special_id_var,
+                title_hint: special_name_var,
+                source_url: current_url.to_string(),
+                ..Default::default()
+            }));
+        }
+
+        // 3. 桌面端分享页 `var dataFromSmarty = [...];`
+        if let Some(arr_str) = SMARTY_DATA_RE
+            .captures(html)
+            .and_then(|c| c.get(1).map(|m| m.as_str()))
+        {
+            if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(arr_str) {
+                let mut songs = Vec::new();
+                for item in arr {
+                    if !item.is_object() {
+                        continue;
+                    }
+                    let h = Self::val_str(&item, "hash").to_ascii_uppercase();
+                    let song_name = Self::val_str(&item, "song_name");
+                    let author_name = Self::val_str(&item, "author_name");
+                    let album_id = Self::val_str(&item, "album_id");
+                    let audio_id = Self::val_str(&item, "audio_id");
+                    let mix_id = {
+                        let m1 = Self::val_str(&item, "album_audio_id");
+                        if !m1.is_empty() { m1 } else { Self::val_str(&item, "mixsongid") }
+                    };
+                    let raw_dur = Self::val_i64(&item, "timelength").unwrap_or(0);
+                    let dur_sec = if raw_dur > 1000 { raw_dur / 1000 } else { raw_dur };
+                    if Self::is_hex32(&h) || !mix_id.is_empty() {
+                        songs.push(SharedSongDescriptor {
+                            hash: if Self::is_hex32(&h) { h } else { String::new() },
+                            album_id: if album_id != "0" { album_id } else { String::new() },
+                            album_audio_id: if mix_id != "0" { mix_id } else { String::new() },
+                            audio_id: if audio_id != "0" { audio_id } else { String::new() },
+                            title_hint: song_name,
+                            artist_hint: author_name,
+                            duration_sec_hint: dur_sec,
+                            source_url: current_url.to_string(),
+                            ..Default::default()
+                        });
+                    }
+                }
+                if !songs.is_empty() {
+                    if let Some(ParsedShareDescriptor::Playlist(mut pl)) =
+                        Self::parse_share_url_parameters_only(current_url)
+                    {
+                        pl.embedded_songs = songs;
+                        return Some(ParsedShareDescriptor::Playlist(pl));
+                    }
+                    let lower_cur = current_url.to_ascii_lowercase();
+                    if lower_cur.contains("zlist.html")
+                        || lower_cur.contains("plist")
+                        || songs.len() > 1
+                    {
+                        return Some(ParsedShareDescriptor::Playlist(SharedPlaylistDescriptor {
+                            embedded_songs: songs,
+                            source_url: current_url.to_string(),
+                            ..Default::default()
+                        }));
+                    }
+                    return Some(ParsedShareDescriptor::Song(songs.remove(0)));
+                }
+            }
+        }
+
+        None
+    }
+
+    fn merge_share_descriptors(
+        older: Option<ParsedShareDescriptor>,
+        newer: ParsedShareDescriptor,
+    ) -> ParsedShareDescriptor {
+        let Some(old) = older else {
+            return newer;
+        };
+        match (old, newer) {
+            (
+                ParsedShareDescriptor::Playlist(o),
+                ParsedShareDescriptor::Playlist(n),
+            ) => ParsedShareDescriptor::Playlist(SharedPlaylistDescriptor {
+                global_collection_id: if !n.global_collection_id.is_empty() {
+                    n.global_collection_id
+                } else {
+                    o.global_collection_id
+                },
+                special_id: if !n.special_id.is_empty() { n.special_id } else { o.special_id },
+                list_id: if !n.list_id.is_empty() { n.list_id } else { o.list_id },
+                uid: if !n.uid.is_empty() { n.uid } else { o.uid },
+                title_hint: if !n.title_hint.is_empty() { n.title_hint } else { o.title_hint },
+                creator_name_hint: if !n.creator_name_hint.is_empty() {
+                    n.creator_name_hint
+                } else {
+                    o.creator_name_hint
+                },
+                cover_url_hint: if !n.cover_url_hint.is_empty() {
+                    n.cover_url_hint
+                } else {
+                    o.cover_url_hint
+                },
+                embedded_songs: if !n.embedded_songs.is_empty() {
+                    n.embedded_songs
+                } else {
+                    o.embedded_songs
+                },
+                source_url: if !n.source_url.is_empty() { n.source_url } else { o.source_url },
+            }),
+            (ParsedShareDescriptor::Song(o), ParsedShareDescriptor::Song(n)) => {
+                ParsedShareDescriptor::Song(SharedSongDescriptor {
+                    hash: if !n.hash.is_empty() { n.hash } else { o.hash },
+                    hash320: if !n.hash320.is_empty() { n.hash320 } else { o.hash320 },
+                    hash_flac: if !n.hash_flac.is_empty() { n.hash_flac } else { o.hash_flac },
+                    album_id: if !n.album_id.is_empty() { n.album_id } else { o.album_id },
+                    album_audio_id: if !n.album_audio_id.is_empty() {
+                        n.album_audio_id
+                    } else {
+                        o.album_audio_id
+                    },
+                    audio_id: if !n.audio_id.is_empty() { n.audio_id } else { o.audio_id },
+                    title_hint: if !n.title_hint.is_empty() { n.title_hint } else { o.title_hint },
+                    artist_hint: if !n.artist_hint.is_empty() {
+                        n.artist_hint
+                    } else {
+                        o.artist_hint
+                    },
+                    album_name_hint: if !n.album_name_hint.is_empty() {
+                        n.album_name_hint
+                    } else {
+                        o.album_name_hint
+                    },
+                    cover_url_hint: if !n.cover_url_hint.is_empty() {
+                        n.cover_url_hint
+                    } else {
+                        o.cover_url_hint
+                    },
+                    duration_sec_hint: if n.duration_sec_hint > 0 {
+                        n.duration_sec_hint
+                    } else {
+                        o.duration_sec_hint
+                    },
+                    source_url: if !n.source_url.is_empty() { n.source_url } else { o.source_url },
+                })
+            }
+            (_, n) => n,
+        }
+    }
+
+    fn is_descriptor_sufficient_without_html(desc: &ParsedShareDescriptor, url: &str) -> bool {
+        match desc {
+            ParsedShareDescriptor::Song(s) => {
+                Self::is_hex32(&s.hash) && !url.to_ascii_lowercase().contains("/mixsong/")
+            }
+            ParsedShareDescriptor::Playlist(p) => {
+                p.global_collection_id
+                    .to_ascii_lowercase()
+                    .starts_with("collection_")
+                    || (!p.special_id.is_empty()
+                        && p.special_id != "0"
+                        && p.special_id.chars().all(|c| c.is_ascii_digit()))
+            }
+        }
+    }
+
+    async fn resolve_http_share_url(
+        &self,
+        start_url: &str,
+        user_agent: &str,
+    ) -> Option<ParsedShareDescriptor> {
+        const MAX_SHARE_HTML_BYTES: usize = 1024 * 1024;
+        if !Self::is_trusted_kugou_share_url(start_url) {
+            return None;
+        }
+        let no_redirect_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(6))
+            .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .ok()?;
+
+        let mut current_url = start_url.to_string();
+        let mut best_partial = Self::parse_share_url_parameters_only(&current_url);
+
+        for _hop in 0..6 {
+            if !Self::is_trusted_kugou_share_url(&current_url) {
+                return best_partial;
+            }
+            if let Some(desc) = Self::parse_share_url_parameters_only(&current_url) {
+                let sufficient = Self::is_descriptor_sufficient_without_html(&desc, &current_url);
+                best_partial = Some(Self::merge_share_descriptors(best_partial, desc));
+                if sufficient {
+                    return best_partial;
+                }
+            }
+
+            let Ok(mut resp) = no_redirect_client
+                .get(&current_url)
+                .header("User-Agent", user_agent)
+                .header(
+                    "Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                )
+                .send()
+                .await
+            else {
+                break;
+            };
+
+            let code = resp.status().as_u16();
+            if (300..=399).contains(&code) {
+                let loc = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                if loc.is_empty() {
+                    return best_partial;
+                }
+                if loc.to_ascii_lowercase().starts_with("kugou") {
+                    if let Some(desc) = Self::parse_share_scheme_uri(&loc) {
+                        return Some(Self::merge_share_descriptors(best_partial, desc));
+                    }
+                }
+                let next_url = reqwest::Url::parse(&current_url)
+                    .ok()
+                    .and_then(|base| base.join(&loc).ok())
+                    .map(|u| u.to_string())
+                    .unwrap_or(loc);
+                if !Self::is_trusted_kugou_share_url(&next_url) {
+                    return best_partial;
+                }
+                if let Some(loc_desc) = Self::parse_share_url_parameters_only(&next_url) {
+                    let sufficient = Self::is_descriptor_sufficient_without_html(&loc_desc, &next_url);
+                    best_partial = Some(Self::merge_share_descriptors(best_partial, loc_desc));
+                    if sufficient {
+                        return best_partial;
+                    }
+                }
+                current_url = next_url;
+            } else {
+                let mut body_buf = Vec::with_capacity(24 * 1024);
+                while let Ok(Some(chunk)) = resp.chunk().await {
+                    let remain = MAX_SHARE_HTML_BYTES.saturating_sub(body_buf.len());
+                    if remain == 0 {
+                        break;
+                    }
+                    let take_len = chunk.len().min(remain);
+                    body_buf.extend_from_slice(&chunk[..take_len]);
+                    if body_buf.len() >= MAX_SHARE_HTML_BYTES {
+                        break;
+                    }
+                }
+                let html = String::from_utf8_lossy(&body_buf);
+                if let Some(html_desc) = Self::parse_share_html_content(&html, &current_url) {
+                    return Some(Self::merge_share_descriptors(best_partial, html_desc));
+                }
+                return best_partial;
+            }
+        }
+        best_partial
+    }
+
+    async fn resolve_shared_single_song(&self, desc: SharedSongDescriptor) -> Option<Song> {
+        let dev = self.store.device();
+        let session = self.store.session();
+
+        let mut hash = desc.hash.trim().to_ascii_lowercase();
+        let mut hash320 = desc.hash320.trim().to_ascii_lowercase();
+        let mut hash_flac = desc.hash_flac.trim().to_ascii_lowercase();
+        let mut title = desc.title_hint.trim().to_string();
+        let mut artist = desc.artist_hint.trim().to_string();
+        let mut album_name = desc.album_name_hint.trim().to_string();
+        let mut album_id = if desc.album_id.trim() != "0" {
+            desc.album_id.trim().to_string()
+        } else {
+            String::new()
+        };
+        let album_audio_id: i64 = desc.album_audio_id.trim().parse().unwrap_or(0);
+        let audio_id: i64 = desc.audio_id.trim().parse().unwrap_or(0);
+        let raw_hint_cover = signer::normalize_image_url(Some(&desc.cover_url_hint));
+        let mut cover_url = if raw_hint_cover.to_ascii_lowercase().contains("singerimg") {
+            String::new()
+        } else {
+            raw_hint_cover.clone()
+        };
+        let mut duration_ms = if desc.duration_sec_hint > 0 {
+            desc.duration_sec_hint * 1000
+        } else {
+            0
+        };
+
+        let entity_id = if album_audio_id > 0 {
+            album_audio_id
+        } else if audio_id > 0 {
+            audio_id
+        } else {
+            0
+        };
+
+        if entity_id > 0
+            && (hash.is_empty() || title.is_empty() || artist.is_empty() || cover_url.is_empty())
+        {
+            let body = json!({
+                "data": [{ "entity_id": entity_id }],
+                "fields": "base,album_info,audio_info"
+            });
+            let mut headers = HashMap::new();
+            headers.insert("x-router".to_string(), "openapi.kugou.com".to_string());
+            headers.insert("KG-TID".to_string(), "238".to_string());
+            if let Ok(resp) = self
+                .transport
+                .call(
+                    "/kmr/v2/audio",
+                    &dev,
+                    session.as_ref(),
+                    HashMap::new(),
+                    Some(body),
+                    "https://gateway.kugou.com",
+                    "POST",
+                    false,
+                    headers,
+                    true,
+                    true,
+                )
+                .await
+            {
+                let item_opt = resp
+                    .data()
+                    .get("data")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .or_else(|| resp.data().as_array().and_then(|a| a.first()));
+                if let Some(item) = item_opt {
+                    let base_obj = item.get("base");
+                    let alb_obj = item.get("album_info");
+                    let audio_obj = item.get("audio_info");
+                    if hash.is_empty() {
+                        hash = [
+                            audio_obj.map(|v| Self::val_str(v, "hash")),
+                            audio_obj.map(|v| Self::val_str(v, "hash_128")),
+                            base_obj.map(|v| Self::val_str(v, "hash")),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .find(|s| Self::is_hex32(s))
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    }
+                    if hash320.is_empty() {
+                        hash320 = [
+                            audio_obj.map(|v| Self::val_str(v, "hash_320")),
+                            audio_obj.map(|v| Self::val_str(v, "320hash")),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .find(|s| Self::is_hex32(s))
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    }
+                    if hash_flac.is_empty() {
+                        hash_flac = [
+                            audio_obj.map(|v| Self::val_str(v, "hash_flac")),
+                            audio_obj.map(|v| Self::val_str(v, "sqhash")),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .find(|s| Self::is_hex32(s))
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    }
+                    if title.is_empty() {
+                        title = [
+                            base_obj.map(|v| Self::val_str(v, "audio_name")),
+                            base_obj.map(|v| Self::val_str(v, "songname")),
+                            Some(Self::val_str(item, "audio_name")),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .find(|s| !s.is_empty())
+                        .unwrap_or_default();
+                    }
+                    if artist.is_empty() {
+                        artist = [
+                            base_obj.map(|v| Self::val_str(v, "author_name")),
+                            base_obj.map(|v| Self::val_str(v, "singername")),
+                            Some(Self::val_str(item, "author_name")),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .find(|s| !s.is_empty())
+                        .unwrap_or_default();
+                    }
+                    if album_name.is_empty() {
+                        album_name = [
+                            alb_obj.map(|v| Self::val_str(v, "album_name")),
+                            base_obj.map(|v| Self::val_str(v, "album_name")),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .find(|s| !s.is_empty())
+                        .unwrap_or_default();
+                    }
+                    if album_id.is_empty() {
+                        album_id = [
+                            alb_obj.map(|v| Self::val_str(v, "album_id")),
+                            base_obj.map(|v| Self::val_str(v, "album_id")),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .find(|s| !s.is_empty() && s != "0")
+                        .unwrap_or_default();
+                    }
+                    if cover_url.is_empty() {
+                        let c = [
+                            alb_obj.map(|v| Self::val_str(v, "sizable_cover")),
+                            alb_obj.map(|v| Self::val_str(v, "cover")),
+                            base_obj.map(|v| Self::val_str(v, "sizable_cover")),
+                            base_obj.map(|v| Self::val_str(v, "img")),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .map(|u| signer::normalize_image_url(Some(&u)))
+                        .find(|u| !u.is_empty() && !u.to_ascii_lowercase().contains("singerimg"))
+                        .unwrap_or_default();
+                        if !c.is_empty() {
+                            cover_url = c;
+                        }
+                    }
+                    if duration_ms <= 0 {
+                        let raw_dur = audio_obj
+                            .and_then(|v| Self::val_i64(v, "duration").or_else(|| Self::val_i64(v, "timelength")))
+                            .unwrap_or(0);
+                        if raw_dur > 0 {
+                            duration_ms = if raw_dur < 10_000 { raw_dur * 1000 } else { raw_dur };
+                        }
+                    }
+                }
+            }
+        }
+
+        if hash.is_empty() && entity_id <= 0 {
+            return None;
+        }
+
+        let seed = Song {
+            id: if !hash.is_empty() { hash.clone() } else { entity_id.to_string() },
+            hash: hash.clone(),
+            hash128: hash.clone(),
+            mp3_hash128: hash.clone(),
+            hash320,
+            hash_flac,
+            title: if title.is_empty() { "未知歌曲".to_string() } else { title },
+            artist: if artist.is_empty() { "未知歌手".to_string() } else { artist },
+            album: album_name,
+            album_id,
+            cover_url,
+            duration_ms,
+            album_audio_id,
+            audio_id,
+            mix_song_id: if album_audio_id > 0 { album_audio_id.to_string() } else { String::new() },
+            ..Default::default()
+        };
+
+        let mut enriched = self
+            .enrich_songs_privilege_lite(vec![seed.clone()])
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or(seed);
+        if enriched.cover_url.trim().is_empty() || enriched.cover_url.to_ascii_lowercase().contains("singerimg") {
+            if !raw_hint_cover.is_empty() && !raw_hint_cover.to_ascii_lowercase().contains("singerimg") {
+                enriched.cover_url = raw_hint_cover;
+            }
+        }
+        if (enriched.title.trim().is_empty() || enriched.title == "未知歌曲")
+            && !enriched.hash.is_empty()
+        {
+            enriched = self.enrich_song_for_share(&enriched).await;
+        }
+        enriched.reconcile_quality_metadata();
+        Some(enriched)
+    }
+
+    /// 39A. 分享歌曲前实时校准官方酷狗标准版 128k MP3 hash、各档位精确 filesize、album_id 与真实 album_audio_id
+    /// 对齐 Android MusicRepository.enrichSongForShare (`m3ws.kugou.com/api/v1/song/get_by_hashs_album`)
+    pub async fn enrich_song_for_share(&self, song: &Song) -> Song {
+        let candidate_hash = [
+            song.mp3_hash128.as_str(),
+            song.hash128.as_str(),
+            song.hash320.as_str(),
+            song.hash_flac.as_str(),
+            song.hash.as_str(),
+        ]
+        .into_iter()
+        .map(|s| s.trim())
+        .find(|s| Self::is_hex32(s))
+        .map(|s| s.to_ascii_uppercase())
+        .unwrap_or_default();
+
+        if candidate_hash.is_empty() {
+            return song.clone();
+        }
+        let album_id_num: i64 = song.album_id.trim().parse().unwrap_or(0);
+        let params_json = format!(
+            "[{{\"hash\":\"{}\",\"albumid\":{}}}]",
+            candidate_hash, album_id_num
+        );
+        let dev = self.store.device();
+        let mut query = HashMap::new();
+        query.insert("params".to_string(), params_json);
+
+        if let Ok(resp) = self
+            .transport
+            .call(
+                "/api/v1/song/get_by_hashs_album",
+                &dev,
+                None,
+                query,
+                None,
+                "https://m3ws.kugou.com",
+                "GET",
+                false,
+                HashMap::new(),
+                false,
+                false,
+            )
+            .await
+        {
+            let item_opt = resp
+                .data()
+                .get("data")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .or_else(|| resp.data().as_array().and_then(|a| a.first()));
+            if let Some(item) = item_opt {
+                let extra = item.get("extra");
+                let mp3_hash = extra
+                    .map(|e| Self::val_str(e, "128hash"))
+                    .filter(|s| Self::is_hex32(s))
+                    .or_else(|| {
+                        let h = Self::val_str(item, "hash");
+                        if Self::is_hex32(&h) { Some(h) } else { None }
+                    })
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let mp3_size = extra
+                    .and_then(|e| Self::val_i64(e, "128filesize"))
+                    .or_else(|| Self::val_i64(item, "filesize"))
+                    .unwrap_or(0);
+                let h320 = extra
+                    .map(|e| Self::val_str(e, "320hash"))
+                    .filter(|s| Self::is_hex32(s))
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let s320 = extra.and_then(|e| Self::val_i64(e, "320filesize")).unwrap_or(0);
+                let h_sq = extra
+                    .map(|e| Self::val_str(e, "sqhash"))
+                    .filter(|s| Self::is_hex32(s))
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let s_sq = extra.and_then(|e| Self::val_i64(e, "sqfilesize")).unwrap_or(0);
+                let resolved_album_id = [
+                    Self::val_str(item, "albumid"),
+                    Self::val_str(item, "album_id"),
+                ]
+                .into_iter()
+                .find(|s| !s.is_empty() && s != "0")
+                .unwrap_or_default();
+                let resolved_aaid = Self::val_i64(item, "album_audio_id").unwrap_or(0);
+                let dur_sec = Self::val_i64(item, "duration")
+                    .filter(|&v| v > 0)
+                    .or_else(|| extra.and_then(|e| Self::val_i64(e, "timelength")).map(|v| v / 1000))
+                    .unwrap_or(0);
+                let raw_name = Self::val_str(item, "filename");
+                let (parsed_artist, parsed_title) = Self::split_artist_and_title(&raw_name);
+
+                let mut updated = song.clone();
+                if !mp3_hash.is_empty() {
+                    updated.mp3_hash128 = mp3_hash.clone();
+                    if updated.hash128.trim().is_empty() {
+                        updated.hash128 = mp3_hash;
+                    }
+                }
+                if mp3_size > 0 {
+                    updated.size128 = mp3_size;
+                }
+                if !h320.is_empty() {
+                    updated.hash320 = h320;
+                }
+                if s320 > 0 {
+                    updated.size320 = s320;
+                }
+                if !h_sq.is_empty() {
+                    updated.hash_flac = h_sq;
+                }
+                if s_sq > 0 {
+                    updated.size_flac = s_sq;
+                }
+                if !resolved_album_id.is_empty() {
+                    updated.album_id = resolved_album_id;
+                }
+                if resolved_aaid > 0 {
+                    updated.album_audio_id = resolved_aaid;
+                    updated.mix_song_id = resolved_aaid.to_string();
+                }
+                if updated.duration_ms <= 0 && dur_sec > 0 {
+                    updated.duration_ms = dur_sec * 1000;
+                }
+                if (updated.title.trim().is_empty() || updated.title == "未知歌曲")
+                    && !parsed_title.is_empty()
+                {
+                    updated.title = parsed_title;
+                }
+                if (updated.artist.trim().is_empty() || updated.artist == "未知歌手")
+                    && !parsed_artist.is_empty()
+                {
+                    updated.artist = parsed_artist;
+                }
+                updated.reconcile_quality_metadata();
+                return updated;
+            }
+        }
+
+        self.enrich_songs_privilege_lite(vec![song.clone()])
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| song.clone())
+    }
+
+    /// 39B. 分享歌单前实时补全 specialId、globalCollectionId、listCreateUserid 与 listCreateListid
+    /// 对齐 Android MusicRepository.enrichPlaylistForShare
+    pub async fn enrich_playlist_for_share(&self, playlist: &Playlist) -> Playlist {
+        let mut merged = playlist.clone();
+        if let Ok(guard) = self.store.state.lock() {
+            let cached = guard.collected_playlist_cache.values().find(|p| {
+                (!merged.global_collection_id.is_empty()
+                    && p.global_collection_id == merged.global_collection_id)
+                    || (!merged.special_id.is_empty() && p.special_id == merged.special_id)
+                    || (!merged.id.is_empty() && p.id == merged.id)
+            });
+            if let Some(c) = cached {
+                if merged.cover_url.trim().is_empty() {
+                    merged.cover_url = c.cover_url.clone();
+                }
+                if merged.description.trim().is_empty() {
+                    merged.description = c.description.clone();
+                }
+                if merged.creator_name.trim().is_empty() {
+                    merged.creator_name = c.creator_name.clone();
+                }
+                if merged.global_collection_id.trim().is_empty() {
+                    merged.global_collection_id = c.global_collection_id.clone();
+                }
+                if merged.list_create_userid.trim().is_empty() {
+                    merged.list_create_userid = c.list_create_userid.clone();
+                }
+                if merged.list_create_listid.trim().is_empty() {
+                    merged.list_create_listid = c.list_create_listid.clone();
+                }
+                if merged.list_create_gid.trim().is_empty() {
+                    merged.list_create_gid = c.list_create_gid.clone();
+                }
+                if merged.special_id.trim().is_empty() {
+                    merged.special_id = c.special_id.clone();
+                }
+            }
+        }
+
+        let has_gid = merged
+            .global_collection_id
+            .to_ascii_lowercase()
+            .starts_with("collection_")
+            || merged
+                .list_create_gid
+                .to_ascii_lowercase()
+                .starts_with("collection_");
+        let has_special_id = !merged.special_id.trim().is_empty() && merged.special_id.trim() != "0";
+        if has_gid && has_special_id {
+            return merged;
+        }
+
+        let query_id = [
+            merged.global_collection_id.as_str(),
+            merged.list_create_gid.as_str(),
+            merged.special_id.as_str(),
+            merged.id.as_str(),
+        ]
+        .into_iter()
+        .map(|s| s.trim())
+        .find(|s| !s.is_empty() && *s != "0")
+        .unwrap_or("");
+        if query_id.is_empty() {
+            return merged;
+        }
+
+        if let Ok(remote) = self.fetch_playlist_info(query_id).await {
+            if merged.cover_url.trim().is_empty() {
+                merged.cover_url = remote.cover_url;
+            }
+            if merged.description.trim().is_empty() {
+                merged.description = remote.description;
+            }
+            if merged.creator_name.trim().is_empty() {
+                merged.creator_name = remote.creator_name;
+            }
+            if !merged
+                .global_collection_id
+                .to_ascii_lowercase()
+                .starts_with("collection_")
+                && !remote.global_collection_id.is_empty()
+            {
+                merged.global_collection_id = remote.global_collection_id;
+            }
+            if merged.list_create_userid.trim().is_empty() {
+                merged.list_create_userid = remote.list_create_userid;
+            }
+            if merged.list_create_listid.trim().is_empty() {
+                merged.list_create_listid = remote.list_create_listid;
+            }
+            if !merged
+                .list_create_gid
+                .to_ascii_lowercase()
+                .starts_with("collection_")
+                && !remote.list_create_gid.is_empty()
+            {
+                merged.list_create_gid = remote.list_create_gid;
+            }
+            if merged.special_id.trim().is_empty() || merged.special_id == "0" {
+                merged.special_id = remote.special_id;
+            }
+            if merged.track_count <= 0 && remote.track_count > 0 {
+                merged.track_count = remote.track_count;
+            }
+        }
+        merged
+    }
+
+    /// 39. 解析酷狗音乐/概念版分享链接、口令、global_collection_id 或歌单文本 (完整对齐 Android KugouShareLinkParser & resolveSharedMusicText)
+    pub async fn parse_shared_music_text(&self, raw_text: &str) -> Result<SharedMusicResolved, String> {
+        const MOBILE_UA: &str = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+        const DESKTOP_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+        let bounded: String = raw_text.trim().chars().take(16384).collect();
+        let text = bounded.trim();
         if text.is_empty() {
             return Err("请输入分享链接、口令或歌单内容".to_string());
         }
 
-        let mut working_text = text.to_string();
+        // 第一级：纯本地零网络开销解包
+        let direct = Self::parse_share_text_directly(text);
+        let mut resolved_desc = if direct.as_ref().map(|d| d.is_complete()).unwrap_or(false) {
+            direct
+        } else {
+            // 第二级：对可信 HTTP 短链/落地页执行逐跳反 SSRF 追踪 + 双 UA 重试 + HTML 深度解析
+            let candidates: Vec<String> = Self::extract_share_candidate_urls(text)
+                .into_iter()
+                .filter(|u| {
+                    u.to_ascii_lowercase().starts_with("http")
+                        && Self::is_trusted_kugou_share_url(u)
+                })
+                .take(4)
+                .collect();
+            let mut found = None;
+            for init_url in candidates {
+                if let Some(d) = self.resolve_http_share_url(&init_url, MOBILE_UA).await {
+                    let complete = d.is_complete();
+                    found = Some(Self::merge_share_descriptors(found, d));
+                    if complete {
+                        break;
+                    }
+                }
+                if let Some(d) = self.resolve_http_share_url(&init_url, DESKTOP_UA).await {
+                    let complete = d.is_complete();
+                    found = Some(Self::merge_share_descriptors(found, d));
+                    if complete {
+                        break;
+                    }
+                }
+            }
+            match (direct, found) {
+                (Some(d), Some(f)) => Some(Self::merge_share_descriptors(Some(d), f)),
+                (None, Some(f)) => Some(f),
+                (Some(d), None) => Some(d),
+                (None, None) => None,
+            }
+        };
 
-        // 1. 若包含短链 (t1.kugou.com / kgurl.cn / m.kugou.com / m3ws.kugou.com 等)，跟随重定向并提取最终 URL 与 HTML
-        static SHARE_URL_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-            regex::Regex::new(r#"https?://[^\s"'<>|，。！？、；：（）【】《》“”‘’]+"#).unwrap()
-        });
-        static SHARE_GCID_RE: once_cell::sync::Lazy<regex::Regex> =
-            once_cell::sync::Lazy::new(|| {
-                regex::Regex::new(
-                    r#"(?:global_collection_id|gcid|globalCollectionId)[=:]["']?(collection_[a-zA-Z0-9_]+|[a-zA-Z0-9_]{16,})"#,
-                )
-                .unwrap()
-            });
-        static SHARE_BARE_COLL_RE: once_cell::sync::Lazy<regex::Regex> =
-            once_cell::sync::Lazy::new(|| {
-                regex::Regex::new(r#"\b(collection_\d+_\d+_\d+_\d+)\b"#).unwrap()
-            });
-        static SHARE_SPECIAL_ID_RE: once_cell::sync::Lazy<regex::Regex> =
-            once_cell::sync::Lazy::new(|| {
-                regex::Regex::new(
-                    r#"(?:specialid|special_id|specialID|listid|list_id)[=:]["']?(\d{4,})"#,
-                )
-                .unwrap()
-            });
-        static SHARE_HASH_RE: once_cell::sync::Lazy<regex::Regex> =
-            once_cell::sync::Lazy::new(|| {
-                regex::Regex::new(r#"(?:hash|Hash|FileHash)[=:]["']?([0-9a-fA-F]{32})"#).unwrap()
-            });
+        if let Some(desc) = resolved_desc.take() {
+            match desc {
+                ParsedShareDescriptor::Song(song_desc) => {
+                    if let Some(resolved_song) = self.resolve_shared_single_song(song_desc).await {
+                        return Ok(SharedMusicResolved {
+                            target_type: "song".to_string(),
+                            song: Some(resolved_song.clone()),
+                            playlist: None,
+                            songs: vec![resolved_song],
+                            message: "成功解析酷狗分享单曲".to_string(),
+                        });
+                    }
+                }
+                ParsedShareDescriptor::Playlist(pl_desc) => {
+                    let mut candidate_ids: Vec<String> = Vec::new();
+                    if pl_desc
+                        .global_collection_id
+                        .to_ascii_lowercase()
+                        .starts_with("collection_")
+                    {
+                        candidate_ids.push(pl_desc.global_collection_id.clone());
+                    }
+                    if !pl_desc.special_id.is_empty() && pl_desc.special_id != "0" {
+                        if !candidate_ids.contains(&pl_desc.special_id) {
+                            candidate_ids.push(pl_desc.special_id.clone());
+                        }
+                    }
+                    if !pl_desc.global_collection_id.is_empty()
+                        && !candidate_ids.contains(&pl_desc.global_collection_id)
+                    {
+                        candidate_ids.push(pl_desc.global_collection_id.clone());
+                    }
+                    if !pl_desc.list_id.is_empty()
+                        && pl_desc.list_id != "0"
+                        && !candidate_ids.contains(&pl_desc.list_id)
+                    {
+                        candidate_ids.push(pl_desc.list_id.clone());
+                    }
 
-        if let Some(m) = SHARE_URL_RE.find(text) {
-            let candidate_url = m
-                .as_str()
-                .trim_end_matches(&[',', '.', '!', '?', ';', ':', ')', ']', '}', '，', '。', '！', '？', '）', '】', '》'][..]);
-            if Self::is_trusted_kugou_share_url(candidate_url) {
-                if let Ok(mut resp) = self.transport.client.get(candidate_url).send().await {
-                    let final_url = resp.url().to_string();
-                    if Self::is_trusted_kugou_share_url(&final_url) {
-                        // 限制分享落地页最大读取 256KB，防止恶意大文件链接引发 OOM 或正则回溯阻塞
-                        let mut body_buf = Vec::with_capacity(16 * 1024);
-                        while let Ok(Some(chunk)) = resp.chunk().await {
-                            let remain = (256 * 1024usize).saturating_sub(body_buf.len());
-                            if remain == 0 {
-                                break;
+                    let mut playlist_obj: Option<Playlist> = None;
+                    for cid in &candidate_ids {
+                        if let Ok(info) = self.fetch_playlist_info(cid).await {
+                            playlist_obj = Some(info);
+                            break;
+                        }
+                    }
+
+                    let mut songs: Vec<Song> = Vec::new();
+                    let song_fetch_id = playlist_obj
+                        .as_ref()
+                        .map(|p| {
+                            if !p.global_collection_id.is_empty() {
+                                p.global_collection_id.clone()
+                            } else if !p.special_id.is_empty() {
+                                p.special_id.clone()
+                            } else {
+                                p.id.clone()
                             }
-                            let take_len = chunk.len().min(remain);
-                            body_buf.extend_from_slice(&chunk[..take_len]);
-                            if body_buf.len() >= 256 * 1024 {
+                        })
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| candidate_ids.first().cloned())
+                        .unwrap_or_default();
+
+                    if !song_fetch_id.is_empty() {
+                        songs = self.fetch_playlist_songs(&song_fetch_id).await.unwrap_or_default();
+                    }
+                    if songs.is_empty() {
+                        for cid in &candidate_ids {
+                            if cid == &song_fetch_id {
+                                continue;
+                            }
+                            let alt = self.fetch_playlist_songs(cid).await.unwrap_or_default();
+                            if !alt.is_empty() {
+                                songs = alt;
                                 break;
                             }
                         }
-                        let html = String::from_utf8_lossy(&body_buf);
-                        working_text = format!("{}\n{}\n{}", working_text, final_url, html);
+                    }
+                    if songs.is_empty() && !pl_desc.embedded_songs.is_empty() {
+                        let raw_embedded: Vec<Song> = pl_desc
+                            .embedded_songs
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, s)| {
+                                let h = s.hash.to_ascii_lowercase();
+                                let aaid: i64 = s.album_audio_id.parse().unwrap_or(0);
+                                let aid: i64 = s.audio_id.parse().unwrap_or(0);
+                                Song {
+                                    id: if !h.is_empty() {
+                                        h.clone()
+                                    } else if !s.album_audio_id.is_empty() {
+                                        s.album_audio_id.clone()
+                                    } else {
+                                        format!("shared_{}", idx)
+                                    },
+                                    hash: h.clone(),
+                                    hash128: h.clone(),
+                                    mp3_hash128: h,
+                                    hash320: s.hash320.to_ascii_lowercase(),
+                                    hash_flac: s.hash_flac.to_ascii_lowercase(),
+                                    title: if s.title_hint.is_empty() {
+                                        "未知歌曲".to_string()
+                                    } else {
+                                        s.title_hint.clone()
+                                    },
+                                    artist: if s.artist_hint.is_empty() {
+                                        "未知歌手".to_string()
+                                    } else {
+                                        s.artist_hint.clone()
+                                    },
+                                    album: s.album_name_hint.clone(),
+                                    album_id: s.album_id.clone(),
+                                    cover_url: signer::normalize_image_url(Some(&s.cover_url_hint)),
+                                    duration_ms: s.duration_sec_hint * 1000,
+                                    album_audio_id: aaid,
+                                    audio_id: aid,
+                                    mix_song_id: s.album_audio_id.clone(),
+                                    ..Default::default()
+                                }
+                            })
+                            .collect();
+                        songs = self.enrich_songs_privilege_lite(raw_embedded).await;
+                    }
+
+                    let target_id = playlist_obj
+                        .as_ref()
+                        .map(|p| p.id.clone())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| candidate_ids.first().cloned())
+                        .unwrap_or_default();
+
+                    let effective_playlist = match playlist_obj {
+                        Some(mut pl) => {
+                            if pl.track_count <= 0 && !songs.is_empty() {
+                                pl.track_count = songs.len() as i32;
+                            }
+                            if pl.cover_url.trim().is_empty() {
+                                if !pl_desc.cover_url_hint.is_empty() {
+                                    pl.cover_url = signer::normalize_image_url(Some(&pl_desc.cover_url_hint));
+                                } else if let Some(first) = songs.first() {
+                                    pl.cover_url = first.cover_url.clone();
+                                }
+                            }
+                            Some(pl)
+                        }
+                        None if !target_id.is_empty() || !songs.is_empty() => {
+                            let resolved_id = if !pl_desc.special_id.is_empty() {
+                                pl_desc.special_id.clone()
+                            } else if !target_id.is_empty() {
+                                target_id.clone()
+                            } else {
+                                format!("shared_playlist_{}", Utc::now().timestamp_millis())
+                            };
+                            let cover = {
+                                let hint = signer::normalize_image_url(Some(&pl_desc.cover_url_hint));
+                                if !hint.is_empty() {
+                                    hint
+                                } else {
+                                    songs
+                                        .first()
+                                        .map(|s| s.cover_url.clone())
+                                        .unwrap_or_default()
+                                }
+                            };
+                            Some(Playlist {
+                                id: resolved_id,
+                                title: if !pl_desc.title_hint.is_empty() {
+                                    pl_desc.title_hint.clone()
+                                } else {
+                                    "酷狗分享歌单".to_string()
+                                },
+                                cover_url: cover,
+                                track_count: songs.len() as i32,
+                                description: "来自酷狗音乐分享链接".to_string(),
+                                creator_name: if !pl_desc.creator_name_hint.is_empty() {
+                                    pl_desc.creator_name_hint.clone()
+                                } else {
+                                    "酷狗音乐分享".to_string()
+                                },
+                                is_created_by_me: false,
+                                global_collection_id: if pl_desc
+                                    .global_collection_id
+                                    .to_ascii_lowercase()
+                                    .starts_with("collection_")
+                                {
+                                    pl_desc.global_collection_id.clone()
+                                } else {
+                                    String::new()
+                                },
+                                list_create_userid: pl_desc.uid.clone(),
+                                list_create_listid: if !pl_desc.list_id.is_empty() {
+                                    pl_desc.list_id.clone()
+                                } else {
+                                    pl_desc.special_id.clone()
+                                },
+                                list_create_gid: pl_desc.global_collection_id.clone(),
+                                special_id: pl_desc.special_id.clone(),
+                                ..Default::default()
+                            })
+                        }
+                        None => None,
+                    };
+
+                    if let Some(pl) = effective_playlist {
+                        return Ok(SharedMusicResolved {
+                            target_type: "playlist".to_string(),
+                            song: None,
+                            playlist: Some(pl),
+                            songs,
+                            message: "成功解析酷狗分享歌单".to_string(),
+                        });
                     }
                 }
             }
         }
 
-        // 2. 提取 global_collection_id (如 collection_3_... 或 gcid=...)
-        let resolved_gcid = SHARE_BARE_COLL_RE
-            .captures(&working_text)
-            .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
-            .or_else(|| {
-                SHARE_GCID_RE
-                    .captures(&working_text)
-                    .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
-            })
-            .or_else(|| {
-                if text.starts_with("collection_") {
-                    Some(text.to_string())
-                } else {
-                    None
+        // 第四级：逐行歌名解析匹配（仅当输入不是纯酷狗 URL 时，避免把失效链接本身拿去搜索）
+        let looks_like_only_url = text.starts_with("http://")
+            || text.starts_with("https://")
+            || text.to_ascii_lowercase().starts_with("kugou");
+        if !looks_like_only_url {
+            let mut matched_songs = Vec::new();
+            for line in text.lines() {
+                let clean_line = line
+                    .trim()
+                    .trim_start_matches(|c: char| {
+                        c.is_ascii_digit() || c == '.' || c == '、' || c == '-'
+                    })
+                    .trim();
+                if clean_line.len() >= 2
+                    && !clean_line.starts_with("http")
+                    && !clean_line.contains("kugou.com")
+                    && !clean_line.contains("kgurl.cn")
+                {
+                    if let Ok(mut res) = self.search_songs(clean_line, 1, 1).await {
+                        if let Some(first) = res.pop() {
+                            matched_songs.push(first);
+                        }
+                    }
+                    if matched_songs.len() >= 50 {
+                        break;
+                    }
                 }
-            });
+            }
 
-        let resolved_special_id = SHARE_SPECIAL_ID_RE
-            .captures(&working_text)
-            .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
-            .or_else(|| {
-                if text.chars().all(|c| c.is_ascii_digit()) && text.len() >= 4 {
-                    Some(text.to_string())
-                } else {
-                    None
-                }
-            });
-
-        if let Some(pid) = resolved_gcid.or(resolved_special_id) {
-            let songs = self.fetch_playlist_songs(&pid).await.unwrap_or_default();
-            if !songs.is_empty() {
-                let pl = Playlist {
-                    id: pid.clone(),
-                    title: format!("导入歌单 ({})", &pid[..pid.len().min(12)]),
-                    cover_url: songs.first().map(|s| s.cover_url.clone()).unwrap_or_default(),
-                    track_count: songs.len() as i32,
-                    description: "通过酷狗分享链接/集合 ID 解析导入".to_string(),
-                    creator_name: "酷狗概念版分享".to_string(),
-                    is_created_by_me: false,
-                    is_favorite: false,
-                    is_liked: false,
-                    list_id: 0,
-                    global_collection_id: pid,
-                    ..Default::default()
-                };
+            if !matched_songs.is_empty() {
                 return Ok(SharedMusicResolved {
                     target_type: "playlist".to_string(),
-                    song: None,
-                    playlist: Some(pl),
-                    songs,
-                    message: "成功解析分享歌单".to_string(),
+                    song: matched_songs.first().cloned(),
+                    playlist: None,
+                    songs: matched_songs,
+                    message: "成功匹配歌单曲目列表".to_string(),
                 });
             }
-        }
-
-        // 3. 提取 32 位单曲 Hash 或 mixsongid / album_audio_id
-        if let Some(caps) = SHARE_HASH_RE.captures(&working_text) {
-            if let Some(h_match) = caps.get(1) {
-                let hash_str = h_match.as_str().to_lowercase();
-                let seed = Song {
-                    id: hash_str.clone(),
-                    hash: hash_str.clone(),
-                    hash128: hash_str,
-                    title: "分享单曲".to_string(),
-                    artist: "酷狗歌手".to_string(),
-                    ..Default::default()
-                };
-                let enriched = self
-                    .enrich_songs_privilege_lite(vec![seed])
-                    .await
-                    .into_iter()
-                    .next()
-                    .unwrap_or_default();
-                if !enriched.hash.is_empty() {
-                    return Ok(SharedMusicResolved {
-                        target_type: "song".to_string(),
-                        song: Some(enriched.clone()),
-                        playlist: None,
-                        songs: vec![enriched],
-                        message: "成功解析分享单曲".to_string(),
-                    });
-                }
-            }
-        }
-
-        // 4. 逐行歌名解析匹配
-        let mut matched_songs = Vec::new();
-        for line in text.lines() {
-            let clean_line = line
-                .trim()
-                .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '、' || c == '-')
-                .trim();
-            if clean_line.len() >= 2 && !clean_line.starts_with("http") {
-                if let Ok(mut res) = self.search_songs(clean_line, 1, 1).await {
-                    if let Some(first) = res.pop() {
-                        matched_songs.push(first);
-                    }
-                }
-                if matched_songs.len() >= 50 {
-                    break;
-                }
-            }
-        }
-
-        if !matched_songs.is_empty() {
-            return Ok(SharedMusicResolved {
-                target_type: "playlist".to_string(),
-                song: matched_songs.first().cloned(),
-                playlist: None,
-                songs: matched_songs,
-                message: "成功匹配歌单曲目列表".to_string(),
-            });
         }
 
         Err("未能从输入内容中识别出有效的酷狗歌单或歌曲".to_string())
@@ -3984,5 +5908,155 @@ impl KugouApiService {
             }
         }
         self.get_cache_stats()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SharedSongDescriptor {
+    pub hash: String,
+    pub hash320: String,
+    pub hash_flac: String,
+    pub album_id: String,
+    pub album_audio_id: String,
+    pub audio_id: String,
+    pub title_hint: String,
+    pub artist_hint: String,
+    pub album_name_hint: String,
+    pub cover_url_hint: String,
+    pub duration_sec_hint: i64,
+    pub source_url: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SharedPlaylistDescriptor {
+    pub global_collection_id: String,
+    pub special_id: String,
+    pub list_id: String,
+    pub uid: String,
+    pub title_hint: String,
+    pub creator_name_hint: String,
+    pub cover_url_hint: String,
+    pub embedded_songs: Vec<SharedSongDescriptor>,
+    pub source_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ParsedShareDescriptor {
+    Song(SharedSongDescriptor),
+    Playlist(SharedPlaylistDescriptor),
+}
+
+impl ParsedShareDescriptor {
+    pub fn is_complete(&self) -> bool {
+        match self {
+            ParsedShareDescriptor::Song(s) => {
+                KugouApiService::is_hex32(&s.hash) || !s.album_audio_id.trim().is_empty()
+            }
+            ParsedShareDescriptor::Playlist(p) => {
+                p.global_collection_id
+                    .to_ascii_lowercase()
+                    .starts_with("collection_")
+                    || (!p.special_id.is_empty()
+                        && p.special_id != "0"
+                        && p.special_id.chars().all(|c| c.is_ascii_digit()))
+                    || !p.embedded_songs.is_empty()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod share_parser_tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_kugou_gcid_and_base36_checksum() {
+        assert_eq!(
+            KugouApiService::decode_kugou_gcid_to_collection_id("gcid_3z15kqlufz7yz04d"),
+            "collection_3_2132029040_279_0"
+        );
+        assert_eq!(
+            KugouApiService::decode_kugou_base36_with_checksum("xrojbed"),
+            "56718839"
+        );
+        assert_eq!(
+            KugouApiService::decode_kugou_base36_with_checksum("3sf9931"),
+            "6364989"
+        );
+    }
+
+    #[test]
+    fn test_parse_songlist_gcid_and_window_output_and_phpparam() {
+        let kugou_pl_url = "https://m.kugou.com/songlist/gcid_3z15kqlufz7yz04d/?src_cid=3z15kqlufz7yz04d&uid=1503516299&chl=qq_client&iszlist=1";
+        let desc = KugouApiService::parse_share_url_parameters_only(kugou_pl_url)
+            .expect("should parse gcid songlist url");
+        match desc {
+            ParsedShareDescriptor::Playlist(pl) => {
+                assert_eq!(pl.global_collection_id, "collection_3_2132029040_279_0");
+                assert!(ParsedShareDescriptor::Playlist(pl).is_complete());
+            }
+            _ => panic!("expected playlist descriptor"),
+        }
+
+        let songlist_html = r#"<!DOCTYPE html><html><head><script>
+        window.$output = {"status":1,"gcid":"gcid_3z15kqlufz7yz04d","info":{"listinfo":{"id":"gcid_3z15kqlufz7yz04d","specialid":6364989,"name":"2026最火伤感歌曲：刀刀催人泪，句句皆心碎","count":96,"username":"南音","img":"http://imge.kugou.com/soft/collection/{size}/20240223/20240223163701362709.jpg"},"list":[{"hash":"2F1AE2A3697270C80BB2DB1AEBF89B4D","name":"任夏 - 祝你","timelen":211000,"album_id":84829248,"audio_id":302627804}]}};
+        </script></head><body></body></html>"#;
+        let html_desc = KugouApiService::parse_share_html_content(songlist_html, kugou_pl_url)
+            .expect("should parse window.$output");
+        match html_desc {
+            ParsedShareDescriptor::Playlist(pl) => {
+                assert_eq!(pl.special_id, "6364989");
+                assert_eq!(pl.title_hint, "2026最火伤感歌曲：刀刀催人泪，句句皆心碎");
+                assert_eq!(pl.creator_name_hint, "南音");
+                assert_eq!(pl.embedded_songs.len(), 1);
+                assert_eq!(pl.embedded_songs[0].hash, "2F1AE2A3697270C80BB2DB1AEBF89B4D");
+            }
+            _ => panic!("expected playlist html descriptor"),
+        }
+
+        let std_song_url = "https://m.kugou.com/share/?action=single&hash=6fb3eb3f13cd64df6e9784f6e487bab1&album_id=2059004&e_album_audio_id=xrojbed";
+        let song_desc = KugouApiService::parse_share_text_directly(std_song_url)
+            .expect("should parse standard single share url");
+        match song_desc {
+            ParsedShareDescriptor::Song(s) => {
+                assert_eq!(s.hash, "6FB3EB3F13CD64DF6E9784F6E487BAB1");
+                assert_eq!(s.album_audio_id, "56718839");
+                assert_eq!(s.album_id, "2059004");
+            }
+            _ => panic!("expected song descriptor"),
+        }
+
+        let mix_song_html = r#"<!DOCTYPE html><html><head><script>
+        var phpParam = {"hash":"70C858B654B89B75A5381022E5F29D54","album_id":"554433","album_audio_id":"99887766","song_info":{"data":{"hash":"70C858B654B89B75A5381022E5F29D54","320hash":"11223344556677889900AABBCCDDEEFF","sqhash":"FFEEDDCCBBAA00998877665544332211","songName":"兰亭序","singerName":"周杰伦","album_name":"魔杰座","imgUrl":"http://singerimg.kugou.com/uploadpic/softhead/{size}/20241225/20241225182920226714.jpg","album_img":"http://imge.kugou.com/stdmusic/{size}/20250217/20250217144212257577.jpg","timeLength":253}}};
+        </script></head><body></body></html>"#;
+        let mix_desc = KugouApiService::parse_share_html_content(
+            mix_song_html,
+            "https://m.kugou.com/mixsong/abc123.html",
+        )
+        .expect("should parse phpParam");
+        match mix_desc {
+            ParsedShareDescriptor::Song(s) => {
+                assert_eq!(s.hash, "70C858B654B89B75A5381022E5F29D54");
+                assert_eq!(s.title_hint, "兰亭序");
+                assert_eq!(s.artist_hint, "周杰伦");
+                assert_eq!(
+                    s.cover_url_hint,
+                    "http://imge.kugou.com/stdmusic/480/20250217/20250217144212257577.jpg"
+                );
+                assert_eq!(s.duration_sec_hint, 253);
+            }
+            _ => panic!("expected song html descriptor"),
+        }
+    }
+
+    #[test]
+    fn test_share_url_ssrf_guard() {
+        assert!(KugouApiService::is_trusted_kugou_share_url("https://t1.kugou.com/abc123"));
+        assert!(KugouApiService::is_trusted_kugou_share_url("https://h5.kugou.com/v2/v-5a15aeb1/index.html?hash=123"));
+        assert!(KugouApiService::is_trusted_kugou_share_url("https://a.app.qq.com/o/simple.jsp?pkgname=com.kugou.android"));
+        assert!(!KugouApiService::is_trusted_kugou_share_url("http://127.0.0.1/?kugou.com"));
+        assert!(!KugouApiService::is_trusted_kugou_share_url("https://evil.com/?kugou.com"));
+        assert!(!KugouApiService::is_trusted_kugou_share_url("https://user:pass@m.kugou.com/share/"));
+        assert!(!KugouApiService::is_trusted_kugou_share_url("http://192.168.1.1/kugou.com"));
     }
 }
