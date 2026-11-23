@@ -2415,9 +2415,13 @@ export const useAppStore = defineStore("breezeApp", () => {
     }).catch(() => {});
 
     listen<{ maximized?: boolean }>("bm-main-window-restored", () => {
+      syncDocumentThemeAttr();
       if (typeof window !== "undefined") {
         window.requestAnimationFrame(() => {
           window.dispatchEvent(new Event("resize"));
+          window.requestAnimationFrame(() => {
+            window.dispatchEvent(new Event("resize"));
+          });
         });
       }
     }).catch(() => {});

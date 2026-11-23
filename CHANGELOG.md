@@ -8,7 +8,10 @@
 
 ## [Unreleased]
 
-- 暂无待发布变更。
+### 修复 (Fixed)
+- **修复贴边灵动岛幽灵按钮透出与误触**：为 `MiniPlayerWindow.vue` 双层形态切换补齐原生 `inert`、`visibility: hidden`、不可击穿后代 `pointer-events: none !important` 与卡片动作状态门控，彻底消除贴边收起态悬浮/点击右侧播放钮时错误弹出「返回主窗口」等展开层提示并触发对应功能的问题。
+- **加固贴边灵动岛切屏/切窗/`Win+D` 稳定性并支持全屏智能礼让**：为 `mini_player` 补齐 Win32 `WS_EX_TOOLWINDOW` 透明叠层样式加固、磁吸动画代号防竞态、多显示器切屏越界自动重吸附与后台低开销切窗自愈守护；普通切窗与显示桌面下始终稳定不消失，同屏运行全屏视频/游戏时智能礼让并在退出全屏后自动恢复置顶。
+- **根治最大化进入小窗再返回主窗口底部出现白线**：通过 `SetWindowSubclass` 为主窗口挂载 `WM_NCPAINT` / `WM_NCACTIVATE`（`lparam = -1`）非客户区防白边子类化守护，使用当前主题底色覆盖 `ExcludeClipRect` 以外的非客户区重定向位图；同时在最大化恢复的首轮可见同步中无条件执行锁绘 `SW_RESTORE -> SW_SHOWMAXIMIZED` 复位并同步 `WRY_WEBVIEW` 容器与 WebView2 `Bounds`，彻底消除 Windows 内核在已最大化隐藏窗口重新显示时刷出的纯白底边。
 
 ---
 

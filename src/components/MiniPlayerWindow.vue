@@ -136,6 +136,10 @@ const miniTip = ref<{
 const shellElRef = ref<HTMLElement | null>(null);
 
 function showMiniTip(ev: MouseEvent | FocusEvent, text: string) {
+  if (visualMode.value !== "card") {
+    hideMiniTip();
+    return;
+  }
   if (!text || isPointerDragging.value) return;
   const target = ev.currentTarget as HTMLElement | null;
   const shellEl = shellElRef.value;
@@ -857,25 +861,32 @@ function sendTogglePlay() {
   dispatchMiniCommand({ type: "CMD_TOGGLE_PLAY" });
 }
 function sendPrev() {
+  if (visualMode.value !== "card") return;
   dispatchMiniCommand({ type: "CMD_PREV" });
 }
 function sendNext() {
+  if (visualMode.value !== "card") return;
   dispatchMiniCommand({ type: "CMD_NEXT" });
 }
 function sendCyclePlayMode() {
+  if (visualMode.value !== "card") return;
   dispatchMiniCommand({ type: "CMD_CYCLE_PLAY_MODE" });
 }
 function sendToggleLike() {
+  if (visualMode.value !== "card") return;
   dispatchMiniCommand({ type: "CMD_TOGGLE_LIKE" });
 }
 function sendToggleDesktopLyric() {
+  if (visualMode.value !== "card") return;
   dispatchMiniCommand({ type: "CMD_TOGGLE_DESKTOP_LYRIC" });
 }
 function sendRestoreMain() {
+  if (visualMode.value !== "card") return;
   hideMiniTip();
   dispatchMiniCommand({ type: "CMD_RESTORE_MAIN" });
 }
 function onCardActionClick(action: () => void) {
+  if (visualMode.value !== "card") return;
   if (performance.now() < headerActionShieldUntil) return;
   action();
 }
@@ -922,6 +933,7 @@ function onWheelAdjustVolume(ev: WheelEvent) {
 }
 
 function openVolumeDrawer() {
+  if (visualMode.value !== "card") return;
   if (volumeHoverCloseTimer !== null) {
     window.clearTimeout(volumeHoverCloseTimer);
     volumeHoverCloseTimer = null;
@@ -1319,6 +1331,17 @@ watch([isMiniWindowVisible, isPlaying], () => {
   syncClockLoopDemand();
 });
 
+watch(visualMode, (mode) => {
+  hideMiniTip();
+  if (mode !== "card") {
+    isVolumeOpen.value = false;
+    if (volumeHoverCloseTimer !== null) {
+      window.clearTimeout(volumeHoverCloseTimer);
+      volumeHoverCloseTimer = null;
+    }
+  }
+});
+
 watch(
   () => [resolvedColorScheme.value, lightThemeVariant.value, darkThemeVariant.value],
   ([scheme, lightVar, darkVar]) => {
@@ -1366,7 +1389,12 @@ onMounted(async () => {
             scheduleHandshakeWaves();
             if (dockEdge.value !== "none" && !isIslandExpanded.value) {
               invoke("snap_mini_player_to_edge_cmd", { edge: dockEdge.value }).catch(() => {});
+            } else if (dockEdge.value !== "none" && isIslandExpanded.value) {
+              invoke("expand_mini_player_from_dock_cmd", { edge: dockEdge.value }).catch(() => {});
             }
+          } else {
+            isHoveringShell.value = false;
+            hideMiniTip();
           }
         }
       ).catch(() => null);
@@ -1498,6 +1526,7 @@ onBeforeUnmount(() => {
           class="bm-morph-layer bm-morph-layer-capsule"
           :class="{ 'is-layer-active': visualMode !== 'card' }"
           :aria-hidden="visualMode === 'card'"
+          :inert="visualMode === 'card'"
         >
           <!-- A1: TOP / BOTTOM FLUSH NOTCH DYNAMIC ISLAND (332 x 34px) -->
           <div v-if="capsuleSubMode === 'pill-h'" class="bm-mini-pill-h">
@@ -1610,12 +1639,16 @@ onBeforeUnmount(() => {
           class="bm-morph-layer bm-morph-layer-card"
           :class="{ 'is-layer-active': visualMode === 'card' }"
           :aria-hidden="visualMode !== 'card'"
+          :inert="visualMode !== 'card'"
         >
           <div class="bm-mini-card">
             <!-- Row 1: Stealth Auto-Hide Top Bar (Quality + FX Badge & Window Actions) -->
             <div
               class="bm-card-header"
-              :class="{ 'is-revealed': isHoveringShell || Boolean(snapHintText) }"
+              :class="{
+                'is-revealed':
+                  visualMode === 'card' && (isHoveringShell || Boolean(snapHintText)),
+              }"
             >
               <div class="bm-card-status-pills">
                 <template v-if="snapHintText">
@@ -2133,12 +2166,21 @@ onBeforeUnmount(() => {
 .bm-morph-layer {
   position: absolute;
   box-sizing: border-box;
+  z-index: 1;
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
   will-change: opacity, transform;
   transition:
     opacity 230ms cubic-bezier(0.32, 0, 0.6, 1),
-    transform 460ms cubic-bezier(0.28, 0.94, 0.36, 1);
+    transform 460ms cubic-bezier(0.28, 0.94, 0.36, 1),
+    visibility 0ms linear 230ms;
+}
+
+/* Hard-seal inactive morph layer and ALL descendants so child pointer-events:auto can never hijack hits */
+.bm-morph-layer:not(.is-layer-active),
+.bm-morph-layer:not(.is-layer-active) * {
+  pointer-events: none !important;
 }
 
 /* Card layer locked to intrinsic 436x184 at (0,0) so children never squash or jump across edges */
@@ -2167,12 +2209,15 @@ onBeforeUnmount(() => {
 }
 
 .bm-morph-layer-card.is-layer-active {
+  z-index: 3;
   opacity: 1;
+  visibility: visible;
   pointer-events: auto;
   transform: translate3d(0, 0, 0) scale(1);
   transition:
     opacity 420ms cubic-bezier(0.25, 0.94, 0.35, 1) 105ms,
-    transform 580ms cubic-bezier(0.28, 0.94, 0.36, 1) 25ms;
+    transform 580ms cubic-bezier(0.28, 0.94, 0.36, 1) 25ms,
+    visibility 0ms linear 0ms;
 }
 
 /* Capsule layer locked to intrinsic 332x34 (top/bottom) or 46x96 (left/right) at (0,0) */
@@ -2207,12 +2252,15 @@ onBeforeUnmount(() => {
 }
 
 .bm-morph-layer-capsule.is-layer-active {
+  z-index: 3;
   opacity: 1;
+  visibility: visible;
   pointer-events: auto;
   transform: translate3d(0, 0, 0) scale(1);
   transition:
     opacity 400ms cubic-bezier(0.25, 0.94, 0.35, 1) 120ms,
-    transform 560ms cubic-bezier(0.28, 0.94, 0.36, 1) 35ms;
+    transform 560ms cubic-bezier(0.28, 0.94, 0.36, 1) 35ms,
+    visibility 0ms linear 0ms;
 }
 
 /* Dual-Accent Ambient Aura */

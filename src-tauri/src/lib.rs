@@ -217,6 +217,10 @@ pub struct AppState {
     pub mini_player_expanded: Arc<AtomicBool>,
     pub mini_player_dock_edge: Arc<std::sync::Mutex<String>>,
     pub mini_player_snapshot: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    /// 磁吸贴边缓动动画递增代号，任意新拖动/展开/切屏时递增即可立即终止旧动画避免坐标竞态
+    pub mini_snap_anim_gen: Arc<AtomicU64>,
+    /// 标记 Mini 灵动岛当前是否正为同屏全屏独占应用（全屏视频/游戏）静默礼让
+    pub mini_yielded_for_fullscreen: Arc<AtomicBool>,
     /// 记录主窗口隐藏（进入 Mini 模式或最小化至托盘）前是否处于最大化状态，防止恢复时 Win32/WebView2 错位出现底部白边
     pub main_was_maximized: Arc<AtomicBool>,
     /// 记录主窗口当前是否已将 WebView2 内存目标切换为 LOW，避免重复 COM 调用
@@ -381,10 +385,103 @@ fn ensure_mini_player_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     match builder.build() {
         Ok(win) => {
             harden_desktop_webview2(&win);
+            enforce_transparent_overlay_window_style(&win);
             Some(win)
         }
         Err(_) => app.get_webview_window("mini_player"),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PhysRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl PhysRect {
+    pub(crate) fn width(self) -> i32 {
+        (self.right - self.left).max(0)
+    }
+
+    pub(crate) fn height(self) -> i32 {
+        (self.bottom - self.top).max(0)
+    }
+}
+
+/// 纯几何辅助：校验某窗口外框是否在任一活跃显示器工作区内拥有足够可见面积（防止切屏/拔显示器后飘出屏幕外）
+pub(crate) fn is_rect_visible_in_any_work_area(
+    rect: PhysRect,
+    areas: &[PhysRect],
+    min_visible_px: i32,
+) -> bool {
+    let min_px = min_visible_px.max(1);
+    for wa in areas {
+        let inter_l = rect.left.max(wa.left);
+        let inter_t = rect.top.max(wa.top);
+        let inter_r = rect.right.min(wa.right);
+        let inter_b = rect.bottom.min(wa.bottom);
+        if inter_r - inter_l >= min_px && inter_b - inter_t >= min_px {
+            return true;
+        }
+    }
+    false
+}
+
+/// 纯几何辅助：根据当前停靠边缘与显示器工作区计算安全贴边或钳制坐标
+pub(crate) fn compute_mini_dock_or_clamped_pos(
+    cur_x: i32,
+    cur_y: i32,
+    win_w: i32,
+    win_h: i32,
+    edge: &str,
+    card_pad: i32,
+    wa: PhysRect,
+) -> (i32, i32) {
+    let center_x = cur_x + win_w / 2;
+    let center_y = cur_y + win_h / 2;
+    let min_x = wa.left - card_pad;
+    let max_x = (wa.right - win_w + card_pad).max(min_x);
+    let min_y = wa.top - card_pad;
+    let max_y = (wa.bottom - win_h + card_pad).max(min_y);
+
+    match edge {
+        "top" => ((center_x - win_w / 2).clamp(min_x, max_x), wa.top),
+        "bottom" => (
+            (center_x - win_w / 2).clamp(min_x, max_x),
+            (wa.bottom - win_h).max(wa.top),
+        ),
+        "left" => (wa.left, (center_y - win_h / 2).clamp(min_y, max_y)),
+        "right" => (
+            (wa.right - win_w).max(wa.left),
+            (center_y - win_h / 2).clamp(min_y, max_y),
+        ),
+        _ => (cur_x.clamp(min_x, max_x), cur_y.clamp(min_y, max_y)),
+    }
+}
+
+/// 纯几何辅助：检测最大化无边框主窗口的客户区是否偏离显示器工作区（允许自动隐藏任务栏 1px 容差）或 WebView2 Bounds 未铺满客户区
+pub(crate) fn maximized_client_needs_reconcile(
+    client_screen: PhysRect,
+    work_area: PhysRect,
+    webview_bounds: Option<PhysRect>,
+) -> bool {
+    let left_gap = (client_screen.left - work_area.left).abs();
+    let top_gap = (client_screen.top - work_area.top).abs();
+    let right_gap = (work_area.right - client_screen.right).abs();
+    let bottom_gap = (work_area.bottom - client_screen.bottom).abs();
+    if left_gap > 1 || top_gap > 1 || right_gap > 1 || bottom_gap > 1 {
+        return true;
+    }
+    if let Some(wb) = webview_bounds {
+        let cw = client_screen.width();
+        let ch = client_screen.height();
+        if wb.left != 0 || wb.top != 0 || wb.width() != cw || wb.height() != ch {
+            return true;
+        }
+    }
+    false
 }
 
 /// 深度隐藏 Windows WebView2 浏览器默认右键菜单、快捷键、缩放、状态栏与发行版 DevTools，
@@ -420,7 +517,274 @@ fn harden_desktop_webview2(win: &tauri::WebviewWindow) {
 #[cfg(not(target_os = "windows"))]
 fn harden_desktop_webview2(_win: &tauri::WebviewWindow) {}
 
-/// 同步主窗口原生背景色与 WebView2 DefaultBackgroundColor，彻底杜绝深色主题下窗口边缘或重绘间隙漏出白色底板
+/// 主窗口当前主题背景色 COLORREF (0x00BBGGRR)，供非客户区 WM_NCPAINT / WM_NCACTIVATE 兜底填充使用，默认 D1 #0C0E14
+#[cfg(target_os = "windows")]
+static MAIN_BG_COLORREF: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(12u32 | (14u32 << 8) | (20u32 << 16));
+
+#[cfg(target_os = "windows")]
+const MAIN_NC_SUBCLASS_ID: usize = 0x424D_4E43;
+
+/// 使用当前主题背景色精确覆盖主窗口非客户区（先 ExcludeClipRect 保护客户区 WebView2），
+/// 彻底消灭 Windows 内核在「最大化隐藏 -> 重新显示」或自动隐藏任务栏 1px 留边时绘制的纯白非客户区底边。
+#[cfg(target_os = "windows")]
+fn paint_main_window_non_client_area(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct WinPoint {
+        x: i32,
+        y: i32,
+    }
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct WinRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowDC(hwnd: isize) -> isize;
+        fn ReleaseDC(hwnd: isize, hdc: isize) -> i32;
+        fn GetWindowRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
+        fn GetClientRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
+        fn ClientToScreen(hwnd: isize, lp_point: *mut WinPoint) -> i32;
+        fn FillRect(hdc: isize, lprc: *const WinRect, hbr: isize) -> i32;
+    }
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateSolidBrush(color: u32) -> isize;
+        fn DeleteObject(ho: isize) -> i32;
+        fn ExcludeClipRect(hdc: isize, left: i32, top: i32, right: i32, bottom: i32) -> i32;
+    }
+
+    unsafe {
+        let hdc = GetWindowDC(hwnd);
+        if hdc == 0 {
+            return;
+        }
+        let mut wr = WinRect::default();
+        let mut cr = WinRect::default();
+        if GetWindowRect(hwnd, &mut wr) != 0 && GetClientRect(hwnd, &mut cr) != 0 {
+            let win_w = wr.right - wr.left;
+            let win_h = wr.bottom - wr.top;
+            let cw = cr.right - cr.left;
+            let ch = cr.bottom - cr.top;
+            if win_w > 0 && win_h > 0 {
+                let mut tl = WinPoint { x: 0, y: 0 };
+                if cw > 0 && ch > 0 && ClientToScreen(hwnd, &mut tl) != 0 {
+                    let cx = tl.x - wr.left;
+                    let cy = tl.y - wr.top;
+                    let _ = ExcludeClipRect(hdc, cx, cy, cx + cw, cy + ch);
+                }
+                let brush = CreateSolidBrush(MAIN_BG_COLORREF.load(Ordering::Relaxed));
+                if brush != 0 {
+                    let rc_full = WinRect {
+                        left: 0,
+                        top: 0,
+                        right: win_w,
+                        bottom: win_h,
+                    };
+                    let _ = FillRect(hdc, &rc_full, brush);
+                    let _ = DeleteObject(brush);
+                }
+            }
+        }
+        let _ = ReleaseDC(hwnd, hdc);
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn main_window_nc_subclass_proc(
+    hwnd: isize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+    _uid_subclass: usize,
+    _ref_data: usize,
+) -> isize {
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct WinRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "comctl32")]
+    extern "system" {
+        fn DefSubclassProc(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+        fn RemoveWindowSubclass(
+            hwnd: isize,
+            pfn_subclass: Option<
+                unsafe extern "system" fn(isize, u32, usize, isize, usize, usize) -> isize,
+            >,
+            uid_subclass: usize,
+        ) -> i32;
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetClientRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
+        fn FillRect(hdc: isize, lprc: *const WinRect, hbr: isize) -> i32;
+    }
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateSolidBrush(color: u32) -> isize;
+        fn DeleteObject(ho: isize) -> i32;
+    }
+
+    const WM_SIZE: u32 = 0x0005;
+    const WM_ERASEBKGND: u32 = 0x0014;
+    const WM_SHOWWINDOW: u32 = 0x0018;
+    const WM_WINDOWPOSCHANGED: u32 = 0x0047;
+    const WM_NCDESTROY: u32 = 0x0082;
+    const WM_NCPAINT: u32 = 0x0085;
+    const WM_NCACTIVATE: u32 = 0x0086;
+
+    match msg {
+        WM_NCPAINT => {
+            paint_main_window_non_client_area(hwnd);
+            return 0;
+        }
+        WM_NCACTIVATE => {
+            // 传入 lparam = -1 阻止 DefWindowProcW 重绘经典白色非客户区边框，同时完整保留 tao 对 wparam 焦点激活态的追踪
+            let res = DefSubclassProc(hwnd, msg, wparam, -1);
+            paint_main_window_non_client_area(hwnd);
+            return res;
+        }
+        WM_ERASEBKGND => {
+            let hdc = wparam as isize;
+            if hdc != 0 {
+                let mut rc = WinRect::default();
+                if GetClientRect(hwnd, &mut rc) != 0 && rc.right > rc.left && rc.bottom > rc.top {
+                    let brush = CreateSolidBrush(MAIN_BG_COLORREF.load(Ordering::Relaxed));
+                    if brush != 0 {
+                        let _ = FillRect(hdc, &rc, brush);
+                        let _ = DeleteObject(brush);
+                        return 1;
+                    }
+                }
+            }
+        }
+        WM_SHOWWINDOW | WM_WINDOWPOSCHANGED | WM_SIZE => {
+            let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+            paint_main_window_non_client_area(hwnd);
+            return res;
+        }
+        WM_NCDESTROY => {
+            let _ = RemoveWindowSubclass(
+                hwnd,
+                Some(main_window_nc_subclass_proc),
+                MAIN_NC_SUBCLASS_ID,
+            );
+            return DefSubclassProc(hwnd, msg, wparam, lparam);
+        }
+        _ => {}
+    }
+
+    DefSubclassProc(hwnd, msg, wparam, lparam)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn install_nc_paint_subclass_on_hwnd(hwnd: isize) {
+    #[link(name = "comctl32")]
+    extern "system" {
+        fn SetWindowSubclass(
+            hwnd: isize,
+            pfn_subclass: Option<
+                unsafe extern "system" fn(isize, u32, usize, isize, usize, usize) -> isize,
+            >,
+            uid_subclass: usize,
+            dw_ref_data: usize,
+        ) -> i32;
+    }
+    if hwnd != 0 {
+        unsafe {
+            let _ = SetWindowSubclass(
+                hwnd,
+                Some(main_window_nc_subclass_proc),
+                MAIN_NC_SUBCLASS_ID,
+                0,
+            );
+        }
+        paint_main_window_non_client_area(hwnd);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn install_main_window_nc_paint_subclass(win: &tauri::WebviewWindow) {
+    if let Ok(raw_hwnd) = win.hwnd() {
+        install_nc_paint_subclass_on_hwnd(raw_hwnd.0 as isize);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn install_main_window_nc_paint_subclass(_win: &tauri::WebviewWindow) {}
+
+/// 在 Windows 11 上禁用主窗口的 1px 系统浅灰描边（保留柔和窗口阴影），彻底杜绝无边框最大化恢复后底边亮线
+#[cfg(target_os = "windows")]
+fn apply_main_window_zero_border_dwm(win: &tauri::WebviewWindow) {
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: isize,
+            dw_attribute: u32,
+            pv_attribute: *const std::ffi::c_void,
+            cb_attribute: u32,
+        ) -> i32;
+    }
+
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    const DWMWA_COLOR_NONE: u32 = 0xFFFFFFFE;
+
+    if let Ok(raw_hwnd) = win.hwnd() {
+        let hwnd = raw_hwnd.0 as isize;
+        if hwnd != 0 {
+            unsafe {
+                let border_none: u32 = DWMWA_COLOR_NONE;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_BORDER_COLOR,
+                    &border_none as *const u32 as *const std::ffi::c_void,
+                    std::mem::size_of::<u32>() as u32,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_main_window_zero_border_dwm(_win: &tauri::WebviewWindow) {}
+
+#[cfg(target_os = "windows")]
+fn is_hwnd_zoomed(win: &tauri::WebviewWindow) -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn IsZoomed(hwnd: isize) -> i32;
+    }
+    if win.is_maximized().unwrap_or(false) {
+        return true;
+    }
+    if let Ok(raw_hwnd) = win.hwnd() {
+        let hwnd = raw_hwnd.0 as isize;
+        if hwnd != 0 {
+            return unsafe { IsZoomed(hwnd) != 0 };
+        }
+    }
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_hwnd_zoomed(win: &tauri::WebviewWindow) -> bool {
+    win.is_maximized().unwrap_or(false)
+}
+
+/// 同步主窗口原生每窗背景色（由 tao 在 WM_ERASEBKGND 按窗口绘制，严禁篡改共享 WNDCLASS 画刷污染透明子窗口）、
+/// 非客户区防白边着色画刷、DWM 无描边属性与 WebView2 DefaultBackgroundColor，彻底杜绝深色主题下窗口边缘或重绘间隙漏出白色底板
 fn apply_main_window_bg_color(win: &tauri::WebviewWindow, r: u8, g: u8, b: u8) {
     let _ = win.set_background_color(Some(tauri::window::Color(r, g, b, 255)));
     #[cfg(target_os = "windows")]
@@ -429,6 +793,14 @@ fn apply_main_window_bg_color(win: &tauri::WebviewWindow, r: u8, g: u8, b: u8) {
             ICoreWebView2Controller2, COREWEBVIEW2_COLOR,
         };
         use windows_core::Interface;
+
+        let colorref: u32 = (r as u32) | ((g as u32) << 8) | ((b as u32) << 16);
+        MAIN_BG_COLORREF.store(colorref, Ordering::Relaxed);
+
+        apply_main_window_zero_border_dwm(win);
+        if let Ok(raw_hwnd) = win.hwnd() {
+            paint_main_window_non_client_area(raw_hwnd.0 as isize);
+        }
 
         let _ = win.with_webview(move |webview| unsafe {
             let controller = webview.controller();
@@ -444,16 +816,46 @@ fn apply_main_window_bg_color(win: &tauri::WebviewWindow, r: u8, g: u8, b: u8) {
     }
 }
 
-/// 强制同步 Windows 无边框主窗口 DWM 客户区与 WebView2 控制器矩形，根治「最大化 -> Mini -> 退出」后窗口底部露出 7~8px 白边 BUG
+/// 强制核验并修复 Windows 无边框主窗口最大化后的 DWM 客户区与 WebView2 Bounds，
+/// 彻底根治「最大化 -> Mini -> 返回主窗口」后因 tao 异步 show() 与 WM_NCCALCSIZE 错位导致的底部白线。
 #[cfg(target_os = "windows")]
-fn sync_main_webview_bounds_and_frame(win: &tauri::WebviewWindow, ensure_maximized: bool) {
+fn reconcile_main_window_frame_and_bounds(
+    win: &tauri::WebviewWindow,
+    expect_maximized: bool,
+    allow_cycle_reset: bool,
+    force_visible_frame_sync: bool,
+) {
     #[repr(C)]
-    #[derive(Default)]
+    #[derive(Default, Clone, Copy)]
+    struct WinPoint {
+        x: i32,
+        y: i32,
+    }
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
     struct WinRect {
         left: i32,
         top: i32,
         right: i32,
         bottom: i32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinWindowPlacement {
+        length: u32,
+        flags: u32,
+        show_cmd: u32,
+        pt_min_position: WinPoint,
+        pt_max_position: WinPoint,
+        rc_normal_position: WinRect,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinMonitorInfo {
+        cb_size: u32,
+        rc_monitor: WinRect,
+        rc_work: WinRect,
+        dw_flags: u32,
     }
 
     #[link(name = "user32")]
@@ -469,19 +871,35 @@ fn sync_main_webview_bounds_and_frame(win: &tauri::WebviewWindow, ensure_maximiz
             u_flags: u32,
         ) -> i32;
         fn GetClientRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
-        fn RedrawWindow(hwnd: isize, lprc_update: *const WinRect, hrgn_update: isize, flags: u32) -> i32;
+        fn ClientToScreen(hwnd: isize, lp_point: *mut WinPoint) -> i32;
+        fn GetWindowPlacement(hwnd: isize, lpwndpl: *mut WinWindowPlacement) -> i32;
+        fn MonitorFromWindow(hwnd: isize, dw_flags: u32) -> isize;
+        fn GetMonitorInfoW(h_monitor: isize, lpmi: *mut WinMonitorInfo) -> i32;
+        fn SendMessageW(hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
+        fn RedrawWindow(
+            hwnd: isize,
+            lprc_update: *const WinRect,
+            hrgn_update: isize,
+            flags: u32,
+        ) -> i32;
     }
 
     const SW_SHOWMAXIMIZED: i32 = 3;
+    const SW_RESTORE: i32 = 9;
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
+    const WM_SETREDRAW: u32 = 0x000B;
     const SWP_NOSIZE: u32 = 0x0001;
     const SWP_NOMOVE: u32 = 0x0002;
     const SWP_NOZORDER: u32 = 0x0004;
     const SWP_NOACTIVATE: u32 = 0x0010;
     const SWP_FRAMECHANGED: u32 = 0x0020;
     const RDW_INVALIDATE: u32 = 0x0001;
+    const RDW_ERASE: u32 = 0x0004;
     const RDW_FRAME: u32 = 0x0400;
     const RDW_ALLCHILDREN: u32 = 0x0080;
     const RDW_UPDATENOW: u32 = 0x0100;
+
+    apply_main_window_zero_border_dwm(win);
 
     let Ok(raw_hwnd) = win.hwnd() else {
         return;
@@ -491,85 +909,228 @@ fn sync_main_webview_bounds_and_frame(win: &tauri::WebviewWindow, ensure_maximiz
         return;
     }
 
-    unsafe {
-        if ensure_maximized {
-            let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+    let mut need_frame_reset = false;
+    let mut need_maximize_only = false;
+
+    if expect_maximized {
+        unsafe {
+            let mut wp = WinWindowPlacement {
+                length: std::mem::size_of::<WinWindowPlacement>() as u32,
+                ..Default::default()
+            };
+            let show_cmd = if GetWindowPlacement(hwnd, &mut wp) != 0 {
+                wp.show_cmd
+            } else {
+                0
+            };
+
+            let mut rc_client = WinRect::default();
+            let client_ok = GetClientRect(hwnd, &mut rc_client) != 0
+                && rc_client.right > rc_client.left
+                && rc_client.bottom > rc_client.top;
+
+            let mut tl = WinPoint {
+                x: rc_client.left,
+                y: rc_client.top,
+            };
+            let mut br = WinPoint {
+                x: rc_client.right,
+                y: rc_client.bottom,
+            };
+            let mapped_ok =
+                client_ok && ClientToScreen(hwnd, &mut tl) != 0 && ClientToScreen(hwnd, &mut br) != 0;
+
+            let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut mi = WinMonitorInfo {
+                cb_size: std::mem::size_of::<WinMonitorInfo>() as u32,
+                ..Default::default()
+            };
+            let mon_ok = hmon != 0 && GetMonitorInfoW(hmon, &mut mi) != 0;
+
+            if show_cmd != SW_SHOWMAXIMIZED as u32 {
+                need_maximize_only = true;
+            }
+            if mapped_ok && mon_ok {
+                let client_screen = PhysRect {
+                    left: tl.x,
+                    top: tl.y,
+                    right: br.x,
+                    bottom: br.y,
+                };
+                let work_area = PhysRect {
+                    left: mi.rc_work.left,
+                    top: mi.rc_work.top,
+                    right: mi.rc_work.right,
+                    bottom: mi.rc_work.bottom,
+                };
+                if maximized_client_needs_reconcile(client_screen, work_area, None) {
+                    need_frame_reset = true;
+                }
+            }
         }
-        let _ = SetWindowPos(
-            hwnd,
-            0,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
     }
 
+    unsafe {
+        // 关键修复：当已处于 WS_MAXIMIZE 的窗口经历 SW_HIDE -> ShowWindow(SW_MAXIMIZE/SW_SHOW) 时，
+        //即便 GetClientRect 已对齐 rcWork（need_frame_reset == false），Win32 内核仍会将非客户区重定向位图刷成纯白 (RGB 255,255,255)。
+        // 因此在最大化恢复的首轮可见同步（force_visible_frame_sync == true）或检出尺寸偏离时，无条件执行锁绘 SW_RESTORE -> SW_SHOWMAXIMIZED 复位。
+        if expect_maximized && (force_visible_frame_sync || need_frame_reset) && allow_cycle_reset {
+            let _ = SendMessageW(hwnd, WM_SETREDRAW, 0, 0);
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+            let _ = SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            apply_main_window_zero_border_dwm(win);
+            let _ = SendMessageW(hwnd, WM_SETREDRAW, 1, 0);
+        } else if expect_maximized && need_maximize_only {
+            let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+            let _ = SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            apply_main_window_zero_border_dwm(win);
+        } else if expect_maximized && force_visible_frame_sync {
+            let _ = SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            apply_main_window_zero_border_dwm(win);
+        }
+        paint_main_window_non_client_area(hwnd);
+    }
+
+    let need_redraw =
+        need_frame_reset || need_maximize_only || (expect_maximized && force_visible_frame_sync);
     let _ = win.with_webview(move |webview| unsafe {
         let controller = webview.controller();
         let mut rc = WinRect::default();
         if GetClientRect(hwnd, &mut rc) != 0 && rc.right > rc.left && rc.bottom > rc.top {
+            let cw = rc.right - rc.left;
+            let ch = rc.bottom - rc.top;
+            let mut parent_wv_hwnd = std::mem::zeroed();
+            if controller.ParentWindow(&mut parent_wv_hwnd).is_ok() {
+                let wry_child_hwnd = parent_wv_hwnd.0 as isize;
+                if wry_child_hwnd != 0 && wry_child_hwnd != hwnd {
+                    let _ = SetWindowPos(
+                        wry_child_hwnd,
+                        0,
+                        0,
+                        0,
+                        cw,
+                        ch,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+            }
             let mut bounds = std::mem::zeroed();
             if controller.Bounds(&mut bounds).is_ok() {
-                bounds.left = rc.left;
-                bounds.top = rc.top;
-                bounds.right = rc.right;
-                bounds.bottom = rc.bottom;
-                let _ = controller.SetBounds(bounds);
+                let bounds_mismatch = bounds.left != 0
+                    || bounds.top != 0
+                    || bounds.right != cw
+                    || bounds.bottom != ch;
+                if bounds_mismatch || need_redraw {
+                    bounds.left = 0;
+                    bounds.top = 0;
+                    bounds.right = cw;
+                    bounds.bottom = ch;
+                    let _ = controller.SetBounds(bounds);
+                    let _ = controller.NotifyParentWindowPositionChanged();
+                }
             }
-            let _ = controller.NotifyParentWindowPositionChanged();
         }
-        let _ = RedrawWindow(
-            hwnd,
-            std::ptr::null(),
-            0,
-            RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-        );
+        if need_redraw {
+            let _ = RedrawWindow(
+                hwnd,
+                std::ptr::null(),
+                0,
+                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            );
+        }
+        paint_main_window_non_client_area(hwnd);
     });
 }
 
 #[cfg(not(target_os = "windows"))]
-fn sync_main_webview_bounds_and_frame(_win: &tauri::WebviewWindow, _ensure_maximized: bool) {}
+fn reconcile_main_window_frame_and_bounds(
+    _win: &tauri::WebviewWindow,
+    _expect_maximized: bool,
+    _allow_cycle_reset: bool,
+    _force_visible_frame_sync: bool,
+) {
+}
 
 fn show_and_restore_main_window(app: &AppHandle, state: &AppState) {
-    if let Some(main_win) = app.get_webview_window("main") {
-        sync_main_low_memory_state(&main_win, &state.main_low_memory_active, false);
-        let was_minimized = main_win.is_minimized().unwrap_or(false);
-        let was_maximized = state.main_was_maximized.load(Ordering::Relaxed)
-            || main_win.is_maximized().unwrap_or(false);
+    let was_maximized = state.main_was_maximized.load(Ordering::Relaxed)
+        || app
+            .get_webview_window("main")
+            .map(|w| is_hwnd_zoomed(&w))
+            .unwrap_or(false);
 
-        // 仅当确实处于最小化状态时才调用 unminimize()，禁止对隐藏的最大化无边框窗口调用 SW_RESTORE 导致帧错位
-        if was_minimized {
-            let _ = main_win.unminimize();
+    let app_for_main = app.clone();
+    let low_mem_flag = state.main_low_memory_active.clone();
+    let max_flag = state.main_was_maximized.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(main_win) = app_for_main.get_webview_window("main") {
+            sync_main_low_memory_state(&main_win, &low_mem_flag, false);
+            apply_main_window_zero_border_dwm(&main_win);
+            if main_win.is_minimized().unwrap_or(false) {
+                let _ = main_win.unminimize();
+            }
+            // 先让 tao 完成内部的 WindowFlags::VISIBLE -> show() 队列切换，绝不在 show() 前偷跑 Win32 ShowWindow 导致时序反转
+            let _ = main_win.show();
+            let _ = main_win.set_focus();
         }
 
-        if was_maximized {
-            sync_main_webview_bounds_and_frame(&main_win, true);
-            let _ = main_win.show();
-            sync_main_webview_bounds_and_frame(&main_win, true);
-        } else {
-            let _ = main_win.show();
-            sync_main_webview_bounds_and_frame(&main_win, false);
-        }
-        let _ = main_win.set_focus();
-
-        // Windows DWM 显示动画结束后 65ms 再做一次主线程兜底 Bounds 同步，确保 WebView2 与客户区像素级贴合
-        let app_for_delay = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(65));
-            let app_inner = app_for_delay.clone();
-            let _ = app_for_delay.run_on_main_thread(move || {
-                if let Some(w) = app_inner.get_webview_window("main") {
-                    if w.is_visible().unwrap_or(false) {
-                        let is_max = was_maximized || w.is_maximized().unwrap_or(false);
-                        sync_main_webview_bounds_and_frame(&w, is_max);
+        // 三段主线程兜底核验：确保首个检测到窗口已可见的主线程回调必然执行一次无闪烁 SW_RESTORE -> SW_SHOWMAXIMIZED 与非客户区重绘
+        let did_force_cycle = Arc::new(AtomicBool::new(false));
+        for (delay_ms, emit_restored) in [(18u64, true), (68u64, false), (165u64, false)] {
+            let app_delay = app_for_main.clone();
+            let max_flag_inner = max_flag.clone();
+            let did_force_inner = did_force_cycle.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                let app_ui = app_delay.clone();
+                let _ = app_delay.run_on_main_thread(move || {
+                    if let Some(w) = app_ui.get_webview_window("main") {
+                        if w.is_visible().unwrap_or(false) {
+                            let expect_max = was_maximized || is_hwnd_zoomed(&w);
+                            let first_visible_pass = !did_force_inner.swap(true, Ordering::Relaxed);
+                            reconcile_main_window_frame_and_bounds(
+                                &w,
+                                expect_max,
+                                true,
+                                first_visible_pass,
+                            );
+                            max_flag_inner.store(is_hwnd_zoomed(&w), Ordering::Relaxed);
+                        }
                     }
-                }
-                let _ = app_inner.emit("bm-main-window-restored", serde_json::json!({ "maximized": was_maximized }));
+                    if emit_restored {
+                        let _ = app_ui.emit(
+                            "bm-main-window-restored",
+                            serde_json::json!({ "maximized": was_maximized }),
+                        );
+                    }
+                });
             });
-        });
-    }
+        }
+    });
 }
 
 #[tauri::command]
@@ -2424,8 +2985,355 @@ fn place_mini_player_default(app: &AppHandle, win: &tauri::WebviewWindow, state:
     }
 }
 
+/// 精准识别与 Mini 灵动岛处于同一显示器的全屏独占应用（如全屏视频、全屏游戏、全屏 PPT），
+/// 显式排除 Windows 桌面/任务栏/壳层与本应用自身窗体，避免 Win+D 显示桌面被误判为全屏。
+#[cfg(target_os = "windows")]
+fn is_foreground_fullscreen_on_same_monitor(
+    mini_hwnd: isize,
+    main_hwnd: isize,
+    lyric_hwnd: isize,
+) -> bool {
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct WinRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinMonitorInfo {
+        cb_size: u32,
+        rc_monitor: WinRect,
+        rc_work: WinRect,
+        dw_flags: u32,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn IsWindowVisible(hwnd: isize) -> i32;
+        fn IsIconic(hwnd: isize) -> i32;
+        fn GetClassNameW(hwnd: isize, lp_class_name: *mut u16, n_max_count: i32) -> i32;
+        fn GetWindowRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
+        fn MonitorFromWindow(hwnd: isize, dw_flags: u32) -> isize;
+        fn GetMonitorInfoW(h_monitor: isize, lpmi: *mut WinMonitorInfo) -> i32;
+    }
+
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
+
+    if mini_hwnd == 0 {
+        return false;
+    }
+
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg == 0 || fg == mini_hwnd || fg == main_hwnd || fg == lyric_hwnd {
+            return false;
+        }
+        if IsWindowVisible(fg) == 0 || IsIconic(fg) != 0 {
+            return false;
+        }
+
+        let mut class_buf = [0u16; 128];
+        let len = GetClassNameW(fg, class_buf.as_mut_ptr(), class_buf.len() as i32);
+        if len > 0 {
+            let class_name = String::from_utf16_lossy(&class_buf[..len as usize]);
+            if matches!(
+                class_name.as_str(),
+                "Progman"
+                    | "WorkerW"
+                    | "Shell_TrayWnd"
+                    | "Shell_SecondaryTrayWnd"
+                    | "NotifyIconOverflowWindow"
+                    | "Windows.UI.Core.CoreWindow"
+                    | "TaskListThumbnailWnd"
+                    | "MultitaskingViewFrame"
+                    | "XamlExplorerHostIslandWindow"
+            ) {
+                return false;
+            }
+        }
+
+        let mini_mon = MonitorFromWindow(mini_hwnd, MONITOR_DEFAULTTONEAREST);
+        let fg_mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        if mini_mon == 0 || fg_mon == 0 || mini_mon != fg_mon {
+            return false;
+        }
+
+        let mut fg_rect = WinRect::default();
+        if GetWindowRect(fg, &mut fg_rect) == 0 {
+            return false;
+        }
+        let mut mi = WinMonitorInfo {
+            cb_size: std::mem::size_of::<WinMonitorInfo>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(fg_mon, &mut mi) == 0 {
+            return false;
+        }
+
+        let m = mi.rc_monitor;
+        let covers_full_monitor = fg_rect.left <= m.left + 2
+            && fg_rect.top <= m.top + 2
+            && fg_rect.right >= m.right - 2
+            && fg_rect.bottom >= m.bottom - 2;
+        covers_full_monitor
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_foreground_fullscreen_on_same_monitor(
+    _mini_hwnd: isize,
+    _main_hwnd: isize,
+    _lyric_hwnd: isize,
+) -> bool {
+    false
+}
+
+/// 校验 Mini 灵动岛是否因切屏/拔出显示器/DPI 变更而跑出有效工作区；如越界或强制重吸附则自动拉回安全边缘。
+fn reclamp_mini_player_if_needed(
+    app: &AppHandle,
+    win: &tauri::WebviewWindow,
+    state: &AppState,
+    force_resnap: bool,
+) {
+    let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) else {
+        return;
+    };
+    let rect = PhysRect {
+        left: pos.x,
+        top: pos.y,
+        right: pos.x + size.width as i32,
+        bottom: pos.y + size.height as i32,
+    };
+
+    let areas: Vec<PhysRect> = win
+        .available_monitors()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| {
+            let wa = m.work_area();
+            PhysRect {
+                left: wa.position.x,
+                top: wa.position.y,
+                right: wa.position.x + wa.size.width as i32,
+                bottom: wa.position.y + wa.size.height as i32,
+            }
+        })
+        .collect();
+
+    let is_visible_in_monitor =
+        !areas.is_empty() && is_rect_visible_in_any_work_area(rect, &areas, 36);
+
+    let edge = state
+        .mini_player_dock_edge
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_else(|| "none".to_string());
+
+    if !force_resnap && is_visible_in_monitor {
+        // 即使还在可见区域，若是贴边状态也检查一下是否已严重脱离该边缘（如分辨率变更或任务栏高度变化）
+        let center_x = pos.x + size.width as i32 / 2;
+        let center_y = pos.y + size.height as i32 / 2;
+        if edge != "none" {
+            if let Some(mon) = resolve_mini_player_monitor_at_point(app, win, center_x, center_y) {
+                let sf = mon.scale_factor().max(1.0);
+                let wa = mon.work_area();
+                let wa_rect = PhysRect {
+                    left: wa.position.x,
+                    top: wa.position.y,
+                    right: wa.position.x + wa.size.width as i32,
+                    bottom: wa.position.y + wa.size.height as i32,
+                };
+                let (fw, fh) =
+                    mini_logical_dims(&edge, state.mini_player_expanded.load(Ordering::Relaxed));
+                let pw = (fw * sf).round() as i32;
+                let ph = (fh * sf).round() as i32;
+                let card_pad = (22.0 * sf).round() as i32;
+                let (tx, ty) = compute_mini_dock_or_clamped_pos(
+                    pos.x, pos.y, pw, ph, &edge, card_pad, wa_rect,
+                );
+                let drifted = (pos.x - tx).abs() > (12.0 * sf).round() as i32
+                    || (pos.y - ty).abs() > (12.0 * sf).round() as i32
+                    || (size.width as i32 - pw).abs() > 4
+                    || (size.height as i32 - ph).abs() > 4;
+                if drifted {
+                    state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed);
+                    if (size.width as i32 - pw).abs() > 2 || (size.height as i32 - ph).abs() > 2 {
+                        let _ = win.set_size(Size::Logical(LogicalSize::new(fw, fh)));
+                    }
+                    let _ = win.set_position(Position::Physical(PhysicalPosition::new(tx, ty)));
+                }
+            }
+        }
+        return;
+    }
+
+    let center_x = pos.x + size.width as i32 / 2;
+    let center_y = pos.y + size.height as i32 / 2;
+    let mon = resolve_mini_player_monitor_at_point(app, win, center_x, center_y)
+        .or_else(|| win.primary_monitor().ok().flatten());
+    let Some(mon) = mon else {
+        return;
+    };
+
+    let sf = mon.scale_factor().max(1.0);
+    let wa = mon.work_area();
+    let wa_rect = PhysRect {
+        left: wa.position.x,
+        top: wa.position.y,
+        right: wa.position.x + wa.size.width as i32,
+        bottom: wa.position.y + wa.size.height as i32,
+    };
+    let (fw, fh) = mini_logical_dims(&edge, state.mini_player_expanded.load(Ordering::Relaxed));
+    let pw = (fw * sf).round() as i32;
+    let ph = (fh * sf).round() as i32;
+    let card_pad = (22.0 * sf).round() as i32;
+    let (tx, ty) =
+        compute_mini_dock_or_clamped_pos(pos.x, pos.y, pw, ph, &edge, card_pad, wa_rect);
+
+    state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed);
+    if (size.width as i32 - pw).abs() > 2 || (size.height as i32 - ph).abs() > 2 {
+        let _ = win.set_size(Size::Logical(LogicalSize::new(fw, fh)));
+    }
+    let _ = win.set_position(Position::Physical(PhysicalPosition::new(tx, ty)));
+    state.mini_player_positioned.store(true, Ordering::Relaxed);
+}
+
+/// Windows 级 Mini 灵动岛自愈与方案 1 智能全屏礼让守护：
+/// - 切窗 / Alt+Tab / Win+D / 切屏后自动无抢焦复活并维持 HWND_TOPMOST
+/// - 同一显示器运行全屏视频/游戏时暂不遮挡画面，退出全屏后立刻自动复活置顶
+#[cfg(target_os = "windows")]
+fn heal_mini_player_window(app: &AppHandle, state: &AppState, force_resnap: bool) {
+    if !state.mini_player_visible.load(Ordering::Relaxed) {
+        state
+            .mini_yielded_for_fullscreen
+            .store(false, Ordering::Relaxed);
+        return;
+    }
+    let Some(mini_win) = app.get_webview_window("mini_player") else {
+        return;
+    };
+    let Ok(raw_mini) = mini_win.hwnd() else {
+        return;
+    };
+    let mini_hwnd = raw_mini.0 as isize;
+    if mini_hwnd == 0 {
+        return;
+    }
+    let main_hwnd = app
+        .get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize)
+        .unwrap_or(0);
+    let lyric_hwnd = app
+        .get_webview_window("desktop_lyric")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize)
+        .unwrap_or(0);
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn ShowWindow(hwnd: isize, n_cmd_show: i32) -> i32;
+        fn IsIconic(hwnd: isize) -> i32;
+        fn IsWindowVisible(hwnd: isize) -> i32;
+        fn SetWindowPos(
+            hwnd: isize,
+            hwnd_insert_after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            u_flags: u32,
+        ) -> i32;
+    }
+
+    const HWND_TOPMOST: isize = -1;
+    const HWND_NOTOPMOST: isize = -2;
+    const SW_SHOWNOACTIVATE: i32 = 4;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_SHOWWINDOW: u32 = 0x0040;
+
+    // 方案 1：检测同屏全屏独占应用（如全屏视频/游戏）
+    if is_foreground_fullscreen_on_same_monitor(mini_hwnd, main_hwnd, lyric_hwnd) {
+        if !state
+            .mini_yielded_for_fullscreen
+            .swap(true, Ordering::Relaxed)
+        {
+            unsafe {
+                let _ = SetWindowPos(
+                    mini_hwnd,
+                    HWND_NOTOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        }
+        return;
+    }
+
+    let was_yielded = state
+        .mini_yielded_for_fullscreen
+        .swap(false, Ordering::Relaxed);
+
+    // 边界与切屏自检（放在显示前，防止窗口留在已断开的屏幕坐标）
+    reclamp_mini_player_if_needed(app, &mini_win, state, force_resnap);
+
+    unsafe {
+        let iconic = IsIconic(mini_hwnd) != 0;
+        let visible = IsWindowVisible(mini_hwnd) != 0;
+        if iconic || !visible || was_yielded {
+            set_subwindow_suspended(&mini_win, false);
+            set_webview_memory_target_low(&mini_win, false);
+            let _ = ShowWindow(mini_hwnd, SW_SHOWNOACTIVATE);
+            let _ = SetWindowPos(
+                mini_hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        } else {
+            let _ = SetWindowPos(
+                mini_hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn heal_mini_player_window(app: &AppHandle, state: &AppState, force_resnap: bool) {
+    if !state.mini_player_visible.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Some(mini_win) = app.get_webview_window("mini_player") {
+        reclamp_mini_player_if_needed(app, &mini_win, state, force_resnap);
+        let _ = mini_win.set_always_on_top(true);
+    }
+}
+
 fn restore_main_from_mini(app: &AppHandle, state: &AppState) {
     state.mini_player_visible.store(false, Ordering::Relaxed);
+    state
+        .mini_yielded_for_fullscreen
+        .store(false, Ordering::Relaxed);
+    state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed);
     wake_hotkey_thread(&state.hotkey_thread_id);
     if let Some(mini_win) = app.get_webview_window("mini_player") {
         let _ = mini_win.hide();
@@ -2448,9 +3356,13 @@ async fn set_mini_player_mode_cmd(
     ensure_main_window(&window)?;
     if mini {
         state.mini_player_visible.store(true, Ordering::Relaxed);
+        state
+            .mini_yielded_for_fullscreen
+            .store(false, Ordering::Relaxed);
+        state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed);
         wake_hotkey_thread(&state.hotkey_thread_id);
         if let Some(main_win) = app.get_webview_window("main") {
-            let is_max = main_win.is_maximized().unwrap_or(false);
+            let is_max = is_hwnd_zoomed(&main_win);
             state.main_was_maximized.store(is_max, Ordering::Relaxed);
             sync_main_low_memory_state(&main_win, &state.main_low_memory_active, true);
             let _ = main_win.hide();
@@ -2458,12 +3370,16 @@ async fn set_mini_player_mode_cmd(
         if let Some(mini_win) = ensure_mini_player_window(&app) {
             set_subwindow_suspended(&mini_win, false);
             set_webview_memory_target_low(&mini_win, false);
+            enforce_transparent_overlay_window_style(&mini_win);
             if !state.mini_player_positioned.load(Ordering::Relaxed) {
                 place_mini_player_default(&app, &mini_win, &state);
+            } else {
+                reclamp_mini_player_if_needed(&app, &mini_win, &state, false);
             }
             let _ = mini_win.set_always_on_top(true);
             let _ = mini_win.show();
             let _ = mini_win.set_focus();
+            heal_mini_player_window(&app, &state, false);
             if let Some(snap) = state
                 .mini_player_snapshot
                 .lock()
@@ -2621,6 +3537,7 @@ async fn drag_mini_player_step_cmd(
     expanded: bool,
 ) -> Result<Option<MiniDragStepResult>, String> {
     ensure_allowed_windows(&window, &["main", "mini_player"])?;
+    state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed);
     let Some(win) = app.get_webview_window("mini_player") else {
         return Ok(None);
     };
@@ -2862,16 +3779,21 @@ async fn snap_mini_player_to_edge_cmd(
     if (size.width as i32 - pw).abs() > 2 || (size.height as i32 - ph).abs() > 2 {
         let _ = win.set_size(Size::Logical(LogicalSize::new(fw, fh)));
     }
+    let anim_gen = state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed) + 1;
     let dx = tx - pos.x;
     let dy = ty - pos.y;
     let dist = ((dx * dx + dy * dy) as f64).sqrt();
     if dist > 1.0 && dist <= 64.0 * sf {
         let win_clone = win.clone();
+        let gen_ref = state.mini_snap_anim_gen.clone();
         let sx = pos.x;
         let sy = pos.y;
         tauri::async_runtime::spawn(async move {
             let steps = 9;
             for i in 1..=steps {
+                if gen_ref.load(Ordering::Relaxed) != anim_gen {
+                    break;
+                }
                 let t = i as f64 / steps as f64;
                 let eased = 1.0 - (1.0 - t).powi(3);
                 let cx_pos = sx + (dx as f64 * eased).round() as i32;
@@ -2896,6 +3818,7 @@ async fn expand_mini_player_from_dock_cmd(
     edge: String,
 ) -> Result<bool, String> {
     ensure_allowed_windows(&window, &["main", "mini_player"])?;
+    state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut g) = state.mini_player_dock_edge.lock() {
         *g = edge.clone();
     }
@@ -4029,6 +4952,11 @@ fn spawn_windows_global_hotkey_listener(
                 w_remove_msg: u32,
             ) -> i32;
             fn GetCursorPos(lp_point: *mut Point) -> i32;
+            fn GetForegroundWindow() -> isize;
+            fn GetSystemMetrics(n_index: i32) -> i32;
+            fn IsIconic(hwnd: isize) -> i32;
+            fn IsWindowVisible(hwnd: isize) -> i32;
+            fn GetWindowLongW(hwnd: isize, n_index: i32) -> i32;
             fn MsgWaitForMultipleObjectsEx(
                 n_count: u32,
                 p_handles: *const isize,
@@ -4043,6 +4971,13 @@ fn spawn_windows_global_hotkey_listener(
         const PM_REMOVE: u32 = 0x0001;
         const INFINITE: u32 = 0xFFFF_FFFF;
         const QS_ALLINPUT: u32 = 0x04FF;
+        const GWL_EXSTYLE: i32 = -20;
+        const WS_EX_TOPMOST: i32 = 0x00000008;
+        const SM_XVIRTUALSCREEN: i32 = 76;
+        const SM_YVIRTUALSCREEN: i32 = 77;
+        const SM_CXVIRTUALSCREEN: i32 = 78;
+        const SM_CYVIRTUALSCREEN: i32 = 79;
+        const SM_CMONITORS: i32 = 80;
 
         const HK_MEDIA_PLAY_PAUSE: i32 = 2001; // VK_MEDIA_PLAY_PAUSE (0xB3)
         const HK_MEDIA_PREV: i32 = 2002;       // VK_MEDIA_PREV_TRACK (0xB1)
@@ -4070,6 +5005,11 @@ fn spawn_windows_global_hotkey_listener(
         let mut last_mini_ignore_cursor: Option<bool> = None;
         let mut last_lyric_cursor: Option<(i32, i32)> = None;
         let mut last_mini_cursor: Option<(i32, i32)> = None;
+        let mut last_fg_hwnd: isize = 0;
+        let mut last_display_sig: (i32, i32, i32, i32, i32) = (0, 0, 0, 0, 0);
+        let mut last_mini_heal_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(5))
+            .unwrap_or_else(std::time::Instant::now);
 
         loop {
             let should_enable = hotkeys_enabled.load(Ordering::Relaxed);
@@ -4398,10 +5338,68 @@ fn spawn_windows_global_hotkey_listener(
                 }
             }
 
+            // Mini 灵动岛切窗 / 切屏 / Win+D / 退出全屏稳定性轻检守护（零抢焦、极低开销）
+            if is_mini_vis {
+                let (fg_now, display_sig) = unsafe {
+                    (
+                        GetForegroundWindow(),
+                        (
+                            GetSystemMetrics(SM_CMONITORS),
+                            GetSystemMetrics(SM_XVIRTUALSCREEN),
+                            GetSystemMetrics(SM_YVIRTUALSCREEN),
+                            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                        ),
+                    )
+                };
+                let fg_changed = fg_now != last_fg_hwnd;
+                let display_changed = last_display_sig != (0, 0, 0, 0, 0) && display_sig != last_display_sig;
+                last_fg_hwnd = fg_now;
+                last_display_sig = display_sig;
+
+                let mut mini_state_broken = false;
+                if let Some(win) = app_handle.get_webview_window("mini_player") {
+                    if let Ok(raw_h) = win.hwnd() {
+                        let mh = raw_h.0 as isize;
+                        if mh != 0 {
+                            unsafe {
+                                let iconic = IsIconic(mh) != 0;
+                                let visible = IsWindowVisible(mh) != 0;
+                                let ex = GetWindowLongW(mh, GWL_EXSTYLE);
+                                let lost_topmost = (ex & WS_EX_TOPMOST) == 0;
+                                mini_state_broken = iconic || !visible || lost_topmost;
+                            }
+                        }
+                    }
+                }
+
+                let elapsed_ms = last_mini_heal_at.elapsed().as_millis();
+                let should_heal = display_changed
+                    || (fg_changed && elapsed_ms >= 180)
+                    || (mini_state_broken && elapsed_ms >= 300)
+                    || elapsed_ms >= 1500;
+
+                if should_heal {
+                    last_mini_heal_at = std::time::Instant::now();
+                    let app_heal = app_handle.clone();
+                    let force_resnap = display_changed;
+                    let _ = app_handle.run_on_main_thread(move || {
+                        let st = app_heal.state::<AppState>();
+                        heal_mini_player_window(&app_heal, &st, force_resnap);
+                    });
+                }
+            } else {
+                last_fg_hwnd = 0;
+                last_display_sig = (0, 0, 0, 0, 0);
+            }
+
             let need_cursor_poll = (is_vis && is_lck) || (is_mini_vis && !is_mini_exp);
-            let wait_timeout_ms = if !need_cursor_poll {
-                // 无穿透检测需求时彻底阻塞休眠：0 次/秒 CPU 唤醒，热键与状态消息到达即刻瞬时唤醒
+            let wait_timeout_ms = if !need_cursor_poll && !is_mini_vis {
+                // 无穿透检测及 Mini 守护需求时彻底阻塞休眠：0 次/秒 CPU 唤醒，热键与状态消息到达即刻瞬时唤醒
                 INFINITE
+            } else if !need_cursor_poll && is_mini_vis {
+                // Mini 展开态/自由悬浮态仍保留 350ms 轻检，确保切屏/切窗/退出全屏及时守护
+                350
             } else if near_cursor_zone && cursor_moved_this_tick {
                 16
             } else if near_cursor_zone {
@@ -4455,6 +5453,8 @@ pub fn run() {
     let mini_player_dock_edge = Arc::new(std::sync::Mutex::new("none".to_string()));
     let mini_player_dock_edge_for_setup = mini_player_dock_edge.clone();
     let mini_player_snapshot = Arc::new(std::sync::Mutex::new(None));
+    let mini_snap_anim_gen = Arc::new(AtomicU64::new(0));
+    let mini_yielded_for_fullscreen = Arc::new(AtomicBool::new(false));
     let main_was_maximized = Arc::new(AtomicBool::new(false));
     let main_was_maximized_for_event = main_was_maximized.clone();
     let main_low_memory_active = Arc::new(AtomicBool::new(false));
@@ -4483,6 +5483,8 @@ pub fn run() {
             mini_player_expanded,
             mini_player_dock_edge,
             mini_player_snapshot,
+            mini_snap_anim_gen,
+            mini_yielded_for_fullscreen,
             main_was_maximized,
             main_low_memory_active,
             hotkey_thread_id,
@@ -4492,6 +5494,9 @@ pub fn run() {
         .setup(move |app| {
             if let Some(w) = app.get_webview_window("main") {
                 harden_desktop_webview2(&w);
+                install_main_window_nc_paint_subclass(&w);
+                apply_main_window_zero_border_dwm(&w);
+                apply_main_window_bg_color(&w, 12, 14, 20);
             }
             #[cfg(target_os = "windows")]
             spawn_windows_global_hotkey_listener(
@@ -4607,10 +5612,12 @@ pub fn run() {
                         let is_min = window.is_minimized().unwrap_or(false);
                         let is_vis = window.is_visible().unwrap_or(false);
                         if is_vis && !is_min {
-                            main_was_maximized_for_event.store(
-                                window.is_maximized().unwrap_or(false),
-                                Ordering::Relaxed,
-                            );
+                            let is_max = window
+                                .app_handle()
+                                .get_webview_window("main")
+                                .map(|mw| is_hwnd_zoomed(&mw))
+                                .unwrap_or_else(|| window.is_maximized().unwrap_or(false));
+                            main_was_maximized_for_event.store(is_max, Ordering::Relaxed);
                             if let Some(mw) = window.app_handle().get_webview_window("main") {
                                 sync_main_low_memory_state(&mw, &main_low_memory_for_event, false);
                             }
@@ -4623,10 +5630,12 @@ pub fn run() {
                     WindowEvent::CloseRequested { api, .. } => {
                         if close_to_tray_for_event.load(Ordering::Relaxed) {
                             api.prevent_close();
-                            main_was_maximized_for_event.store(
-                                window.is_maximized().unwrap_or(false),
-                                Ordering::Relaxed,
-                            );
+                            let is_max = window
+                                .app_handle()
+                                .get_webview_window("main")
+                                .map(|mw| is_hwnd_zoomed(&mw))
+                                .unwrap_or_else(|| window.is_maximized().unwrap_or(false));
+                            main_was_maximized_for_event.store(is_max, Ordering::Relaxed);
                             if let Some(mw) = window.app_handle().get_webview_window("main") {
                                 sync_main_low_memory_state(&mw, &main_low_memory_for_event, true);
                             }
@@ -4638,11 +5647,42 @@ pub fn run() {
                     _ => {}
                 }
             } else if window.label() == "mini_player" {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let app = window.app_handle();
-                    let state = app.state::<AppState>();
-                    restore_main_from_mini(&app, &state);
+                match event {
+                    WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let app = window.app_handle();
+                        let state = app.state::<AppState>();
+                        restore_main_from_mini(&app, &state);
+                    }
+                    WindowEvent::Focused(false) | WindowEvent::Resized(_) => {
+                        let app = window.app_handle().clone();
+                        let st = app.state::<AppState>();
+                        if st.mini_player_visible.load(Ordering::Relaxed) {
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(35));
+                                let app_ui = app.clone();
+                                let _ = app.run_on_main_thread(move || {
+                                    let st_inner = app_ui.state::<AppState>();
+                                    heal_mini_player_window(&app_ui, &st_inner, false);
+                                });
+                            });
+                        }
+                    }
+                    WindowEvent::ScaleFactorChanged { .. } => {
+                        let app = window.app_handle().clone();
+                        let st = app.state::<AppState>();
+                        if st.mini_player_visible.load(Ordering::Relaxed) {
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(45));
+                                let app_ui = app.clone();
+                                let _ = app.run_on_main_thread(move || {
+                                    let st_inner = app_ui.state::<AppState>();
+                                    heal_mini_player_window(&app_ui, &st_inner, true);
+                                });
+                            });
+                        }
+                    }
+                    _ => {}
                 }
             } else if window.label() == "desktop_lyric" {
                 match event {
@@ -4849,5 +5889,345 @@ mod settings_backend_tests {
         assert!(resolve_safe_explorer_target_dir(&store, r"C:\Windows\System32").is_err());
         assert!(resolve_safe_explorer_target_dir(&store, r"..\..\Windows").is_err());
         assert!(resolve_safe_explorer_target_dir(&store, "").is_err());
+    }
+
+    #[test]
+    fn test_mini_rect_visibility_and_dock_clamping_across_monitors() {
+        let primary = PhysRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        let secondary = PhysRect {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1040,
+        };
+
+        // 正常位于主屏顶边
+        let on_top = PhysRect {
+            left: 720,
+            top: 0,
+            right: 1200,
+            bottom: 228,
+        };
+        assert!(is_rect_visible_in_any_work_area(on_top, &[primary], 36));
+
+        // 副屏拔出后坐标落在负屏幕外 -> 判定不可见
+        let orphaned_on_unplugged_secondary = PhysRect {
+            left: -1200,
+            top: 0,
+            right: -720,
+            bottom: 228,
+        };
+        assert!(!is_rect_visible_in_any_work_area(
+            orphaned_on_unplugged_secondary,
+            &[primary],
+            36
+        ));
+        assert!(is_rect_visible_in_any_work_area(
+            orphaned_on_unplugged_secondary,
+            &[primary, secondary],
+            36
+        ));
+
+        // 贴靠顶边重吸附到主屏安全区域内
+        assert_eq!(
+            compute_mini_dock_or_clamped_pos(-1200, 300, 480, 228, "top", 22, primary),
+            (-22, 0)
+        );
+        // 贴靠右边重吸附
+        assert_eq!(
+            compute_mini_dock_or_clamped_pos(2400, 1200, 480, 228, "right", 22, primary),
+            (1440, 834)
+        );
+        // 自由悬浮越界钳制
+        assert_eq!(
+            compute_mini_dock_or_clamped_pos(2500, -300, 480, 228, "none", 22, primary),
+            (1462, -22)
+        );
+    }
+
+    #[test]
+    fn test_maximized_client_needs_reconcile_detects_bottom_gap_and_bounds_drift() {
+        let wa = PhysRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        // 像素级对齐 + WebView2 满铺 -> 无需重入
+        assert!(!maximized_client_needs_reconcile(
+            wa,
+            wa,
+            Some(PhysRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1040
+            })
+        ));
+        // 自动隐藏任务栏保留 1px 容差 -> 无需循环重入
+        assert!(!maximized_client_needs_reconcile(
+            PhysRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1039
+            },
+            wa,
+            Some(PhysRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1039
+            })
+        ));
+        // 底部被 tao 错扣 8px（经典白线场景）-> 必须检出并触发无闪烁重置
+        assert!(maximized_client_needs_reconcile(
+            PhysRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1032
+            },
+            wa,
+            None
+        ));
+        // 客户区正确但 WebView2 Bounds 滞后 2px -> 必须检出并强制 SetBounds
+        assert!(maximized_client_needs_reconcile(
+            wa,
+            wa,
+            Some(PhysRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1038
+            })
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_nc_paint_subclass_eliminates_bottom_white_line_on_maximized_restore() {
+        #[repr(C)]
+        #[derive(Default, Clone, Copy)]
+        struct WinPoint {
+            x: i32,
+            y: i32,
+        }
+        #[repr(C)]
+        #[derive(Default, Clone, Copy)]
+        struct WinRect {
+            left: i32,
+            top: i32,
+            right: i32,
+            bottom: i32,
+        }
+        #[repr(C)]
+        struct WinNcCalcSizeParams {
+            rgrc: [WinRect; 3],
+            lppos: usize,
+        }
+        #[repr(C)]
+        #[derive(Default)]
+        struct WinMonitorInfo {
+            cb_size: u32,
+            rc_monitor: WinRect,
+            rc_work: WinRect,
+            dw_flags: u32,
+        }
+        #[repr(C)]
+        struct WinClassExW {
+            cb_size: u32,
+            style: u32,
+            lpfn_wnd_proc:
+                Option<unsafe extern "system" fn(isize, u32, usize, isize) -> isize>,
+            cb_cls_extra: i32,
+            cb_wnd_extra: i32,
+            h_instance: isize,
+            h_icon: isize,
+            h_cursor: isize,
+            hbr_background: isize,
+            lpsz_menu_name: *const u16,
+            lpsz_class_name: *const u16,
+            h_icon_sm: isize,
+        }
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetModuleHandleW(lp_module_name: *const u16) -> isize;
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn RegisterClassExW(lpwcx: *const WinClassExW) -> u16;
+            fn CreateWindowExW(
+                dw_ex_style: u32,
+                lp_class_name: *const u16,
+                lp_window_name: *const u16,
+                dw_style: u32,
+                x: i32,
+                y: i32,
+                n_width: i32,
+                n_height: i32,
+                h_wnd_parent: isize,
+                h_menu: isize,
+                h_instance: isize,
+                lp_param: isize,
+            ) -> isize;
+            fn DestroyWindow(hwnd: isize) -> i32;
+            fn DefWindowProcW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+            fn ShowWindow(hwnd: isize, n_cmd_show: i32) -> i32;
+            fn SetWindowLongW(hwnd: isize, n_index: i32, dw_new_long: i32) -> i32;
+            fn SetWindowPos(
+                hwnd: isize,
+                hwnd_insert_after: isize,
+                x: i32,
+                y: i32,
+                cx: i32,
+                cy: i32,
+                u_flags: u32,
+            ) -> i32;
+            fn IsZoomed(hwnd: isize) -> i32;
+            fn MonitorFromWindow(hwnd: isize, dw_flags: u32) -> isize;
+            fn GetMonitorInfoW(h_monitor: isize, lpmi: *mut WinMonitorInfo) -> i32;
+            fn GetWindowRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
+            fn GetClientRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
+            fn ClientToScreen(hwnd: isize, lp_point: *mut WinPoint) -> i32;
+            fn GetWindowDC(hwnd: isize) -> isize;
+            fn ReleaseDC(hwnd: isize, hdc: isize) -> i32;
+            fn PrintWindow(hwnd: isize, hdc_blt: isize, n_flags: u32) -> i32;
+        }
+        #[link(name = "gdi32")]
+        extern "system" {
+            fn CreateCompatibleDC(hdc: isize) -> isize;
+            fn CreateCompatibleBitmap(hdc: isize, cx: i32, cy: i32) -> isize;
+            fn SelectObject(hdc: isize, h: isize) -> isize;
+            fn DeleteObject(ho: isize) -> i32;
+            fn DeleteDC(hdc: isize) -> i32;
+            fn GetPixel(hdc: isize, x: i32, y: i32) -> u32;
+        }
+
+        unsafe extern "system" fn mock_tao_wnd_proc(
+            hwnd: isize,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+        ) -> isize {
+            const WM_NCCALCSIZE: u32 = 0x0083;
+            if msg == WM_NCCALCSIZE && IsZoomed(hwnd) != 0 {
+                let hmon = MonitorFromWindow(hwnd, 2);
+                let mut mi = WinMonitorInfo {
+                    cb_size: std::mem::size_of::<WinMonitorInfo>() as u32,
+                    ..Default::default()
+                };
+                if hmon != 0 && GetMonitorInfoW(hmon, &mut mi) != 0 {
+                    let mut rc = mi.rc_work;
+                    // 模拟自动隐藏任务栏留出 1px 非客户区底边
+                    rc.bottom -= 1;
+                    if wparam == 0 {
+                        *(lparam as *mut WinRect) = rc;
+                    } else {
+                        (*(lparam as *mut WinNcCalcSizeParams)).rgrc[0] = rc;
+                    }
+                    return 0;
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+
+        unsafe {
+            let hinst = GetModuleHandleW(std::ptr::null());
+            let cls_name: Vec<u16> = "BmTestNcSubclassWindow\0".encode_utf16().collect();
+            let wc = WinClassExW {
+                cb_size: std::mem::size_of::<WinClassExW>() as u32,
+                style: 0x0023,
+                lpfn_wnd_proc: Some(mock_tao_wnd_proc),
+                cb_cls_extra: 0,
+                cb_wnd_extra: 0,
+                h_instance: hinst,
+                h_icon: 0,
+                h_cursor: 0,
+                hbr_background: 0,
+                lpsz_menu_name: std::ptr::null(),
+                lpsz_class_name: cls_name.as_ptr(),
+                h_icon_sm: 0,
+            };
+            let _ = RegisterClassExW(&wc);
+
+            let base_style: i32 = 0x00C00000 | 0x04000000 | 0x00080000 | 0x00040000 | 0x00010000 | 0x00020000;
+            let ws_visible: i32 = 0x10000000;
+            let ws_maximize: i32 = 0x01000000;
+
+            let hwnd = CreateWindowExW(
+                0x00040110,
+                cls_name.as_ptr(),
+                cls_name.as_ptr(),
+                base_style as u32,
+                100,
+                100,
+                800,
+                600,
+                0,
+                0,
+                hinst,
+                0,
+            );
+            assert!(hwnd != 0);
+            MAIN_BG_COLORREF.store(12u32 | (14u32 << 8) | (20u32 << 16), Ordering::Relaxed);
+            install_nc_paint_subclass_on_hwnd(hwnd);
+
+            // 1. 首次显示并最大化
+            let _ = ShowWindow(hwnd, 5);
+            let _ = ShowWindow(hwnd, 3);
+            let _ = SetWindowLongW(hwnd, -16, base_style | ws_visible | ws_maximize);
+            let _ = SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037);
+            let _ = ShowWindow(hwnd, 5);
+
+            // 2. 最大化态隐藏（进入 Mini 模式）
+            let _ = ShowWindow(hwnd, 0);
+            let _ = SetWindowLongW(hwnd, -16, base_style | ws_maximize);
+            let _ = SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037);
+
+            // 3. 复现 tao 的 show() 恢复序列
+            let _ = ShowWindow(hwnd, 3);
+            let _ = SetWindowLongW(hwnd, -16, base_style | ws_maximize);
+            let _ = SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037);
+            let _ = ShowWindow(hwnd, 5);
+
+            // 4. 通过 PrintWindow 校验底部非客户区 1px 绝非纯白 (0x00FFFFFF)，而是主题深色 (12, 14, 20)
+            let mut wr = WinRect::default();
+            let mut cr = WinRect::default();
+            assert!(GetWindowRect(hwnd, &mut wr) != 0);
+            assert!(GetClientRect(hwnd, &mut cr) != 0);
+            let mut tl = WinPoint { x: 0, y: 0 };
+            assert!(ClientToScreen(hwnd, &mut tl) != 0);
+            let w = wr.right - wr.left;
+            let h = wr.bottom - wr.top;
+            let client_bot_in_win = (tl.y - wr.top) + (cr.bottom - cr.top);
+
+            let hdc_win = GetWindowDC(hwnd);
+            let hdc_mem = CreateCompatibleDC(hdc_win);
+            let hbmp = CreateCompatibleBitmap(hdc_win, w, h);
+            let old = SelectObject(hdc_mem, hbmp);
+            let pw_ok = PrintWindow(hwnd, hdc_mem, 0);
+            assert_eq!(pw_ok, 1);
+
+            let nc_pixel = GetPixel(hdc_mem, w / 2, client_bot_in_win);
+            assert_ne!(nc_pixel, 0x00FF_FFFF, "Maximized bottom non-client row must never be white");
+            assert_eq!(
+                nc_pixel,
+                12u32 | (14u32 << 8) | (20u32 << 16),
+                "Maximized bottom non-client row must match active theme background color"
+            );
+
+            let _ = SelectObject(hdc_mem, old);
+            let _ = DeleteObject(hbmp);
+            let _ = DeleteDC(hdc_mem);
+            let _ = ReleaseDC(hwnd, hdc_win);
+            let _ = DestroyWindow(hwnd);
+        }
     }
 }
