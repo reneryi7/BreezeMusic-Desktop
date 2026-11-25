@@ -1,6 +1,6 @@
 import type { SettingsSectionId } from "../types";
 
-export const APP_VERSION = "1.1.0";
+export const APP_VERSION = "1.1.1";
 export const APP_VERSION_TAG = `v${APP_VERSION}`;
 
 export interface SettingsNavItem {

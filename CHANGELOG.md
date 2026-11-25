@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+---
+
+## [1.1.1] - 2026-11-25
+
+**BreezeMusic Desktop `v1.1.1`** 带来沉浸播放页「光晕浮升 · 声浪呼吸」每字独立弹簧与 120Hz 行级瀑布滚动、全站 1040px 容器自适应单/双列空间 FLIP 归位、默认与最大化窗口进入 Mini 小窗的零闪屏三段式 GPU 过渡，以及自动隐藏任务栏下的灵动岛防消失与顶栏悬停体验全面加固。
+
 ### 新增 (Added)
 - **「设置 → 常规与窗口」新增「全屏视频/游戏时自动隐藏 Mini 灵动岛」开关**：默认开启，同屏进入真正的 F11 浏览器全屏、全屏视频、PPT 放映或全屏/无边框全屏游戏时自动无痕隐身礼让，退出全屏瞬时恢复，亦支持用户按需关闭以始终保持灵动岛置顶；同步纳入设置中心中英文实时搜索索引。
 - **Mini 灵动岛贴边停靠位置记忆**：贴边吸附与沿边滑动后自动持久化沿边归一化停靠比例（`bm_mini_dock_anchor_v1`），重启或冷启动再次切入小窗时精准回到上次自定义贴边位置。
@@ -109,7 +115,8 @@
   - 基于 Rust + Tauri 2.0 实现端侧协议通信、本地 Range 音频流代理 (`AudioStreamProxy`) 与 FLAC/MP3/OGG 元数据及封面处理。
   - 采用 Windows DPAPI + AES-256-CBC / HMAC-SHA256 本地凭证加密存储、`zeroize` 内存清零、代理反 SSRF 校验及多窗体 IPC 权限守卫。
 
-[Unreleased]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/reneryi7/BreezeMusic-Desktop/releases/tag/v1.0.0
