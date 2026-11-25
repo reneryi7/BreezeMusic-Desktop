@@ -902,6 +902,9 @@ export const useAppStore = defineStore("breezeApp", () => {
   const closeToTray = ref<boolean>(
     localStorage.getItem("bm_close_to_tray") !== "false"
   );
+  const miniYieldFullscreenEnabled = ref<boolean>(
+    localStorage.getItem("bm_mini_yield_fullscreen_v1") !== "false"
+  );
   const clipboardShareDetectEnabled = ref<boolean>(
     localStorage.getItem("bm_clipboard_share_detect_v1") !== "false"
   );
@@ -1683,6 +1686,10 @@ export const useAppStore = defineStore("breezeApp", () => {
   watch(closeToTray, (v) => {
     localStorage.setItem("bm_close_to_tray", String(v));
     kugouClient.setCloseToTray(v).catch(() => {});
+  });
+  watch(miniYieldFullscreenEnabled, (v) => {
+    localStorage.setItem("bm_mini_yield_fullscreen_v1", String(v));
+    kugouClient.setMiniPlayerYieldFullscreen(v).catch(() => {});
   });
   watch(clipboardShareDetectEnabled, (v) => {
     localStorage.setItem("bm_clipboard_share_detect_v1", String(v));
@@ -3324,11 +3331,9 @@ export const useAppStore = defineStore("breezeApp", () => {
     } else if (!hasTauriBridge) {
       broadcastMiniPlayerState(true);
     }
-    notify(
-      next
-        ? "已切入独立透明 Mini 灵动岛小窗（按 Ctrl+Alt+M 可随时还原）"
-        : "已还原标准主窗口视图"
-    );
+    if (!next) {
+      notify("已还原标准主窗口视图");
+    }
   }
   const currentSong = computed<Song | null>(() =>
     currentIndex.value >= 0 && currentIndex.value < playQueue.value.length
@@ -5254,8 +5259,11 @@ export const useAppStore = defineStore("breezeApp", () => {
       activeHighResCoverMetrics.value = { width: 1080, height: 1080 };
     }
 
-    // 同步系统托盘关闭策略、开机自启动、自定义全局热键、缓存配额与独立桌面歌词窗口状态
+    // 同步系统托盘关闭策略、全屏灵动岛礼让策略、开机自启动、自定义全局热键、缓存配额与独立桌面歌词窗口状态
     kugouClient.setCloseToTray(closeToTray.value).catch(() => {});
+    kugouClient
+      .setMiniPlayerYieldFullscreen(miniYieldFullscreenEnabled.value)
+      .catch(() => {});
     kugouClient.setGlobalHotkeysEnabled(osGlobalHotkeysEnabled.value).catch(() => {});
     syncGlobalHotkeysToOs(false);
     refreshAutostartState();
@@ -7847,6 +7855,7 @@ export const useAppStore = defineStore("breezeApp", () => {
     autoPlayOnStartup,
     autoResumeOnStartup: autoPlayOnStartup,
     closeToTray,
+    miniYieldFullscreenEnabled,
     playerStageStyle,
     playerBgStyle,
     coverColorStageMode,

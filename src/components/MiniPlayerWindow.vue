@@ -80,6 +80,7 @@ const props = withDefaults(
 );
 
 const MINI_DOCK_EDGE_STORAGE_KEY = "bm_mini_dock_edge_v1";
+const MINI_DOCK_ANCHOR_STORAGE_KEY = "bm_mini_dock_anchor_v1";
 const MINI_SNAPSHOT_STORAGE_KEY = "bm_mini_player_snapshot_v1";
 const MINI_POS_STORAGE_KEY = "bm_mini_player_pos_v1";
 
@@ -105,6 +106,30 @@ function readSavedDockEdge(): DockEdge {
 function saveDockEdge(edge: DockEdge) {
   try {
     localStorage.setItem(MINI_DOCK_EDGE_STORAGE_KEY, edge);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function readSavedDockRatio(): number | null {
+  try {
+    const raw = localStorage.getItem(MINI_DOCK_ANCHOR_STORAGE_KEY);
+    if (!raw) return null;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0 && n <= 1) {
+      return n;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
+
+function saveDockRatio(ratio: number | null | undefined) {
+  if (typeof ratio !== "number" || !Number.isFinite(ratio)) return;
+  try {
+    const clamped = Math.max(0, Math.min(1, ratio));
+    localStorage.setItem(MINI_DOCK_ANCHOR_STORAGE_KEY, clamped.toFixed(4));
   } catch {
     // ignore storage errors
   }
@@ -342,21 +367,31 @@ function applyMiniStageTransition(payload: MiniTransitionPayload | null | undefi
       });
       return;
     }
-    if (stagePhase.value !== "entering") {
+    const alreadyPreparedEntering = stagePhase.value === "entering";
+    if (!alreadyPreparedEntering) {
       stageInstant.value = true;
       stagePhase.value = "entering";
-    }
-    // 双帧锁相：先确保浏览器提交 entering 起始帧，再解除 instant 并弹性浮现
-    stageRevealRaf1 = requestAnimationFrame(() => {
-      stageRevealRaf1 = null;
-      stageRevealRaf2 = requestAnimationFrame(() => {
-        stageRevealRaf2 = null;
+      // 未预提交 entering 起始帧时走双帧锁相
+      stageRevealRaf1 = requestAnimationFrame(() => {
+        stageRevealRaf1 = null;
+        stageRevealRaf2 = requestAnimationFrame(() => {
+          stageRevealRaf2 = null;
+          if (isMiniWindowVisible.value) {
+            stageInstant.value = false;
+            stagePhase.value = "visible";
+          }
+        });
+      });
+    } else {
+      // 已在 DWMWA_CLOAK 隐身斗篷下提前合成好 entering 起势帧，单帧即刻丝滑弹性浮现（零滞后、零双闪）
+      stageRevealRaf1 = requestAnimationFrame(() => {
+        stageRevealRaf1 = null;
         if (isMiniWindowVisible.value) {
           stageInstant.value = false;
           stagePhase.value = "visible";
         }
       });
-    });
+    }
     return;
   }
 
@@ -1119,6 +1154,35 @@ function scheduleCloseVolumeDrawer() {
   }, 240);
 }
 
+// Hover state self-healing for stealth top bar
+function onShellPointerEnter() {
+  if (stagePhase.value === "exiting" || stagePhase.value === "hidden") return;
+  isHoveringShell.value = true;
+}
+
+function onShellPointerMove() {
+  if (
+    visualMode.value === "card" &&
+    !isHoveringShell.value &&
+    stagePhase.value !== "exiting" &&
+    stagePhase.value !== "hidden"
+  ) {
+    isHoveringShell.value = true;
+  }
+}
+
+function onShellPointerLeave() {
+  isHoveringShell.value = false;
+  hideMiniTip();
+}
+
+function handleDocumentMouseLeave() {
+  if (!isPointerDragging.value) {
+    isHoveringShell.value = false;
+    hideMiniTip();
+  }
+}
+
 // Expand / Collapse Dynamic Island with zero-resize 480x228 fluid choreography
 async function expandDockIsland() {
   if (dockEdge.value === "none") return;
@@ -1129,11 +1193,16 @@ async function expandDockIsland() {
   }
   const guardNow = performance.now();
   lastExpandAtMs = guardNow;
-  headerActionShieldUntil = guardNow + 440;
+  headerActionShieldUntil = guardNow + 340;
   isIslandExpanded.value = true;
+  // 点击贴边灵动岛时鼠标必定位于小窗内，展开瞬间同步激活悬停态，避免穿透切换/set_focus 吞掉 pointerenter
+  isHoveringShell.value = true;
   if (isStandalone.value && isTauriRuntime) {
     await invoke("expand_mini_player_from_dock_cmd", { edge: dockEdge.value }).catch(() => {});
     lastExpandAtMs = performance.now();
+    if (isIslandExpanded.value && isMiniWindowVisible.value && stagePhase.value !== "exiting") {
+      isHoveringShell.value = true;
+    }
   }
 }
 
@@ -1159,6 +1228,7 @@ function collapseDockIsland() {
 // Drag + 4-edge magnet engine
 let dragActive = false;
 let dragMoved = false;
+let dragPointerId: number | null = null;
 let dragStartX = 0;
 let dragStartY = 0;
 let dragDockEdge: DockEdge = "none";
@@ -1306,11 +1376,18 @@ async function onShellPointerDown(ev: PointerEvent) {
   }
   dragActive = true;
   dragMoved = false;
+  dragPointerId = ev.pointerId;
   dragStartX = ev.clientX;
   dragStartY = ev.clientY;
   dragDockEdge = dockEdge.value;
   dragExpanded = isIslandExpanded.value;
   snapHintEdge.value = "none";
+
+  try {
+    shellElRef.value?.setPointerCapture(ev.pointerId);
+  } catch {
+    // ignore pointer capture errors in synthetic events
+  }
 
   if (isStandalone.value && isTauriRuntime) {
     dragScaleFactor = window.devicePixelRatio || 1;
@@ -1362,10 +1439,31 @@ function onWindowPointerMove(ev: PointerEvent) {
   }
 }
 
+function releaseDragPointerCapture() {
+  if (dragPointerId !== null) {
+    const pid = dragPointerId;
+    dragPointerId = null;
+    try {
+      if (shellElRef.value?.hasPointerCapture(pid)) {
+        shellElRef.value.releasePointerCapture(pid);
+      }
+    } catch {
+      // ignore release errors
+    }
+  }
+}
+
+function onShellLostPointerCapture() {
+  if (dragActive) {
+    void onWindowPointerUp();
+  }
+}
+
 async function onWindowPointerUp() {
   window.removeEventListener("pointermove", onWindowPointerMove);
   window.removeEventListener("pointerup", onWindowPointerUp);
   window.removeEventListener("pointercancel", onWindowPointerUp);
+  releaseDragPointerCapture();
 
   if (!dragActive) return;
   const wasMoved = dragMoved;
@@ -1389,7 +1487,11 @@ async function onWindowPointerUp() {
     isIslandExpanded.value = false;
     if (isStandalone.value && isTauriRuntime) {
       if (collapseTimer !== null) window.clearTimeout(collapseTimer);
-      invoke("snap_mini_player_to_edge_cmd", { edge: targetSnapEdge }).catch(() => {});
+      invoke<number | null>("snap_mini_player_to_edge_cmd", { edge: targetSnapEdge })
+        .then((ratio) => {
+          saveDockRatio(ratio);
+        })
+        .catch(() => {});
     } else {
       const vw = window.innerWidth;
       const vh = window.innerHeight;
@@ -1407,10 +1509,28 @@ async function onWindowPointerUp() {
     }
   } else {
     saveDockEdge(dockEdge.value);
+    // 贴边收起态沿同一边缘滑动结束时，同步精准对齐并持久化新的停靠比例
+    if (
+      isStandalone.value &&
+      isTauriRuntime &&
+      dockEdge.value !== "none" &&
+      !isIslandExpanded.value
+    ) {
+      invoke<number | null>("snap_mini_player_to_edge_cmd", { edge: dockEdge.value })
+        .then((ratio) => {
+          saveDockRatio(ratio);
+        })
+        .catch(() => {});
+    }
   }
 }
 
 function handleWindowBlur() {
+  if (dragActive) {
+    void onWindowPointerUp();
+  }
+  isHoveringShell.value = false;
+  hideMiniTip();
   if (performance.now() - lastExpandAtMs < 640) return;
   if (isPointerDragging.value || isDraggingVolume.value || isScrubbingProgress.value) return;
   if (dockEdge.value !== "none" && isIslandExpanded.value) {
@@ -1565,11 +1685,6 @@ onMounted(async () => {
             if (stagePhase.value === "hidden" || stagePhase.value === "exiting") {
               applyMiniStageTransition({ phase: "entering" });
             }
-            if (dockEdge.value !== "none" && !isIslandExpanded.value) {
-              invoke("snap_mini_player_to_edge_cmd", { edge: dockEdge.value }).catch(() => {});
-            } else if (dockEdge.value !== "none" && isIslandExpanded.value) {
-              invoke("expand_mini_player_from_dock_cmd", { edge: dockEdge.value }).catch(() => {});
-            }
           } else {
             isHoveringShell.value = false;
             hideMiniTip();
@@ -1581,22 +1696,30 @@ onMounted(async () => {
       ).catch(() => null);
       if (unlistenVis) unlisteners.push(unlistenVis);
 
-      const unlistenLeave = await listen("bm-mini-island-cursor-leave", () => {
-        isHoveringShell.value = false;
-        hideMiniTip();
-      }).catch(() => null);
+      const unlistenLeave = await listen<{ modeGen?: number }>(
+        "bm-mini-island-cursor-leave",
+        () => {
+          // 仅在真正处于收起态灵动岛时响应后端热区离场，彻底屏蔽展开过渡期的延迟离场事件误杀顶栏！
+          if (visualMode.value !== "card" && !isIslandExpanded.value) {
+            isHoveringShell.value = false;
+            hideMiniTip();
+          }
+        }
+      ).catch(() => null);
       if (unlistenLeave) unlisteners.push(unlistenLeave);
 
-      if (dockEdge.value !== "none" && !isIslandExpanded.value) {
-        invoke("snap_mini_player_to_edge_cmd", { edge: dockEdge.value }).catch(() => {});
-      } else if (dockEdge.value !== "none" && isIslandExpanded.value) {
-        invoke("expand_mini_player_from_dock_cmd", { edge: dockEdge.value }).catch(() => {});
-      }
+      // 挂载/预热期间仅静默同步持久化的贴边偏好与归一化停靠比例，绝不误移动隐藏窗或污染定位标志
+      invoke("sync_mini_player_dock_pref_cmd", {
+        edge: dockEdge.value,
+        expanded: isIslandExpanded.value,
+        ratio: readSavedDockRatio(),
+      }).catch(() => {});
     }
 
     dispatchMiniCommand({ type: "CMD_MINI_PLAYER_READY" });
     scheduleHandshakeWaves();
     window.addEventListener("blur", handleWindowBlur);
+    document.addEventListener("mouseleave", handleDocumentMouseLeave);
   } else {
     lastKnownVolume = Math.max(0.15, Number(store.value.volume ?? 0.65));
   }
@@ -1610,7 +1733,9 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (typeof document !== "undefined") {
     document.removeEventListener("visibilitychange", syncClockLoopDemand);
+    document.removeEventListener("mouseleave", handleDocumentMouseLeave);
   }
+  releaseDragPointerCapture();
   if (miniTypoChannel) {
     miniTypoChannel.close();
     miniTypoChannel = null;
@@ -1671,15 +1796,7 @@ onBeforeUnmount(() => {
     :style="rootDynamicStyle"
     @click="handlePreviewStageClick"
   >
-    <div
-      class="bm-mini-shell-anchor"
-      :style="previewShellStyle"
-      @pointerenter="isHoveringShell = true"
-      @pointerleave="
-        isHoveringShell = false;
-        hideMiniTip();
-      "
-    >
+    <div class="bm-mini-shell-anchor" :style="previewShellStyle">
       <div
         ref="shellElRef"
         class="bm-mini-shell"
@@ -1690,6 +1807,10 @@ onBeforeUnmount(() => {
           snapHintEdge !== 'none' ? `snap-preview-${snapHintEdge}` : '',
         ]"
         :style="{ cursor: isPointerDragging ? 'grabbing' : undefined }"
+        @pointerenter="onShellPointerEnter"
+        @pointermove="onShellPointerMove"
+        @pointerleave="onShellPointerLeave"
+        @lostpointercapture="onShellLostPointerCapture"
         @pointerdown="onShellPointerDown"
         @wheel="onWheelAdjustVolume"
       >
@@ -2895,10 +3016,20 @@ onBeforeUnmount(() => {
     transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.bm-card-header.is-revealed {
+.bm-card-header.is-revealed,
+.bm-mini-shell.shell-card:hover .bm-card-header,
+.bm-mini-shell.shell-card:focus-within .bm-card-header {
   opacity: 1;
   transform: translateY(0);
   pointer-events: auto;
+}
+
+@media (hover: none) {
+  .bm-mini-shell.shell-card .bm-card-header {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
 }
 
 .bm-card-status-pills {

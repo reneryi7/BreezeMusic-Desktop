@@ -50,6 +50,15 @@ function handleToggleCloseToTray(val: boolean) {
   );
 }
 
+function handleToggleMiniYieldFullscreen(val: boolean) {
+  store.miniYieldFullscreenEnabled = val;
+  store.notify(
+    val
+      ? "检测到同屏全屏视频、游戏或 F11 全屏时将自动隐藏 Mini 灵动岛（不影响普通最大化窗口）"
+      : "已关闭全屏自动礼让，Mini 灵动岛将始终保持置顶"
+  );
+}
+
 async function handleManualRefreshAll() {
   if (store.isBackgroundRefreshing) return;
   store.notify("正在错峰刷新全模块推荐与云端资产...");
@@ -213,6 +222,25 @@ async function handleManualRefreshAll() {
           :model-value="store.closeToTray"
           aria-label="关闭主窗口时最小化至系统托盘"
           @update:model-value="handleToggleCloseToTray"
+        />
+      </SettingsRow>
+
+      <SettingsRow
+        title="全屏视频/游戏时自动隐藏 Mini 灵动岛"
+        description="同屏进入真正的 F11 浏览器全屏、全屏视频、PPT 放映或全屏游戏时自动无痕隐藏灵动岛，退出后瞬时恢复（自动隐藏任务栏与普通最大化窗口不受影响）"
+        icon="sparkles"
+        icon-color="var(--cyan)"
+        :badge="store.miniYieldFullscreenEnabled ? '智能礼让' : '始终置顶'"
+        :badge-tone="store.miniYieldFullscreenEnabled ? 'mint' : 'muted'"
+        label-for="bms-sw-mini-yield-fs"
+        setting-id="general-mini-yield-fullscreen"
+        :highlighted="highlightedId === 'general-mini-yield-fullscreen'"
+      >
+        <SettingsSwitch
+          id="bms-sw-mini-yield-fs"
+          :model-value="store.miniYieldFullscreenEnabled"
+          aria-label="全屏视频或游戏时自动隐藏 Mini 灵动岛"
+          @update:model-value="handleToggleMiniYieldFullscreen"
         />
       </SettingsRow>
 

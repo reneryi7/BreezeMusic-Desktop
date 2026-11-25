@@ -470,6 +470,11 @@ html[data-theme="watercolor_light"][data-light-variant="nordic_oat"] .bm-tilt-su
   transition-delay: 66ms;
 }
 
+.unified-song-row:hover .usr-hover-actions > :nth-child(5),
+.unified-song-row:focus-within .usr-hover-actions > :nth-child(5) {
+  transition-delay: 88ms;
+}
+
 /* 全局统一加载旋转类（消除跨组件 .is-spinning / .spin-anim 不一致与未定义缺陷） */
 @keyframes bm-icon-spin {
   from {

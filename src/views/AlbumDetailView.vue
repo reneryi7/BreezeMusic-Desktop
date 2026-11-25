@@ -1179,23 +1179,9 @@ function goToAlbumArtist() {
   color: var(--text-secondary);
 }
 
-/* 全局统一 2 列双行曲目网格 */
+/* 全局统一自适应单/双列曲目网格（阈值与空间 FLIP 由 skyline-components.css 与 adaptiveSongGrid.ts 统一驱动） */
 .frameless-songs-grid-2col {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px 14px;
-}
-
-@container (max-width: 780px) {
-  .frameless-songs-grid-2col {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 980px) {
-  .frameless-songs-grid-2col {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 /* .unified-song-row 统一样式已由 src/styles/skyline-components.css 提供 */

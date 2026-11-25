@@ -280,6 +280,14 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: ["托盘", "关闭", "最小化", "后台", "退出", "开机", "自启动", "autostart"],
   },
   {
+    id: "general-mini-yield-fullscreen",
+    section: "general",
+    sectionTitle: "常规与窗口",
+    title: "全屏视频/游戏时自动隐藏 Mini 灵动岛",
+    description: "进入真正的 F11、全屏视频或全屏游戏时自动礼让隐藏灵动岛，退出后瞬时恢复",
+    keywords: ["全屏", "礼让", "自动隐藏", "灵动岛", "小窗", "mini", "置顶", "游戏", "视频"],
+  },
+  {
     id: "general-auto-refresh",
     section: "general",
     sectionTitle: "常规与窗口",

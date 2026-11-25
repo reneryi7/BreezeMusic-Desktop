@@ -474,6 +474,7 @@ onBeforeUnmount(() => {
   max-height: 380px;
   overflow-y: auto;
   padding-right: 4px;
+  container-type: inline-size;
 }
 
 .rqm-skeleton-list {

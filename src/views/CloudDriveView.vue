@@ -1390,6 +1390,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  container-type: inline-size;
 }
 
 .cdv-monogram {

@@ -3940,6 +3940,10 @@ body {
   align-items: center;
 }
 
+.frameless-songs-grid-2col.is-col-reflowing {
+  overflow-anchor: none;
+}
+
 .hero-expanded-song-stage .frameless-songs-grid-2col {
   flex: 1 1 0;
   min-height: 0;
@@ -3950,16 +3954,28 @@ body {
   padding: 4px 4px 52px;
 }
 
-@container (max-width: 780px) {
-  .frameless-songs-grid-2col {
-    grid-template-columns: 1fr;
+/* 首帧未挂载 JS 滞回属性前的纯容器查询基准（1040px 均衡档：每列保证 >= 510px） */
+@container (max-width: 1039px) {
+  .frameless-songs-grid-2col:not([data-song-cols]) {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
-@media (max-width: 1020px) {
-  .frameless-songs-grid-2col {
-    grid-template-columns: 1fr;
+@supports not (container-type: inline-size) {
+  @media (max-width: 1080px) {
+    .frameless-songs-grid-2col:not([data-song-cols]) {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
+}
+
+/* JS 滞回（1056px 进双列 / 1020px 退单列）+ 空间 FLIP 引擎接管后的权威列数态 */
+.frameless-songs-grid-2col[data-song-cols="1"] {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.frameless-songs-grid-2col[data-song-cols="2"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
 }
 
 /* ============================================================================
@@ -4382,10 +4398,10 @@ button.usr-album:hover,
   z-index: 3;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 2px 4px;
-  border-radius: var(--bm-r-sm, 10px);
-  background: color-mix(in srgb, var(--bg-elevated, #151822) 86%, transparent);
+  gap: 4px;
+  padding: 3px 6px;
+  border-radius: var(--bm-r-md, 12px);
+  background: color-mix(in srgb, var(--bg-elevated, #151822) 88%, transparent);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
@@ -4399,7 +4415,7 @@ button.usr-album:hover,
 
 .scheme-watercolor_light .usr-hover-actions,
 [data-theme="watercolor_light"] .usr-hover-actions {
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.94);
   box-shadow: 0 6px 18px rgba(79, 70, 229, 0.11);
 }
 
@@ -4413,9 +4429,179 @@ button.usr-album:hover,
 
 .scheme-abyssal_dark.dark-variant-velvet_nebula .usr-hover-actions,
 [data-theme="abyssal_dark"][data-dark-variant="velvet_nebula"] .usr-hover-actions {
-  background: rgba(39, 24, 34, 0.95);
+  background: rgba(39, 24, 34, 0.96);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+}
+
+/* 单列宽裕态：为右侧悬停操作键预留专属占位通道，悬停与键盘聚焦时 100% 不压文字、不生硬叠层 */
+.frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions) .usr-right-zone {
+  min-width: 184px;
+  margin-left: 16px;
+}
+
+.frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row .usr-hover-actions {
+  right: 0;
+  gap: 4px;
+  padding: 2px 4px;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+
+@container (max-width: 1039px) {
+  .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions) .usr-right-zone {
+    min-width: 184px;
+    margin-left: 16px;
+  }
+
+  .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row .usr-hover-actions {
+    right: 0;
+    gap: 4px;
+    padding: 2px 4px;
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: none;
+  }
+}
+
+/* 极窄单列容器（<= 580px，如极限缩窄窗口或窄弹窗）：自动退回紧凑浮层胶囊并启用羽化遮罩 */
+@container (max-width: 580px) {
+  .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions) .usr-right-zone,
+  .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions) .usr-right-zone {
+    min-width: 44px;
+    margin-left: 6px;
+  }
+
+  .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row .usr-hover-actions,
+  .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row .usr-hover-actions {
+    right: -2px;
+    gap: 3px;
+    padding: 3px 5px;
+    background: color-mix(in srgb, var(--bg-elevated, #151822) 88%, transparent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  }
+
+  .scheme-watercolor_light .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row .usr-hover-actions,
+  [data-theme="watercolor_light"] .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row .usr-hover-actions,
+  .scheme-watercolor_light .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row .usr-hover-actions,
+  [data-theme="watercolor_light"] .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row .usr-hover-actions {
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 6px 18px rgba(79, 70, 229, 0.11);
+  }
+
+  .scheme-watercolor_light.light-variant-nordic_oat .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row .usr-hover-actions,
+  [data-theme="watercolor_light"][data-light-variant="nordic_oat"] .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row .usr-hover-actions,
+  .scheme-watercolor_light.light-variant-nordic_oat .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row .usr-hover-actions,
+  [data-theme="watercolor_light"][data-light-variant="nordic_oat"] .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row .usr-hover-actions {
+    background: #fcf9f2;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: 0 6px 16px rgba(42, 33, 22, 0.11);
+  }
+
+  .scheme-abyssal_dark.dark-variant-velvet_nebula .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row .usr-hover-actions,
+  [data-theme="abyssal_dark"][data-dark-variant="velvet_nebula"] .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row .usr-hover-actions,
+  .scheme-abyssal_dark.dark-variant-velvet_nebula .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row .usr-hover-actions,
+  [data-theme="abyssal_dark"][data-dark-variant="velvet_nebula"] .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row .usr-hover-actions {
+    background: rgba(39, 24, 34, 0.96);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions):hover .usr-meta-stack:not(:has(:focus-visible)),
+  .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions):focus-within .usr-meta-stack:not(:has(:focus-visible)),
+  .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions):hover .usr-meta-stack:not(:has(:focus-visible)),
+  .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions):focus-within .usr-meta-stack:not(:has(:focus-visible)) {
+    -webkit-mask-image: linear-gradient(
+      to right,
+      #000 0%,
+      #000 calc(100% - 124px),
+      transparent calc(100% - 82px)
+    );
+    mask-image: linear-gradient(
+      to right,
+      #000 0%,
+      #000 calc(100% - 124px),
+      transparent calc(100% - 82px)
+    );
+  }
+
+  .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions > :nth-child(5)):hover .usr-meta-stack:not(:has(:focus-visible)),
+  .frameless-songs-grid-2col[data-song-cols="1"] .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions > :nth-child(5)):focus-within .usr-meta-stack:not(:has(:focus-visible)),
+  .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions > :nth-child(5)):hover .usr-meta-stack:not(:has(:focus-visible)),
+  .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions > :nth-child(5)):focus-within .usr-meta-stack:not(:has(:focus-visible)) {
+    -webkit-mask-image: linear-gradient(
+      to right,
+      #000 0%,
+      #000 calc(100% - 158px),
+      transparent calc(100% - 116px)
+    );
+    mask-image: linear-gradient(
+      to right,
+      #000 0%,
+      #000 calc(100% - 158px),
+      transparent calc(100% - 116px)
+    );
+  }
+}
+
+/* 双列态（及电台窄队列）悬停时对超长文本右侧边缘施加平滑羽化渐隐遮罩（背景透明无关，四主题全兼容；排除内部焦点防裁切焦点环） */
+.frameless-songs-grid-2col[data-song-cols="2"] .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions):hover .usr-meta-stack:not(:has(:focus-visible)),
+.frameless-songs-grid-2col[data-song-cols="2"] .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions):focus-within .usr-meta-stack:not(:has(:focus-visible)),
+.rltd-unified-list .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions):hover .usr-meta-stack:not(:has(:focus-visible)),
+.rltd-unified-list .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions):focus-within .usr-meta-stack:not(:has(:focus-visible)) {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 0%,
+    #000 calc(100% - 124px),
+    transparent calc(100% - 82px)
+  );
+  mask-image: linear-gradient(
+    to right,
+    #000 0%,
+    #000 calc(100% - 124px),
+    transparent calc(100% - 82px)
+  );
+}
+
+/* 5 键操作行（歌单/专辑/云盘/本地）自动延展左侧羽化起始点，确保全键域无文字硬切 */
+.frameless-songs-grid-2col[data-song-cols="2"] .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions > :nth-child(5)):hover .usr-meta-stack:not(:has(:focus-visible)),
+.frameless-songs-grid-2col[data-song-cols="2"] .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions > :nth-child(5)):focus-within .usr-meta-stack:not(:has(:focus-visible)) {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 0%,
+    #000 calc(100% - 158px),
+    transparent calc(100% - 116px)
+  );
+  mask-image: linear-gradient(
+    to right,
+    #000 0%,
+    #000 calc(100% - 158px),
+    transparent calc(100% - 116px)
+  );
+}
+
+@container (min-width: 1040px) {
+  .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions):hover .usr-meta-stack:not(:has(:focus-visible)),
+  .frameless-songs-grid-2col:not([data-song-cols]) .unified-song-row:not(.is-batch-mode):has(.usr-hover-actions):focus-within .usr-meta-stack:not(:has(:focus-visible)) {
+    -webkit-mask-image: linear-gradient(
+      to right,
+      #000 0%,
+      #000 calc(100% - 124px),
+      transparent calc(100% - 82px)
+    );
+    mask-image: linear-gradient(
+      to right,
+      #000 0%,
+      #000 calc(100% - 124px),
+      transparent calc(100% - 82px)
+    );
+  }
 }
 
 .unified-song-row:hover .usr-hover-actions,

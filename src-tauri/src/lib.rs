@@ -218,13 +218,21 @@ pub struct AppState {
     pub mini_player_positioned: Arc<AtomicBool>,
     pub mini_player_expanded: Arc<AtomicBool>,
     pub mini_player_dock_edge: Arc<std::sync::Mutex<String>>,
+    /// 记忆贴边沿轴线的归一化停靠比例 (0.0..=1.0)，冷启动/预热后首次进入小窗可精准还原上次位置
+    pub mini_player_dock_ratio: Arc<std::sync::Mutex<Option<f64>>>,
     pub mini_player_snapshot: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    /// Mini 小窗展开/收起/贴边/显示状态递增世代号，彻底消除后台热区轮询线程与主线程命令间的跨线程乱序竞态
+    pub mini_mode_gen: Arc<AtomicU64>,
     /// 磁吸贴边缓动动画递增代号，任意新拖动/展开/切屏时递增即可立即终止旧动画避免坐标竞态
     pub mini_snap_anim_gen: Arc<AtomicU64>,
+    /// 是否在同屏运行真正全屏应用（全屏视频/游戏/F11/PPT）时自动隐身礼让 Mini 灵动岛（设置中心可开关，默认开启）
+    pub mini_yield_fullscreen_enabled: Arc<AtomicBool>,
     /// 标记 Mini 灵动岛当前是否正为同屏全屏独占应用（全屏视频/游戏）静默礼让
     pub mini_yielded_for_fullscreen: Arc<AtomicBool>,
     /// 标记 Mini 独立子窗口前端已完成首次挂载就绪（预热后进入小窗 0ms 冷启动延迟）
     pub mini_player_ready: Arc<AtomicBool>,
+    /// 标记 Mini 独立子窗口当前是否处于短暂（~125ms）隐身预合成入场接力期（期间在 DWMWA_CLOAK 下合成透明起势帧，绝不提前揭幕或误杀）
+    pub mini_entering_handoff: Arc<AtomicBool>,
     /// 标记 Mini 独立子窗口当前是否处于短暂（~128ms）退场淡出窗口期（期间不触发幽灵窗强杀，结束后必校验彻底隐藏）
     pub mini_exiting_anim: Arc<AtomicBool>,
     /// 记录主窗口隐藏（进入 Mini 模式或最小化至托盘）前是否处于最大化状态
@@ -1114,9 +1122,11 @@ fn orchestrate_restore_main_window(app: &AppHandle, state: &AppState, from_mini:
     let gen = state.main_transition_gen.fetch_add(1, Ordering::AcqRel) + 1;
     let was_mini_visible = state.mini_player_visible.swap(false, Ordering::AcqRel);
     let effective_from_mini = from_mini || was_mini_visible;
+    state.mini_entering_handoff.store(false, Ordering::Release);
+    state.mini_mode_gen.fetch_add(1, Ordering::AcqRel);
     state
         .mini_yielded_for_fullscreen
-        .store(false, Ordering::Relaxed);
+        .store(false, Ordering::Release);
     state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed);
     wake_hotkey_thread(&state.hotkey_thread_id);
 
@@ -3527,17 +3537,162 @@ fn place_mini_player_default(app: &AppHandle, win: &tauri::WebviewWindow, state:
         let (lw, lh) = mini_logical_dims("none", true);
         let pw = (lw * sf).round() as i32;
         let ph = (lh * sf).round() as i32;
-        let margin = (24.0 * sf).round() as i32;
-        let x = (wa.position.x + wa.size.width as i32 - pw - margin).max(wa.position.x + margin);
-        let y = (wa.position.y + margin).min(wa.position.y + wa.size.height as i32 - ph - margin);
+        let edge = state
+            .mini_player_dock_edge
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_else(|| "none".to_string());
+        let saved_ratio = state
+            .mini_player_dock_ratio
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .filter(|r| r.is_finite())
+            .map(|r| r.clamp(0.0, 1.0));
+        let card_pad = (22.0 * sf).round() as i32;
+        let wa_l = wa.position.x;
+        let wa_t = wa.position.y;
+        let wa_r = wa_l + wa.size.width as i32;
+        let wa_b = wa_t + wa.size.height as i32;
+        let (x, y) = match edge.as_str() {
+            "top" | "bottom" => {
+                let min_x = wa_l - card_pad;
+                let max_x = (wa_r - pw + card_pad).max(min_x);
+                let ratio = saved_ratio.unwrap_or(0.5);
+                let tx = min_x + ((max_x - min_x) as f64 * ratio).round() as i32;
+                let ty = if edge == "top" {
+                    wa_t
+                } else {
+                    (wa_b - ph).max(wa_t)
+                };
+                (tx.clamp(min_x, max_x), ty)
+            }
+            "left" | "right" => {
+                let min_y = wa_t - card_pad;
+                let max_y = (wa_b - ph + card_pad).max(min_y);
+                let ratio = saved_ratio.unwrap_or(0.5);
+                let ty = min_y + ((max_y - min_y) as f64 * ratio).round() as i32;
+                let tx = if edge == "left" {
+                    wa_l
+                } else {
+                    (wa_r - pw).max(wa_l)
+                };
+                (tx, ty.clamp(min_y, max_y))
+            }
+            _ => {
+                let margin = (24.0 * sf).round() as i32;
+                let x = (wa_r - pw - margin).max(wa_l + margin);
+                let y = (wa_t + margin).min(wa_b - ph - margin);
+                (x, y)
+            }
+        };
         let _ = win.set_size(Size::Logical(LogicalSize::new(lw, lh)));
         let _ = win.set_position(Position::Physical(PhysicalPosition::new(x, y)));
         state.mini_player_positioned.store(true, Ordering::Relaxed);
     }
 }
 
-/// 精准识别与 Mini 灵动岛处于同一显示器的全屏独占应用（如全屏视频、全屏游戏、全屏 PPT），
-/// 显式排除 Windows 桌面/任务栏/壳层与本应用自身窗体，避免 Win+D 显示桌面被误判为全屏。
+/// 前景窗口全屏探测指标（纯数据结构，支持离线单元测试全矩阵回归）
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ForegroundWindowProbe {
+    pub is_visible: bool,
+    pub is_iconic: bool,
+    pub is_cloaked: bool,
+    pub is_zoomed: bool,
+    pub style: u32,
+    pub ex_style: u32,
+    pub frame_rect: PhysRect,
+    pub monitor_rect: PhysRect,
+    /// SHQueryUserNotificationState 返回值：
+    /// 3 = QUNS_RUNNING_D3D_FULL_SCREEN，4 = QUNS_PRESENTATION_MODE；
+    /// 注意：自动隐藏任务栏 + 最大化 Chrome/Electron 也会让 Windows 返回 2 (QUNS_BUSY)，故绝不采信 2！
+    pub quns_state: u32,
+}
+
+/// 精准区分「真正全屏独占应用（F11 / 全屏视频 / 全屏播放器 / PPT / 独占或无边框全屏游戏）」
+/// 与「普通最大化桌面应用（含自动隐藏任务栏或无任务栏副屏下的 Chrome/Edge/Electron/VS Code/Office）」：
+/// 1. 排除系统壳层、桌面、任务栏、Alt+Tab、右键菜单、气泡与透明穿透/工具浮窗；
+/// 2. 采用去除 Win11 隐形阴影外扩的真实可视边框（DWMWA_EXTENDED_FRAME_BOUNDS）对比 rcMonitor；
+/// 3. 任何带 WS_CAPTION 或 WS_THICKFRAME 的普通最大化窗口（IsZoomed == true）一律判为 false，
+///    彻底消除自动隐藏任务栏下点击中键滚动/右键菜单/弹窗时灵动岛被误剥置顶而消失的缺陷！
+pub(crate) fn classify_foreground_is_true_fullscreen(
+    class_name: &str,
+    p: ForegroundWindowProbe,
+) -> bool {
+    const WS_CAPTION: u32 = 0x00C0_0000;
+    const WS_THICKFRAME: u32 = 0x0004_0000;
+    const WS_EX_TRANSPARENT: u32 = 0x0000_0020;
+    const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+    const QUNS_RUNNING_D3D_FULL_SCREEN: u32 = 3;
+    const QUNS_PRESENTATION_MODE: u32 = 4;
+
+    if !p.is_visible || p.is_iconic || p.is_cloaked {
+        return false;
+    }
+    if (p.ex_style & (WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW)) != 0 {
+        return false;
+    }
+    if matches!(
+        class_name,
+        "Progman"
+            | "WorkerW"
+            | "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "NotifyIconOverflowWindow"
+            | "Windows.UI.Core.CoreWindow"
+            | "TaskListThumbnailWnd"
+            | "MultitaskingViewFrame"
+            | "XamlExplorerHostIslandWindow"
+            | "ApplicationManager_DesktopShellWindow"
+            | "Auto-Suggest Dropdown"
+            | "Windows.UI.Input.InputSite.WindowClass"
+            | "CEF-OSC-WIDGET"
+            | "tooltips_class32"
+            | "#32768"
+    ) {
+        return false;
+    }
+
+    let m = p.monitor_rect;
+    let f = p.frame_rect;
+    if m.right <= m.left || m.bottom <= m.top {
+        return false;
+    }
+    let covers_monitor = f.left <= m.left + 2
+        && f.top <= m.top + 2
+        && f.right >= m.right - 2
+        && f.bottom >= m.bottom - 2;
+    if !covers_monitor {
+        return false;
+    }
+
+    let has_caption = (p.style & WS_CAPTION) == WS_CAPTION;
+    let has_thick_frame = (p.style & WS_THICKFRAME) != 0;
+    let has_standard_frame = has_caption || has_thick_frame;
+    let is_quns_hard_fullscreen = p.quns_state == QUNS_RUNNING_D3D_FULL_SCREEN
+        || p.quns_state == QUNS_PRESENTATION_MODE;
+
+    if p.is_zoomed {
+        // 普通最大化窗口（包含开启自动隐藏任务栏或无任务栏副屏时的 Chrome/Edge/Firefox/Electron/Office 等）
+        // 绝不能被误判为全屏；仅当无任何标题栏/边框且系统明确上报 D3D 全屏/演示模式并严丝合缝铺满底边时放行。
+        if has_standard_frame {
+            return false;
+        }
+        return is_quns_hard_fullscreen && f.bottom >= m.bottom;
+    }
+
+    // 非最大化窗口：
+    // - Chromium/Firefox F11、B站/YouTube 网页视频全屏、PotPlayer/VLC、无边框全屏游戏均会剥离 WS_CAPTION & WS_THICKFRAME
+    // - 少数 UWP 全屏壳层或独占全屏游戏若保留个别边框位，则凭 QUNS_RUNNING_D3D_FULL_SCREEN / QUNS_PRESENTATION_MODE 识别
+    if !has_standard_frame {
+        return true;
+    }
+    is_quns_hard_fullscreen
+}
+
+/// 精准识别与 Mini 灵动岛处于同一显示器的全屏独占应用（如 F11 浏览器、全屏视频、全屏游戏、全屏 PPT），
+/// 显式排除普通最大化窗口（含自动隐藏任务栏/副屏无任务栏）、Windows 桌面/任务栏/壳层与本应用自身窗体。
 #[cfg(target_os = "windows")]
 fn is_foreground_fullscreen_on_same_monitor(
     mini_hwnd: isize,
@@ -3566,13 +3721,33 @@ fn is_foreground_fullscreen_on_same_monitor(
         fn GetForegroundWindow() -> isize;
         fn IsWindowVisible(hwnd: isize) -> i32;
         fn IsIconic(hwnd: isize) -> i32;
+        fn IsZoomed(hwnd: isize) -> i32;
+        fn GetWindowLongW(hwnd: isize, n_index: i32) -> i32;
         fn GetClassNameW(hwnd: isize, lp_class_name: *mut u16, n_max_count: i32) -> i32;
         fn GetWindowRect(hwnd: isize, lp_rect: *mut WinRect) -> i32;
         fn MonitorFromWindow(hwnd: isize, dw_flags: u32) -> isize;
         fn GetMonitorInfoW(h_monitor: isize, lpmi: *mut WinMonitorInfo) -> i32;
     }
 
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmGetWindowAttribute(
+            hwnd: isize,
+            dw_attribute: u32,
+            pv_attribute: *mut std::ffi::c_void,
+            cb_attribute: u32,
+        ) -> i32;
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHQueryUserNotificationState(pquns: *mut u32) -> i32;
+    }
+
     const MONITOR_DEFAULTTONEAREST: u32 = 2;
+    const GWL_STYLE: i32 = -16;
+    const GWL_EXSTYLE: i32 = -20;
+    const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
 
     if mini_hwnd == 0 {
         return false;
@@ -3583,28 +3758,10 @@ fn is_foreground_fullscreen_on_same_monitor(
         if fg == 0 || fg == mini_hwnd || fg == main_hwnd || fg == lyric_hwnd {
             return false;
         }
-        if IsWindowVisible(fg) == 0 || IsIconic(fg) != 0 {
+        let is_visible = IsWindowVisible(fg) != 0;
+        let is_iconic = IsIconic(fg) != 0;
+        if !is_visible || is_iconic {
             return false;
-        }
-
-        let mut class_buf = [0u16; 128];
-        let len = GetClassNameW(fg, class_buf.as_mut_ptr(), class_buf.len() as i32);
-        if len > 0 {
-            let class_name = String::from_utf16_lossy(&class_buf[..len as usize]);
-            if matches!(
-                class_name.as_str(),
-                "Progman"
-                    | "WorkerW"
-                    | "Shell_TrayWnd"
-                    | "Shell_SecondaryTrayWnd"
-                    | "NotifyIconOverflowWindow"
-                    | "Windows.UI.Core.CoreWindow"
-                    | "TaskListThumbnailWnd"
-                    | "MultitaskingViewFrame"
-                    | "XamlExplorerHostIslandWindow"
-            ) {
-                return false;
-            }
         }
 
         let mini_mon = MonitorFromWindow(mini_hwnd, MONITOR_DEFAULTTONEAREST);
@@ -3613,10 +3770,25 @@ fn is_foreground_fullscreen_on_same_monitor(
             return false;
         }
 
-        let mut fg_rect = WinRect::default();
-        if GetWindowRect(fg, &mut fg_rect) == 0 {
+        let mut class_buf = [0u16; 128];
+        let len = GetClassNameW(fg, class_buf.as_mut_ptr(), class_buf.len() as i32);
+        let class_name = if len > 0 {
+            String::from_utf16_lossy(&class_buf[..len as usize])
+        } else {
+            String::new()
+        };
+
+        let mut frame_rect_raw = WinRect::default();
+        let dwm_ok = DwmGetWindowAttribute(
+            fg,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut frame_rect_raw as *mut WinRect as *mut std::ffi::c_void,
+            std::mem::size_of::<WinRect>() as u32,
+        ) == 0;
+        if !dwm_ok && GetWindowRect(fg, &mut frame_rect_raw) == 0 {
             return false;
         }
+
         let mut mi = WinMonitorInfo {
             cb_size: std::mem::size_of::<WinMonitorInfo>() as u32,
             ..Default::default()
@@ -3625,12 +3797,32 @@ fn is_foreground_fullscreen_on_same_monitor(
             return false;
         }
 
-        let m = mi.rc_monitor;
-        let covers_full_monitor = fg_rect.left <= m.left + 2
-            && fg_rect.top <= m.top + 2
-            && fg_rect.right >= m.right - 2
-            && fg_rect.bottom >= m.bottom - 2;
-        covers_full_monitor
+        let mut quns: u32 = 0;
+        let _ = SHQueryUserNotificationState(&mut quns);
+
+        let probe = ForegroundWindowProbe {
+            is_visible,
+            is_iconic,
+            is_cloaked: window_transition::win_impl::is_window_cloaked(fg),
+            is_zoomed: IsZoomed(fg) != 0,
+            style: GetWindowLongW(fg, GWL_STYLE) as u32,
+            ex_style: GetWindowLongW(fg, GWL_EXSTYLE) as u32,
+            frame_rect: PhysRect {
+                left: frame_rect_raw.left,
+                top: frame_rect_raw.top,
+                right: frame_rect_raw.right,
+                bottom: frame_rect_raw.bottom,
+            },
+            monitor_rect: PhysRect {
+                left: mi.rc_monitor.left,
+                top: mi.rc_monitor.top,
+                right: mi.rc_monitor.right,
+                bottom: mi.rc_monitor.bottom,
+            },
+            quns_state: quns,
+        };
+
+        classify_foreground_is_true_fullscreen(&class_name, probe)
     }
 }
 
@@ -3764,7 +3956,9 @@ fn heal_mini_player_window(app: &AppHandle, state: &AppState, force_resnap: bool
         state
             .mini_yielded_for_fullscreen
             .store(false, Ordering::Relaxed);
-        if !state.mini_exiting_anim.load(Ordering::Acquire) {
+        if !state.mini_exiting_anim.load(Ordering::Acquire)
+            && !state.mini_entering_handoff.load(Ordering::Acquire)
+        {
             if let Some(mini_win) = app.get_webview_window("mini_player") {
                 if let Ok(raw) = mini_win.hwnd() {
                     if window_transition::win_impl::is_hwnd_visible_and_not_minimized(raw.0 as isize) {
@@ -3778,6 +3972,9 @@ fn heal_mini_player_window(app: &AppHandle, state: &AppState, force_resnap: bool
                 }
             }
         }
+        return;
+    }
+    if state.mini_entering_handoff.load(Ordering::Acquire) {
         return;
     }
     let Some(mini_win) = app.get_webview_window("mini_player") else {
@@ -3805,47 +4002,25 @@ fn heal_mini_player_window(app: &AppHandle, state: &AppState, force_resnap: bool
     extern "system" {
         fn IsIconic(hwnd: isize) -> i32;
         fn IsWindowVisible(hwnd: isize) -> i32;
-        fn SetWindowPos(
-            hwnd: isize,
-            hwnd_insert_after: isize,
-            x: i32,
-            y: i32,
-            cx: i32,
-            cy: i32,
-            u_flags: u32,
-        ) -> i32;
     }
 
-    const HWND_TOPMOST: isize = -1;
-    const HWND_NOTOPMOST: isize = -2;
-    const SWP_NOSIZE: u32 = 0x0001;
-    const SWP_NOMOVE: u32 = 0x0002;
-    const SWP_NOACTIVATE: u32 = 0x0010;
-
-    // 方案 1：检测同屏全屏独占应用（如全屏视频/游戏）
-    if is_foreground_fullscreen_on_same_monitor(mini_hwnd, main_hwnd, lyric_hwnd) {
-        if !state
+    // 精准全屏礼让（设置中心可开关，默认开启）：
+    // 仅在真正 F11 / 全屏视频 / 全屏游戏 / PPT 放映时通过 DWMWA_CLOAK 0ms 无痕隐身并开启点击穿透，
+    // 100% 不误判自动隐藏任务栏或副屏下的普通最大化浏览器/软件。
+    let yield_enabled = state.mini_yield_fullscreen_enabled.load(Ordering::Relaxed);
+    if yield_enabled && is_foreground_fullscreen_on_same_monitor(mini_hwnd, main_hwnd, lyric_hwnd) {
+        let already_yielded = state
             .mini_yielded_for_fullscreen
-            .swap(true, Ordering::Relaxed)
-        {
-            unsafe {
-                let _ = SetWindowPos(
-                    mini_hwnd,
-                    HWND_NOTOPMOST,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-            }
+            .swap(true, Ordering::AcqRel);
+        if !already_yielded || !window_transition::win_impl::is_window_cloaked(mini_hwnd) {
+            window_transition::win_impl::yield_overlay_window_for_fullscreen_native(mini_hwnd);
         }
         return;
     }
 
     let was_yielded = state
         .mini_yielded_for_fullscreen
-        .swap(false, Ordering::Relaxed);
+        .swap(false, Ordering::AcqRel);
 
     // 边界与切屏自检（放在显示前，防止窗口留在已断开的屏幕坐标）
     reclamp_mini_player_if_needed(app, &mini_win, state, force_resnap);
@@ -3856,26 +4031,19 @@ fn heal_mini_player_window(app: &AppHandle, state: &AppState, force_resnap: bool
         .ok()
         .map(|g| g.clone())
         .unwrap_or_else(|| "none".to_string());
-    let is_expanded = state.mini_player_expanded.load(Ordering::Relaxed);
+    let is_expanded = state.mini_player_expanded.load(Ordering::Acquire);
     let default_click_through = dock_edge != "none" && !is_expanded;
 
     unsafe {
         let iconic = IsIconic(mini_hwnd) != 0;
         let visible = IsWindowVisible(mini_hwnd) != 0;
-        if iconic || !visible || was_yielded {
+        let cloaked = window_transition::win_impl::is_window_cloaked(mini_hwnd);
+        if iconic || !visible || was_yielded || cloaked {
             set_subwindow_suspended(&mini_win, false);
             set_webview_memory_target_low(&mini_win, false);
             window_transition::win_impl::show_overlay_window_native(mini_hwnd, default_click_through);
         } else {
-            let _ = SetWindowPos(
-                mini_hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
+            window_transition::win_impl::reassert_overlay_topmost_native(mini_hwnd);
         }
     }
 }
@@ -3899,6 +4067,7 @@ fn orchestrate_enter_mini_mode(
     app: &AppHandle,
     state: &AppState,
     motion_override: Option<String>,
+    capture_done_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) {
     let gen = state.main_transition_gen.fetch_add(1, Ordering::AcqRel) + 1;
     if let Some(ref raw) = motion_override {
@@ -3916,14 +4085,16 @@ fn orchestrate_enter_mini_mode(
 
     state.mini_exiting_anim.store(false, Ordering::Release);
     state.mini_player_visible.store(true, Ordering::Release);
+    state.mini_mode_gen.fetch_add(1, Ordering::AcqRel);
     state
         .mini_yielded_for_fullscreen
-        .store(false, Ordering::Relaxed);
+        .store(false, Ordering::Release);
     state.mini_snap_anim_gen.fetch_add(1, Ordering::Relaxed);
 
     let app_for_main = app.clone();
     let gen_ref = state.main_transition_gen.clone();
     let mini_vis_ref = state.mini_player_visible.clone();
+    let mini_entering_ref = state.mini_entering_handoff.clone();
     let mini_pos_ref = state.mini_player_positioned.clone();
     let mini_exp_ref = state.mini_player_expanded.clone();
     let mini_edge_ref = state.mini_player_dock_edge.clone();
@@ -3939,17 +4110,22 @@ fn orchestrate_enter_mini_mode(
         .unwrap_or(((94, 106, 210), (45, 212, 191)));
 
     let _ = app.run_on_main_thread(move || {
+        let mut ready_tx = capture_done_tx;
         if gen_ref.load(Ordering::Acquire) != gen {
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(());
+            }
             return;
         }
         let st_ref = app_for_main.state::<AppState>();
 
-        // 1. 预热并精准定位 Mini 独立子窗（先发 entering 透明起势态，确保 0 硬切闪现）
+        // 1. 预热并定位 Mini 独立子窗（此刻仍保持不可见，绝不遮挡即将截帧的主窗口）
         let Some(mini_win) = ensure_mini_player_window(&app_for_main) else {
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(());
+            }
             return;
         };
-        set_subwindow_suspended(&mini_win, false);
-        set_webview_memory_target_low(&mini_win, false);
         enforce_transparent_overlay_window_style(&mini_win);
         if !mini_pos_ref.load(Ordering::Relaxed) {
             place_mini_player_default(&app_for_main, &mini_win, &st_ref);
@@ -3962,12 +4138,8 @@ fn orchestrate_enter_mini_mode(
             .ok()
             .map(|g| g.clone())
             .unwrap_or_else(|| "none".to_string());
-        let expanded = mini_exp_ref.load(Ordering::Relaxed);
+        let expanded = mini_exp_ref.load(Ordering::Acquire);
         let mini_entity_rect = compute_mini_visual_entity_rect(&mini_win, &dock_edge, expanded);
-
-        if let Some(snap) = mini_snap_ref.lock().ok().and_then(|g| g.clone()) {
-            let _ = app_for_main.emit_to("mini_player", "bm-mini-player-sync", snap);
-        }
 
         #[cfg(target_os = "windows")]
         {
@@ -4029,24 +4201,14 @@ fn orchestrate_enter_mini_mode(
             };
 
             let use_anim = motion_style != window_transition::TransitionMotionStyle::None;
-
-            // 先令 Mini 前端就位到 entering 起势态（opacity: 0）并无抢焦显示窗口，让 WebView2 提前完成首帧合成
-            if use_anim {
-                let _ = app_for_main.emit_to(
-                    "mini_player",
-                    "bm-mini-player-transition",
-                    serde_json::json!({
-                        "phase": "entering",
-                        "offsetX": hint_ox,
-                        "offsetY": hint_oy,
-                        "dockEdge": dock_edge,
-                        "motionLevel": motion_str,
-                        "transitionGen": gen,
-                    }),
-                );
-            }
-
             let mut gpu_started = false;
+
+            // =====================================================================
+            // 三段式零闪屏原子交接（彻底根治“双影叠现 -> 底窗骤灭”与首帧黑闪）：
+            //   阶段 A：极速截取前景主窗真画面（BitBlt ~1.5ms）-> 静态 100% 不透明锁帧覆盖
+            //   阶段 B：在静态 GPU 舞台严丝合缝遮盖下，原生隐身撤离真实主窗口 + DwmFlush
+            //   阶段 C：底窗彻底离场后，再复用静态 GPU 纹理 120Hz+ 丝滑起飞收束飞向灵动岛！
+            // =====================================================================
             if let (Some(main_win), Some(mr), Some(p)) = (&main_win_opt, main_rect, plan) {
                 if main_was_visible && p.duration_ms > 0 {
                     let stage_rect = wt::get_monitor_rects_for_hwnd(main_hwnd)
@@ -4083,33 +4245,78 @@ fn orchestrate_enter_mini_mode(
                             (sw, sh, px)
                         };
 
-                    gpu_started = wt::play_gpu_transition_on_main_thread(
-                        stage_rect, mr, tex_w, tex_h, &bgra, p,
+                    // 阶段 A：静态 100% 不透明满屏锁帧（先 Commit 首帧再 SWP_SHOWWINDOW + DwmFlush）
+                    let locked = wt::lock_static_gpu_stage_on_main_thread(
+                        stage_rect,
+                        mr,
+                        tex_w,
+                        tex_h,
+                        &bgra,
+                        p.start_radius_px,
                     );
-                }
 
-                // GPU 舞台已提交并严丝合缝接管屏幕画面后，原生隐身隐藏真实主窗口（0 闪烁、保留最大化态）
-                sync_main_low_memory_state(main_win, &low_mem_ref, true);
-                wt::hide_main_window_native(main_win);
+                    // 阶段 B：在 100% 静态遮盖掩护下无声撤离真实主窗口，再 DwmFlush 确认底窗离场
+                    wt::hide_main_window_native(main_win);
+                    if locked {
+                        wt::dwm_flush();
+                        // 阶段 C：此时屏幕上只剩单层纯净静态 GPU 舞台，干净起飞收束！
+                        gpu_started = wt::launch_locked_gpu_transition_on_main_thread(p);
+                        if !gpu_started {
+                            wt::cancel_and_hide_gpu_stage_on_main_thread();
+                        }
+                    }
+                } else {
+                    sync_main_low_memory_state(main_win, &low_mem_ref, true);
+                    wt::hide_main_window_native(main_win);
+                }
             } else if let Some(main_win) = &main_win_opt {
                 sync_main_low_memory_state(main_win, &low_mem_ref, true);
                 wt::hide_main_window_native(main_win);
             }
 
+            // 截帧、锁帧与主窗撤离均已落盘，立即通知前端 IPC 返回
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(());
+            }
+
             let initial_click_through = dock_edge != "none" && !expanded;
 
+            // 同步最新歌曲与封面快照，唤醒 Mini WebView2
+            set_subwindow_suspended(&mini_win, false);
+            set_webview_memory_target_low(&mini_win, false);
+            if let Some(snap) = mini_snap_ref.lock().ok().and_then(|g| g.clone()) {
+                let _ = app_for_main.emit_to("mini_player", "bm-mini-player-sync", snap);
+            }
             let _ = app_for_main.emit_to(
                 "main",
                 "bm-mini-player-cmd",
                 serde_json::json!({ "type": "CMD_REQUEST_SYNC" }),
             );
 
-            // 2. 在主窗口收束的势能交接甜点时刻（~58ms），再同步显示 Mini（更新 tao VISIBLE + TOOLWINDOW + TOPMOST）并弹性浮现落位，
-            //    既彻底避免 0ms 抢跑露出旧帧，又确保 tao WindowFlags::VISIBLE 100% 同步！
+            // 2. Mini 隐身预合成 + 黄金接力点零闪烁揭幕：
+            //    在 handoff_delay_ms (125ms) 期间以 DWMWA_CLOAK = 1 隐身开启 Mini 渲染，
+            //    让 WebView2 在屏幕 0 像素可见的前提下把 entering(opacity:0) 与最新封面画完提交，
+            //    抵达甜点时刻后瞬间去 Cloak 并弹性滑入，彻底消灭从 TrySuspend 唤醒时的双闪！
             if gpu_started && handoff_delay_ms > 0 {
+                mini_entering_ref.store(true, Ordering::Release);
+                wt::prepare_overlay_window_cloaked_native(mini_hwnd);
+                let _ = app_for_main.emit_to(
+                    "mini_player",
+                    "bm-mini-player-transition",
+                    serde_json::json!({
+                        "phase": "entering",
+                        "offsetX": hint_ox,
+                        "offsetY": hint_oy,
+                        "dockEdge": dock_edge,
+                        "motionLevel": motion_str,
+                        "transitionGen": gen,
+                    }),
+                );
+
                 let app_handoff = app_for_main.clone();
                 let gen_handoff = gen_ref.clone();
                 let mini_vis_check = mini_vis_ref.clone();
+                let mini_enter_check = mini_entering_ref.clone();
                 let hotkey_tid_h = hotkey_tid_ref.clone();
                 let dock_edge_h = dock_edge.clone();
                 let motion_h = motion_str.clone();
@@ -4118,13 +4325,16 @@ fn orchestrate_enter_mini_mode(
                     if gen_handoff.load(Ordering::Acquire) != gen
                         || !mini_vis_check.load(Ordering::Acquire)
                     {
+                        mini_enter_check.store(false, Ordering::Release);
                         return;
                     }
                     let app_ui = app_handoff.clone();
                     let gen_ui = gen_handoff.clone();
                     let vis_ui = mini_vis_check.clone();
+                    let enter_ui = mini_enter_check.clone();
                     let tid_ui = hotkey_tid_h.clone();
                     let _ = app_handoff.run_on_main_thread(move || {
+                        enter_ui.store(false, Ordering::Release);
                         if gen_ui.load(Ordering::Acquire) != gen || !vis_ui.load(Ordering::Acquire) {
                             return;
                         }
@@ -4152,6 +4362,7 @@ fn orchestrate_enter_mini_mode(
                     });
                 });
             } else {
+                mini_entering_ref.store(false, Ordering::Release);
                 show_mini_player_window_safely(&mini_win, initial_click_through);
                 let _ = app_for_main.emit(
                     "bm-mini-player-visibility",
@@ -4173,23 +4384,28 @@ fn orchestrate_enter_mini_mode(
                 wake_hotkey_thread(&hotkey_tid_ref);
             }
 
-            // 3. GPU 收缩动画完成后隐藏并释放过渡舞台资源
+            // 3. GPU 收缩动画完成后隐藏并释放过渡舞台资源，再令后台隐藏主窗进入低内存省电态
             if gpu_started && gpu_dur_ms > 0 {
                 let app_done = app_for_main.clone();
                 let gen_done = gen_ref.clone();
                 let mini_vis_done = mini_vis_ref.clone();
+                let low_mem_done = low_mem_ref.clone();
                 tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(gpu_dur_ms + 24)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(gpu_dur_ms + 28)).await;
                     if gen_done.load(Ordering::Acquire) != gen {
                         return;
                     }
                     let app_ui = app_done.clone();
                     let gen_ui = gen_done.clone();
                     let vis_ui = mini_vis_done.clone();
+                    let low_ui = low_mem_done.clone();
                     let _ = app_done.run_on_main_thread(move || {
                         if gen_ui.load(Ordering::Acquire) == gen {
                             wt::cancel_and_hide_gpu_stage_on_main_thread();
                             if vis_ui.load(Ordering::Acquire) {
+                                if let Some(main_w) = app_ui.get_webview_window("main") {
+                                    sync_main_low_memory_state(&main_w, &low_ui, true);
+                                }
                                 let st_inner = app_ui.state::<AppState>();
                                 heal_mini_player_window(&app_ui, &st_inner, false);
                             }
@@ -4201,9 +4417,23 @@ fn orchestrate_enter_mini_mode(
 
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = (mini_entity_rect, accent1_rgb, accent2_rgb, mini_vis_ref);
+            let _ = (
+                mini_entity_rect,
+                accent1_rgb,
+                accent2_rgb,
+                mini_vis_ref,
+                mini_entering_ref,
+            );
+            set_subwindow_suspended(&mini_win, false);
+            set_webview_memory_target_low(&mini_win, false);
+            if let Some(snap) = mini_snap_ref.lock().ok().and_then(|g| g.clone()) {
+                let _ = app_for_main.emit_to("mini_player", "bm-mini-player-sync", snap);
+            }
             if let Some(main_win) = app_for_main.get_webview_window("main") {
                 hide_main_window_cleanly(&main_win, &st_ref);
+            }
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(());
             }
             let _ = mini_win.set_always_on_top(true);
             let _ = mini_win.show();
@@ -4244,7 +4474,9 @@ async fn set_mini_player_mode_cmd(
 ) -> Result<bool, String> {
     ensure_main_window(&window)?;
     if mini {
-        orchestrate_enter_mini_mode(&app, &state, motion_level);
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        orchestrate_enter_mini_mode(&app, &state, motion_level, Some(tx));
+        let _ = rx.await;
         return Ok(true);
     } else {
         if let Some(ref raw) = motion_level {
@@ -4393,8 +4625,10 @@ async fn send_mini_player_command_cmd(
                 orchestrate_restore_main_window(&app, &state, true);
             }
             "CMD_HIDE_TO_TRAY" => {
+                state.mini_entering_handoff.store(false, Ordering::Release);
                 state.mini_exiting_anim.store(false, Ordering::Release);
                 state.mini_player_visible.store(false, Ordering::Release);
+                state.mini_mode_gen.fetch_add(1, Ordering::AcqRel);
                 state.main_transition_gen.fetch_add(1, Ordering::AcqRel);
                 wake_hotkey_thread(&state.hotkey_thread_id);
                 let app_hide = app.clone();
@@ -4494,12 +4728,21 @@ async fn drag_mini_player_step_cmd(
             let prev_edge = next_edge.clone();
             next_edge = "none".to_string();
             next_expanded = true;
-            state.mini_player_expanded.store(true, Ordering::Relaxed);
+            state.mini_mode_gen.fetch_add(1, Ordering::AcqRel);
+            state.mini_player_expanded.store(true, Ordering::Release);
             wake_hotkey_thread(&state.hotkey_thread_id);
             if let Ok(mut g) = state.mini_player_dock_edge.lock() {
                 *g = "none".to_string();
             }
-            set_mini_click_through(&win, false);
+            let app_ct = app.clone();
+            let vis_ct = state.mini_player_visible.clone();
+            let _ = app.run_on_main_thread(move || {
+                if vis_ct.load(Ordering::Acquire) {
+                    if let Some(mw) = app_ct.get_webview_window("mini_player") {
+                        set_mini_click_through(&mw, false);
+                    }
+                }
+            });
             let (fw, fh) = mini_logical_dims("none", true);
             let pw = (fw * sf).round() as i32;
             let ph = (fh * sf).round() as i32;
@@ -4540,25 +4783,33 @@ async fn drag_mini_player_step_cmd(
         let (cw, ch) = mini_logical_dims(&next_edge, false);
         let pw = (cw * sf).round() as i32;
         let ph = (ch * sf).round() as i32;
+        let min_x = wa_l - card_pad;
+        let max_x = (wa_r - pw + card_pad).max(min_x);
+        let min_y = wa_t - card_pad;
+        let max_y = (wa_b - ph + card_pad).max(min_y);
         let (tx, ty) = match next_edge.as_str() {
-            "top" => (
-                (cx - next_grab_x).clamp(wa_l - card_pad, (wa_r - pw + card_pad).max(wa_l - card_pad)),
-                wa_t,
-            ),
-            "bottom" => (
-                (cx - next_grab_x).clamp(wa_l - card_pad, (wa_r - pw + card_pad).max(wa_l - card_pad)),
-                (wa_b - ph).max(wa_t),
-            ),
-            "left" => (
-                wa_l,
-                (cy - next_grab_y).clamp(wa_t - card_pad, (wa_b - ph + card_pad).max(wa_t - card_pad)),
-            ),
-            "right" => (
-                (wa_r - pw).max(wa_l),
-                (cy - next_grab_y).clamp(wa_t - card_pad, (wa_b - ph + card_pad).max(wa_t - card_pad)),
-            ),
+            "top" => ((cx - next_grab_x).clamp(min_x, max_x), wa_t),
+            "bottom" => ((cx - next_grab_x).clamp(min_x, max_x), (wa_b - ph).max(wa_t)),
+            "left" => (wa_l, (cy - next_grab_y).clamp(min_y, max_y)),
+            "right" => ((wa_r - pw).max(wa_l), (cy - next_grab_y).clamp(min_y, max_y)),
             _ => (cx - next_grab_x, cy - next_grab_y),
         };
+        let ratio = match next_edge.as_str() {
+            "top" | "bottom" => {
+                let span = (max_x - min_x).max(1) as f64;
+                Some(((tx - min_x) as f64 / span).clamp(0.0, 1.0))
+            }
+            "left" | "right" => {
+                let span = (max_y - min_y).max(1) as f64;
+                Some(((ty - min_y) as f64 / span).clamp(0.0, 1.0))
+            }
+            _ => None,
+        };
+        if let Some(r) = ratio {
+            if let Ok(mut rg) = state.mini_player_dock_ratio.lock() {
+                *rg = Some(r);
+            }
+        }
         let _ = win.set_position(Position::Physical(PhysicalPosition::new(tx, ty)));
         state.mini_player_positioned.store(true, Ordering::Relaxed);
         return Ok(Some(MiniDragStepResult {
@@ -4617,7 +4868,7 @@ async fn drag_mini_player_step_cmd(
     if next_edge != "none" && near_edge != next_edge {
         next_edge = "none".to_string();
     }
-    state.mini_player_expanded.store(true, Ordering::Relaxed);
+    state.mini_player_expanded.store(true, Ordering::Release);
     wake_hotkey_thread(&state.hotkey_thread_id);
     if let Ok(mut g) = state.mini_player_dock_edge.lock() {
         *g = next_edge.clone();
@@ -4639,30 +4890,90 @@ async fn drag_mini_player_step_cmd(
     }))
 }
 
+/// 静默同步前端持久化的贴边偏好（停靠边、展开态、沿边归一化比例），
+/// 严禁在窗口隐藏/预热期间操作窗口位置、置顶或污染 mini_player_positioned 标志。
+#[tauri::command]
+async fn sync_mini_player_dock_pref_cmd(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    edge: String,
+    expanded: bool,
+    ratio: Option<f64>,
+) -> Result<bool, String> {
+    ensure_allowed_windows(&window, &["main", "mini_player"])?;
+    let norm_edge = match edge.as_str() {
+        "top" | "bottom" | "left" | "right" => edge,
+        _ => "none".to_string(),
+    };
+    let norm_expanded = if norm_edge == "none" { true } else { expanded };
+    if let Ok(mut g) = state.mini_player_dock_edge.lock() {
+        *g = norm_edge;
+    }
+    if let Some(r) = ratio.filter(|v| v.is_finite()) {
+        if let Ok(mut rg) = state.mini_player_dock_ratio.lock() {
+            *rg = Some(r.clamp(0.0, 1.0));
+        }
+    }
+    state.mini_player_expanded.store(norm_expanded, Ordering::Release);
+    state.mini_mode_gen.fetch_add(1, Ordering::AcqRel);
+    wake_hotkey_thread(&state.hotkey_thread_id);
+    Ok(true)
+}
+
+/// 同步设置中心「全屏视频/游戏时自动隐藏 Mini 灵动岛」开关；若关闭且当前正处于礼让隐身态，立刻恢复可见置顶。
+#[tauri::command]
+async fn set_mini_player_yield_fullscreen_cmd(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    ensure_main_window(&window)?;
+    state
+        .mini_yield_fullscreen_enabled
+        .store(enabled, Ordering::Release);
+    wake_hotkey_thread(&state.hotkey_thread_id);
+    if state.mini_player_visible.load(Ordering::Acquire) {
+        let app_heal = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let st = app_heal.state::<AppState>();
+            heal_mini_player_window(&app_heal, &st, false);
+        });
+    }
+    Ok(enabled)
+}
+
 #[tauri::command]
 async fn snap_mini_player_to_edge_cmd(
     window: tauri::WebviewWindow,
     app: AppHandle,
     state: State<'_, AppState>,
     edge: String,
-) -> Result<bool, String> {
+) -> Result<Option<f64>, String> {
     ensure_allowed_windows(&window, &["main", "mini_player"])?;
     if let Ok(mut g) = state.mini_player_dock_edge.lock() {
         *g = edge.clone();
     }
-    state.mini_player_expanded.store(false, Ordering::Relaxed);
+    state.mini_player_expanded.store(false, Ordering::Release);
+    state.mini_mode_gen.fetch_add(1, Ordering::AcqRel);
     wake_hotkey_thread(&state.hotkey_thread_id);
 
+    // 若当前小窗处于隐藏/后台预热态，仅更新状态即可，绝不移动未定位的 (0,0) 隐藏窗或提前设 TOPMOST！
+    if !state.mini_player_visible.load(Ordering::Acquire) {
+        let saved = state.mini_player_dock_ratio.lock().ok().and_then(|g| *g);
+        return Ok(saved);
+    }
+
     let Some(win) = app.get_webview_window("mini_player") else {
-        return Ok(false);
+        return Ok(None);
     };
     let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) else {
-        return Ok(false);
+        return Ok(None);
     };
     let center_x = pos.x + size.width as i32 / 2;
     let center_y = pos.y + size.height as i32 / 2;
     let Some(mon) = resolve_mini_player_monitor_at_point(&app, &win, center_x, center_y) else {
-        return Ok(false);
+        return Ok(None);
     };
     let sf = mon.scale_factor().max(1.0);
     let wa = mon.work_area();
@@ -4675,25 +4986,28 @@ async fn snap_mini_player_to_edge_cmd(
     let pw = (fw * sf).round() as i32;
     let ph = (fh * sf).round() as i32;
     let card_pad = (22.0 * sf).round() as i32;
+    let min_x = wa_l - card_pad;
+    let max_x = (wa_r - pw + card_pad).max(min_x);
+    let min_y = wa_t - card_pad;
+    let max_y = (wa_b - ph + card_pad).max(min_y);
     let (tx, ty) = match edge.as_str() {
-        "top" => (
-            (center_x - pw / 2).clamp(wa_l - card_pad, (wa_r - pw + card_pad).max(wa_l - card_pad)),
-            wa_t,
-        ),
-        "bottom" => (
-            (center_x - pw / 2).clamp(wa_l - card_pad, (wa_r - pw + card_pad).max(wa_l - card_pad)),
-            (wa_b - ph).max(wa_t),
-        ),
-        "left" => (
-            wa_l,
-            (center_y - ph / 2).clamp(wa_t - card_pad, (wa_b - ph + card_pad).max(wa_t - card_pad)),
-        ),
-        "right" => (
-            (wa_r - pw).max(wa_l),
-            (center_y - ph / 2).clamp(wa_t - card_pad, (wa_b - ph + card_pad).max(wa_t - card_pad)),
-        ),
-        _ => return Ok(false),
+        "top" => ((center_x - pw / 2).clamp(min_x, max_x), wa_t),
+        "bottom" => ((center_x - pw / 2).clamp(min_x, max_x), (wa_b - ph).max(wa_t)),
+        "left" => (wa_l, (center_y - ph / 2).clamp(min_y, max_y)),
+        "right" => ((wa_r - pw).max(wa_l), (center_y - ph / 2).clamp(min_y, max_y)),
+        _ => return Ok(None),
     };
+    let dock_ratio = match edge.as_str() {
+        "top" | "bottom" => Some(((tx - min_x) as f64 / (max_x - min_x).max(1) as f64).clamp(0.0, 1.0)),
+        "left" | "right" => Some(((ty - min_y) as f64 / (max_y - min_y).max(1) as f64).clamp(0.0, 1.0)),
+        _ => None,
+    };
+    if let Some(r) = dock_ratio {
+        if let Ok(mut rg) = state.mini_player_dock_ratio.lock() {
+            *rg = Some(r);
+        }
+    }
+
     if (size.width as i32 - pw).abs() > 2 || (size.height as i32 - ph).abs() > 2 {
         let _ = win.set_size(Size::Logical(LogicalSize::new(fw, fh)));
     }
@@ -4704,12 +5018,15 @@ async fn snap_mini_player_to_edge_cmd(
     if dist > 1.0 && dist <= 64.0 * sf {
         let win_clone = win.clone();
         let gen_ref = state.mini_snap_anim_gen.clone();
+        let vis_ref = state.mini_player_visible.clone();
         let sx = pos.x;
         let sy = pos.y;
         tauri::async_runtime::spawn(async move {
             let steps = 9;
             for i in 1..=steps {
-                if gen_ref.load(Ordering::Relaxed) != anim_gen {
+                if gen_ref.load(Ordering::Relaxed) != anim_gen
+                    || !vis_ref.load(Ordering::Acquire)
+                {
                     break;
                 }
                 let t = i as f64 / steps as f64;
@@ -4723,9 +5040,26 @@ async fn snap_mini_player_to_edge_cmd(
     } else if dist > 1.0 {
         let _ = win.set_position(Position::Physical(PhysicalPosition::new(tx, ty)));
     }
-    let _ = win.set_always_on_top(true);
+
+    let app_top = app.clone();
+    let vis_top = state.mini_player_visible.clone();
+    let yield_top = state.mini_yielded_for_fullscreen.clone();
+    let _ = app.run_on_main_thread(move || {
+        if vis_top.load(Ordering::Acquire) && !yield_top.load(Ordering::Acquire) {
+            if let Some(mw) = app_top.get_webview_window("mini_player") {
+                #[cfg(target_os = "windows")]
+                if let Ok(raw) = mw.hwnd() {
+                    window_transition::win_impl::reassert_overlay_topmost_native(raw.0 as isize);
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = mw.set_always_on_top(true);
+                }
+            }
+        }
+    });
     state.mini_player_positioned.store(true, Ordering::Relaxed);
-    Ok(true)
+    Ok(dock_ratio)
 }
 
 #[tauri::command]
@@ -4740,13 +5074,17 @@ async fn expand_mini_player_from_dock_cmd(
     if let Ok(mut g) = state.mini_player_dock_edge.lock() {
         *g = edge.clone();
     }
-    state.mini_player_expanded.store(true, Ordering::Relaxed);
+    state.mini_player_expanded.store(true, Ordering::Release);
+    state.mini_mode_gen.fetch_add(1, Ordering::AcqRel);
     wake_hotkey_thread(&state.hotkey_thread_id);
+
+    if !state.mini_player_visible.load(Ordering::Acquire) {
+        return Ok(false);
+    }
 
     let Some(win) = app.get_webview_window("mini_player") else {
         return Ok(false);
     };
-    set_mini_click_through(&win, false);
     let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) else {
         return Ok(false);
     };
@@ -4786,16 +5124,41 @@ async fn expand_mini_player_from_dock_cmd(
         ),
         _ => (pos.x, pos.y),
     };
-    if (size.width as i32 - pw).abs() > 2 || (size.height as i32 - ph).abs() > 2 {
-        let _ = win.set_size(Size::Logical(LogicalSize::new(fw, fh)));
-    }
-    if (pos.x - tx).abs() > 2 || (pos.y - ty).abs() > 2 {
-        let _ = win.set_position(Position::Physical(PhysicalPosition::new(tx, ty)));
-    }
-    let _ = win.set_always_on_top(true);
-    if state.mini_player_visible.load(Ordering::Relaxed) {
-        let _ = win.set_focus();
-    }
+    let need_resize = (size.width as i32 - pw).abs() > 2 || (size.height as i32 - ph).abs() > 2;
+    let need_move = (pos.x - tx).abs() > 2 || (pos.y - ty).abs() > 2;
+
+    // 在 UI 主线程原子解除点击穿透、校准位置、原生重申 TOPMOST 并聚焦，并等待落盘，
+    // 彻底杜绝 Tokio 线程与后台热区轮询线程的跨线程 GWL_EXSTYLE 覆盖竞态。
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<bool>();
+    let app_ui = app.clone();
+    let vis_ui = state.mini_player_visible.clone();
+    let exp_ui = state.mini_player_expanded.clone();
+    let _ = app.run_on_main_thread(move || {
+        let mut applied = false;
+        if vis_ui.load(Ordering::Acquire) && exp_ui.load(Ordering::Acquire) {
+            if let Some(mw) = app_ui.get_webview_window("mini_player") {
+                set_mini_click_through(&mw, false);
+                if need_resize {
+                    let _ = mw.set_size(Size::Logical(LogicalSize::new(fw, fh)));
+                }
+                if need_move {
+                    let _ = mw.set_position(Position::Physical(PhysicalPosition::new(tx, ty)));
+                }
+                #[cfg(target_os = "windows")]
+                if let Ok(raw) = mw.hwnd() {
+                    window_transition::win_impl::reassert_overlay_topmost_native(raw.0 as isize);
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = mw.set_always_on_top(true);
+                }
+                let _ = mw.set_focus();
+                applied = true;
+            }
+        }
+        let _ = done_tx.send(applied);
+    });
+    let _ = done_rx.await;
     Ok(true)
 }
 
@@ -4810,10 +5173,27 @@ async fn collapse_mini_player_to_dock_cmd(
     if let Ok(mut g) = state.mini_player_dock_edge.lock() {
         *g = edge;
     }
-    state.mini_player_expanded.store(false, Ordering::Relaxed);
+    state.mini_player_expanded.store(false, Ordering::Release);
+    state.mini_mode_gen.fetch_add(1, Ordering::AcqRel);
     wake_hotkey_thread(&state.hotkey_thread_id);
-    if let Some(win) = app.get_webview_window("mini_player") {
-        let _ = win.set_always_on_top(true);
+    if state.mini_player_visible.load(Ordering::Acquire) {
+        let app_top = app.clone();
+        let vis_top = state.mini_player_visible.clone();
+        let yield_top = state.mini_yielded_for_fullscreen.clone();
+        let _ = app.run_on_main_thread(move || {
+            if vis_top.load(Ordering::Acquire) && !yield_top.load(Ordering::Acquire) {
+                if let Some(mw) = app_top.get_webview_window("mini_player") {
+                    #[cfg(target_os = "windows")]
+                    if let Ok(raw) = mw.hwnd() {
+                        window_transition::win_impl::reassert_overlay_topmost_native(raw.0 as isize);
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let _ = mw.set_always_on_top(true);
+                    }
+                }
+            }
+        });
     }
     Ok(true)
 }
@@ -5833,9 +6213,12 @@ fn spawn_windows_global_hotkey_listener(
     lyric_locked: Arc<AtomicBool>,
     lyric_visible: Arc<AtomicBool>,
     mini_visible: Arc<AtomicBool>,
+    mini_entering_handoff: Arc<AtomicBool>,
     mini_exiting_anim: Arc<AtomicBool>,
     mini_expanded: Arc<AtomicBool>,
     mini_dock_edge: Arc<std::sync::Mutex<String>>,
+    mini_mode_gen: Arc<AtomicU64>,
+    mini_yielded_for_fullscreen: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
         #[repr(C)]
@@ -5894,6 +6277,7 @@ fn spawn_windows_global_hotkey_listener(
         const QS_ALLINPUT: u32 = 0x04FF;
         const GWL_EXSTYLE: i32 = -20;
         const WS_EX_TOPMOST: i32 = 0x00000008;
+        const WS_EX_TRANSPARENT: i32 = 0x00000020;
         const SM_XVIRTUALSCREEN: i32 = 76;
         const SM_YVIRTUALSCREEN: i32 = 77;
         const SM_CXVIRTUALSCREEN: i32 = 78;
@@ -6147,15 +6531,17 @@ fn spawn_windows_global_hotkey_listener(
                 }
             }
 
-            // Mini 灵动岛收起态局部热区穿透检测（采用原生 GWL_EXSTYLE 原子切换，零抢焦且绝不触发 tao 误隐藏）：
+            // Mini 灵动岛收起态局部热区穿透检测（采用原生 GWL_EXSTYLE 原子切换 + 状态世代号防跨线程乱序）：
             let is_mini_vis = mini_visible.load(Ordering::Acquire);
-            let is_mini_exp = mini_expanded.load(Ordering::Relaxed);
+            let is_mini_entering = mini_entering_handoff.load(Ordering::Acquire);
+            let is_mini_exp = mini_expanded.load(Ordering::Acquire);
+            let is_mini_yielded = mini_yielded_for_fullscreen.load(Ordering::Acquire);
             if !is_mini_vis {
                 was_in_mini_island = false;
                 last_mini_ignore_cursor = None;
                 last_mini_cursor = None;
                 // 幽灵窗终极看门狗：只要已退出小窗且短暂退场动画已结束，若检测到 mini_player HWND 仍可见，立刻派发主线程四重强杀！
-                if !mini_exiting_anim.load(Ordering::Acquire) {
+                if !mini_exiting_anim.load(Ordering::Acquire) && !is_mini_entering {
                     if let Some(win) = app_handle.get_webview_window("mini_player") {
                         if let Ok(raw_h) = win.hwnd() {
                             let mh = raw_h.0 as isize;
@@ -6178,6 +6564,11 @@ fn spawn_windows_global_hotkey_listener(
                         }
                     }
                 }
+            } else if is_mini_yielded || is_mini_entering {
+                // 全屏礼让期或入场隐身预合成期内保持穿透隐身，绝不篡改穿透位或抢跑揭幕
+                was_in_mini_island = false;
+                last_mini_ignore_cursor = Some(true);
+                last_mini_cursor = None;
             } else {
                 let edge = mini_dock_edge
                     .lock()
@@ -6186,15 +6577,34 @@ fn spawn_windows_global_hotkey_listener(
                     .unwrap_or_else(|| "none".to_string());
                 if is_mini_exp || edge == "none" {
                     last_mini_cursor = None;
-                    if last_mini_ignore_cursor != Some(false) {
+                    // 展开态/自由卡片态：不仅看本地缓存，还直接核验真实 HWND 的 WS_EX_TRANSPARENT 位，
+                    // 彻底杜绝任何外部切换导致的缓存漂移或残留点击穿透！
+                    let actual_click_through = app_handle
+                        .get_webview_window("mini_player")
+                        .and_then(|w| w.hwnd().ok())
+                        .map(|h| {
+                            let mh = h.0 as isize;
+                            mh != 0 && unsafe { (GetWindowLongW(mh, GWL_EXSTYLE) & WS_EX_TRANSPARENT) != 0 }
+                        })
+                        .unwrap_or(false);
+                    if last_mini_ignore_cursor != Some(false) || actual_click_through {
                         let app_ct = app_handle.clone();
                         let vis_ct = mini_visible.clone();
+                        let exp_ct = mini_expanded.clone();
+                        let yield_ct = mini_yielded_for_fullscreen.clone();
                         let _ = app_handle.run_on_main_thread(move || {
                             if let Some(win) = app_ct.get_webview_window("mini_player") {
-                                if vis_ct.load(Ordering::Acquire) {
-                                    set_mini_click_through(&win, false);
-                                } else {
+                                if !vis_ct.load(Ordering::Acquire) || yield_ct.load(Ordering::Acquire) {
                                     set_mini_click_through(&win, true);
+                                } else if exp_ct.load(Ordering::Acquire)
+                                    || app_ct
+                                        .state::<AppState>()
+                                        .mini_player_dock_edge
+                                        .lock()
+                                        .map(|g| g.as_str() == "none")
+                                        .unwrap_or(false)
+                                {
+                                    set_mini_click_through(&win, false);
                                 }
                             }
                         });
@@ -6202,6 +6612,7 @@ fn spawn_windows_global_hotkey_listener(
                     }
                     was_in_mini_island = true;
                 } else {
+                    let gen_snap = mini_mode_gen.load(Ordering::Acquire);
                     let mut cursor = Point::default();
                     let cursor_ok = unsafe { GetCursorPos(&mut cursor) != 0 };
                     if cursor_ok {
@@ -6272,25 +6683,52 @@ fn spawn_windows_global_hotkey_listener(
                                     };
 
                                     let desired_ignore = !in_island;
-                                    if last_mini_ignore_cursor != Some(desired_ignore) {
+                                    let actual_ignore = win
+                                        .hwnd()
+                                        .ok()
+                                        .map(|h| {
+                                            let mh = h.0 as isize;
+                                            mh != 0
+                                                && unsafe {
+                                                    (GetWindowLongW(mh, GWL_EXSTYLE) & WS_EX_TRANSPARENT) != 0
+                                                }
+                                        })
+                                        .unwrap_or(desired_ignore);
+                                    if last_mini_ignore_cursor != Some(desired_ignore)
+                                        || actual_ignore != desired_ignore
+                                    {
                                         let app_ct = app_handle.clone();
                                         let vis_ct = mini_visible.clone();
+                                        let exp_ct = mini_expanded.clone();
+                                        let gen_ct = mini_mode_gen.clone();
+                                        let yield_ct = mini_yielded_for_fullscreen.clone();
                                         let _ = app_handle.run_on_main_thread(move || {
                                             if let Some(mw) = app_ct.get_webview_window("mini_player") {
-                                                if vis_ct.load(Ordering::Acquire) {
-                                                    set_mini_click_through(&mw, desired_ignore);
-                                                } else {
+                                                if !vis_ct.load(Ordering::Acquire)
+                                                    || yield_ct.load(Ordering::Acquire)
+                                                {
                                                     set_mini_click_through(&mw, true);
+                                                } else if gen_ct.load(Ordering::Acquire) == gen_snap
+                                                    && !exp_ct.load(Ordering::Acquire)
+                                                {
+                                                    set_mini_click_through(&mw, desired_ignore);
+                                                } else if exp_ct.load(Ordering::Acquire) {
+                                                    // 闭包排队期间小窗已被点击展开，强制保持交互态绝不误开穿透！
+                                                    set_mini_click_through(&mw, false);
                                                 }
                                             }
                                         });
                                         last_mini_ignore_cursor = Some(desired_ignore);
                                     }
-                                    if was_in_mini_island && !in_island {
+                                    if was_in_mini_island
+                                        && !in_island
+                                        && mini_mode_gen.load(Ordering::Acquire) == gen_snap
+                                        && !mini_expanded.load(Ordering::Acquire)
+                                    {
                                         let _ = app_handle.emit_to(
                                             "mini_player",
                                             "bm-mini-island-cursor-leave",
-                                            serde_json::json!({}),
+                                            serde_json::json!({ "modeGen": gen_snap }),
                                         );
                                     }
                                     was_in_mini_island = in_island;
@@ -6301,8 +6739,8 @@ fn spawn_windows_global_hotkey_listener(
                 }
             }
 
-            // Mini 灵动岛切窗 / 切屏 / Win+D / 退出全屏稳定性轻检守护（零抢焦、极低开销）
-            if is_mini_vis {
+            // Mini 灵动岛切窗 / 切屏 / Win+D / Z-order 压盖 / 退出全屏稳定性轻检守护（零抢焦、极低开销）
+            if is_mini_vis && !is_mini_entering {
                 let (fg_now, display_sig) = unsafe {
                     (
                         GetForegroundWindow(),
@@ -6320,27 +6758,53 @@ fn spawn_windows_global_hotkey_listener(
                 last_fg_hwnd = fg_now;
                 last_display_sig = display_sig;
 
+                let yielded_now = mini_yielded_for_fullscreen.load(Ordering::Acquire);
                 let mut mini_state_broken = false;
-                if let Some(win) = app_handle.get_webview_window("mini_player") {
-                    if let Ok(raw_h) = win.hwnd() {
-                        let mh = raw_h.0 as isize;
-                        if mh != 0 {
-                            unsafe {
-                                let iconic = IsIconic(mh) != 0;
-                                let visible = IsWindowVisible(mh) != 0;
-                                let ex = GetWindowLongW(mh, GWL_EXSTYLE);
-                                let lost_topmost = (ex & WS_EX_TOPMOST) == 0;
-                                mini_state_broken = iconic || !visible || lost_topmost;
+                let elapsed_ms = last_mini_heal_at.elapsed().as_millis();
+
+                if !yielded_now {
+                    if let Some(win) = app_handle.get_webview_window("mini_player") {
+                        if let Ok(raw_h) = win.hwnd() {
+                            let mh = raw_h.0 as isize;
+                            if mh != 0 {
+                                unsafe {
+                                    let iconic = IsIconic(mh) != 0;
+                                    let visible = IsWindowVisible(mh) != 0;
+                                    let ex = GetWindowLongW(mh, GWL_EXSTYLE);
+                                    let lost_topmost = (ex & WS_EX_TOPMOST) == 0;
+                                    let stuck_cloaked =
+                                        window_transition::win_impl::is_window_cloaked(mh);
+                                    mini_state_broken =
+                                        iconic || !visible || lost_topmost || stuck_cloaked;
+                                }
+                                // 同层 TOPMOST 窗口或中键滚动/弹窗导致 Z-order 被普通实窗压盖时的轻量探测
+                                if !mini_state_broken && (fg_changed || elapsed_ms >= 900) {
+                                    let main_h = app_handle
+                                        .get_webview_window("main")
+                                        .and_then(|w| w.hwnd().ok())
+                                        .map(|h| h.0 as isize)
+                                        .unwrap_or(0);
+                                    let lyric_h = app_handle
+                                        .get_webview_window("desktop_lyric")
+                                        .and_then(|w| w.hwnd().ok())
+                                        .map(|h| h.0 as isize)
+                                        .unwrap_or(0);
+                                    if window_transition::win_impl::is_overlay_obscured_in_zorder(
+                                        mh,
+                                        &[main_h, lyric_h],
+                                    ) {
+                                        mini_state_broken = true;
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
-                let elapsed_ms = last_mini_heal_at.elapsed().as_millis();
                 let should_heal = display_changed
                     || (fg_changed && elapsed_ms >= 180)
                     || (mini_state_broken && elapsed_ms >= 300)
-                    || elapsed_ms >= 1500;
+                    || elapsed_ms >= 1200;
 
                 if should_heal {
                     last_mini_heal_at = std::time::Instant::now();
@@ -6426,10 +6890,17 @@ pub fn run() {
     let mini_player_expanded_for_setup = mini_player_expanded.clone();
     let mini_player_dock_edge = Arc::new(std::sync::Mutex::new("none".to_string()));
     let mini_player_dock_edge_for_setup = mini_player_dock_edge.clone();
+    let mini_player_dock_ratio = Arc::new(std::sync::Mutex::new(None));
     let mini_player_snapshot = Arc::new(std::sync::Mutex::new(None));
+    let mini_mode_gen = Arc::new(AtomicU64::new(0));
+    let mini_mode_gen_for_setup = mini_mode_gen.clone();
     let mini_snap_anim_gen = Arc::new(AtomicU64::new(0));
+    let mini_yield_fullscreen_enabled = Arc::new(AtomicBool::new(true));
     let mini_yielded_for_fullscreen = Arc::new(AtomicBool::new(false));
+    let mini_yielded_for_fullscreen_for_setup = mini_yielded_for_fullscreen.clone();
     let mini_player_ready = Arc::new(AtomicBool::new(false));
+    let mini_entering_handoff = Arc::new(AtomicBool::new(false));
+    let mini_entering_handoff_for_setup = mini_entering_handoff.clone();
     let mini_exiting_anim = Arc::new(AtomicBool::new(false));
     let mini_exiting_anim_for_setup = mini_exiting_anim.clone();
     let main_was_maximized = Arc::new(AtomicBool::new(false));
@@ -6462,10 +6933,14 @@ pub fn run() {
             mini_player_positioned,
             mini_player_expanded,
             mini_player_dock_edge,
+            mini_player_dock_ratio,
             mini_player_snapshot,
+            mini_mode_gen,
             mini_snap_anim_gen,
+            mini_yield_fullscreen_enabled,
             mini_yielded_for_fullscreen,
             mini_player_ready,
+            mini_entering_handoff,
             mini_exiting_anim,
             main_was_maximized,
             main_transition_gen,
@@ -6500,6 +6975,11 @@ pub fn run() {
                     let app_ui = app_warm.clone();
                     let vis_flag = mini_vis_warm.clone();
                     let _ = app_warm.run_on_main_thread(move || {
+                        // 同步空闲预热 DirectComposition GPU 过渡舞台（仅初始化设备与 1x1 隐藏空窗，0 纹理显存开销），
+                        // 彻底消除首次点击进入小窗时的冷启动卡顿与闪屏！
+                        #[cfg(target_os = "windows")]
+                        window_transition::win_impl::warm_gpu_stage_on_main_thread();
+
                         if app_ui.get_webview_window("mini_player").is_none() {
                             if let Some(mini_win) = ensure_mini_player_window(&app_ui) {
                                 if !vis_flag.load(Ordering::Acquire) {
@@ -6536,9 +7016,12 @@ pub fn run() {
                 desktop_lyric_locked_for_setup.clone(),
                 desktop_lyric_visible_for_setup.clone(),
                 mini_player_visible_for_setup.clone(),
+                mini_entering_handoff_for_setup.clone(),
                 mini_exiting_anim_for_setup.clone(),
                 mini_player_expanded_for_setup.clone(),
                 mini_player_dock_edge_for_setup.clone(),
+                mini_mode_gen_for_setup.clone(),
+                mini_yielded_for_fullscreen_for_setup.clone(),
             );
 
             let show_i = MenuItemBuilder::with_id("show", "显示主窗口").build(app)?;
@@ -6861,6 +7344,8 @@ pub fn run() {
             get_mini_player_drag_anchor_cmd,
             drag_mini_player_step_cmd,
             snap_mini_player_to_edge_cmd,
+            sync_mini_player_dock_pref_cmd,
+            set_mini_player_yield_fullscreen_cmd,
             expand_mini_player_from_dock_cmd,
             collapse_mini_player_to_dock_cmd,
             set_close_to_tray_cmd,
@@ -6994,6 +7479,193 @@ mod settings_backend_tests {
             compute_mini_dock_or_clamped_pos(2500, -300, 480, 228, "none", 22, primary),
             (1462, -22)
         );
+    }
+
+    #[test]
+    fn test_classify_foreground_fullscreen_matrix() {
+        const WS_CAPTION: u32 = 0x00C0_0000;
+        const WS_THICKFRAME: u32 = 0x0004_0000;
+        const WS_POPUP: u32 = 0x8000_0000;
+        const WS_EX_TRANSPARENT: u32 = 0x0000_0020;
+        const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+
+        let mon = PhysRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+
+        // 1. 开启自动隐藏任务栏 + 最大化 Chrome/Edge（Windows 会误报 QUNS_BUSY=2 且窗口覆盖整个 1920x1080）
+        //    必须判为 false，绝不能误剥离灵动岛置顶护甲！
+        assert!(!classify_foreground_is_true_fullscreen(
+            "Chrome_WidgetWin_1",
+            ForegroundWindowProbe {
+                is_visible: true,
+                is_iconic: false,
+                is_cloaked: false,
+                is_zoomed: true,
+                style: WS_CAPTION | WS_THICKFRAME,
+                ex_style: 0,
+                frame_rect: PhysRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1079,
+                },
+                monitor_rect: mon,
+                quns_state: 2, // QUNS_BUSY
+            }
+        ));
+
+        // 2. 副屏无任务栏 + 最大化 Electron/VS Code/PDF 铺满 1920x1080 -> false
+        assert!(!classify_foreground_is_true_fullscreen(
+            "Chrome_WidgetWin_1",
+            ForegroundWindowProbe {
+                is_visible: true,
+                is_iconic: false,
+                is_cloaked: false,
+                is_zoomed: true,
+                style: WS_CAPTION | WS_THICKFRAME,
+                ex_style: 0,
+                frame_rect: mon,
+                monitor_rect: mon,
+                quns_state: 5,
+            }
+        ));
+
+        // 3. 普通非最大化窗口被用户手动拉到全屏大小（仍带标题栏/边框且非 D3D 全屏）-> false
+        assert!(!classify_foreground_is_true_fullscreen(
+            "CabinetWClass",
+            ForegroundWindowProbe {
+                is_visible: true,
+                is_iconic: false,
+                is_cloaked: false,
+                is_zoomed: false,
+                style: WS_CAPTION | WS_THICKFRAME,
+                ex_style: 0,
+                frame_rect: mon,
+                monitor_rect: mon,
+                quns_state: 5,
+            }
+        ));
+
+        // 4. 桌面 / 任务栏 / Alt+Tab / 右键菜单 / 透明穿透叠层 / 工具浮窗 -> 全部 false
+        for shell_cls in [
+            "Progman",
+            "WorkerW",
+            "Shell_TrayWnd",
+            "MultitaskingViewFrame",
+            "#32768",
+            "Auto-Suggest Dropdown",
+        ] {
+            assert!(!classify_foreground_is_true_fullscreen(
+                shell_cls,
+                ForegroundWindowProbe {
+                    is_visible: true,
+                    is_iconic: false,
+                    is_cloaked: false,
+                    is_zoomed: false,
+                    style: WS_POPUP,
+                    ex_style: 0,
+                    frame_rect: mon,
+                    monitor_rect: mon,
+                    quns_state: 3,
+                }
+            ));
+        }
+        assert!(!classify_foreground_is_true_fullscreen(
+            "OverlayToolWnd",
+            ForegroundWindowProbe {
+                is_visible: true,
+                is_iconic: false,
+                is_cloaked: false,
+                is_zoomed: false,
+                style: WS_POPUP,
+                ex_style: WS_EX_TRANSPARENT,
+                frame_rect: mon,
+                monitor_rect: mon,
+                quns_state: 5,
+            }
+        ));
+        assert!(!classify_foreground_is_true_fullscreen(
+            "ToolOverlay",
+            ForegroundWindowProbe {
+                is_visible: true,
+                is_iconic: false,
+                is_cloaked: false,
+                is_zoomed: false,
+                style: WS_POPUP,
+                ex_style: WS_EX_TOOLWINDOW,
+                frame_rect: mon,
+                monitor_rect: mon,
+                quns_state: 5,
+            }
+        ));
+
+        // 5. Chrome/Edge F11 全屏 或 B站/YouTube 网页全屏视频（剥离 WS_MAXIMIZE/WS_CAPTION/WS_THICKFRAME）-> true
+        assert!(classify_foreground_is_true_fullscreen(
+            "Chrome_WidgetWin_1",
+            ForegroundWindowProbe {
+                is_visible: true,
+                is_iconic: false,
+                is_cloaked: false,
+                is_zoomed: false,
+                style: WS_POPUP,
+                ex_style: 0,
+                frame_rect: mon,
+                monitor_rect: mon,
+                quns_state: 2,
+            }
+        ));
+
+        // 6. DirectX/Vulkan 独占全屏游戏或无边框全屏游戏（QUNS_RUNNING_D3D_FULL_SCREEN = 3）-> true
+        assert!(classify_foreground_is_true_fullscreen(
+            "UnrealWindow",
+            ForegroundWindowProbe {
+                is_visible: true,
+                is_iconic: false,
+                is_cloaked: false,
+                is_zoomed: false,
+                style: WS_POPUP,
+                ex_style: 0,
+                frame_rect: mon,
+                monitor_rect: mon,
+                quns_state: 3,
+            }
+        ));
+
+        // 7. PowerPoint 幻灯片全屏演示（QUNS_PRESENTATION_MODE = 4）-> true
+        assert!(classify_foreground_is_true_fullscreen(
+            "screenClass",
+            ForegroundWindowProbe {
+                is_visible: true,
+                is_iconic: false,
+                is_cloaked: false,
+                is_zoomed: false,
+                style: WS_POPUP,
+                ex_style: 0,
+                frame_rect: mon,
+                monitor_rect: mon,
+                quns_state: 4,
+            }
+        ));
+
+        // 8. 挂起的 UWP Cloaked 窗口 -> false
+        assert!(!classify_foreground_is_true_fullscreen(
+            "ApplicationFrameWindow",
+            ForegroundWindowProbe {
+                is_visible: true,
+                is_iconic: false,
+                is_cloaked: true,
+                is_zoomed: false,
+                style: WS_POPUP,
+                ex_style: 0,
+                frame_rect: mon,
+                monitor_rect: mon,
+                quns_state: 3,
+            }
+        ));
     }
 
     #[test]

@@ -2116,28 +2116,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 32%, transparent);
 }
 
-/* ==================== 全局 2 列双行统一歌曲列表样式（含明暗双主题兜底） ==================== */
-.frameless-songs-grid-2col {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 20px;
-  row-gap: 6px;
-  width: 100%;
-  align-items: center;
-}
-
-@container (max-width: 780px) {
-  .frameless-songs-grid-2col {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 960px) {
-  .frameless-songs-grid-2col {
-    grid-template-columns: 1fr;
-  }
-}
-
+/* ==================== 全局自适应单/双列统一歌曲列表（由 skyline-components.css 与 adaptiveSongGrid.ts 统一驱动） ==================== */
 /* .unified-song-row 统一样式已由 src/styles/skyline-components.css 提供 */
 
 /* 右侧热搜词榜 */

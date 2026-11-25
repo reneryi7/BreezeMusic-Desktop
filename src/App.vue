@@ -34,6 +34,10 @@ import {
   isAppForegroundActive,
   subscribeAppPowerVisibility,
 } from "./utils/windowPowerState";
+import {
+  initAdaptiveSongGridEngine,
+  type AdaptiveSongGridController,
+} from "./utils/adaptiveSongGrid";
 
 const FocusPodModal = defineAsyncComponent(
   () => import("./components/FocusPodModal.vue")
@@ -452,6 +456,7 @@ let tooltipRafId: number | null = null;
 let tooltipHoverTimer: ReturnType<typeof setTimeout> | null = null;
 let lastTooltipHideTime = 0;
 let domMutationObserver: MutationObserver | null = null;
+let adaptiveSongGridController: AdaptiveSongGridController | null = null;
 
 const INTERACTIVE_TIP_SELECTOR =
   'button, a, [role="button"], input, select, [data-tip], [data-raw-title], .bento-listen-box, .clickable-meta-link, .inline-meta-btn, .inline-meta-jump, .np-cover-stage-box, .cover-wrap, .track-cover-wrap, .song-cover-wrap, .sl-cover-wrap, .artist-avatar-wrap, .artist-name-span, .clickable, .pill-badge, .q-tag, .s-badge, .mini-badge, .fs-badge, .pb-cover-frame, .pb-song-artist, .pb-quality-pill, .np-qf-idx, .sam-card, .spw-band-pill, .fdl-song-chip, .mini-cover-wrap';
@@ -2477,6 +2482,7 @@ onMounted(() => {
     nextTick(() => {
       stripNativeTitlesInSubtree(document.body);
       refreshAllTabGliders(false);
+      adaptiveSongGridController = initAdaptiveSongGridEngine();
     });
   } else {
     nextTick(() => {
@@ -2516,6 +2522,7 @@ onMounted(() => {
             if (!(node instanceof HTMLElement)) continue;
             if (!isStandaloneSubWindow) {
               stripNativeTitlesInSubtree(node);
+              adaptiveSongGridController?.scanSubtree(node);
             }
             if (
               !node.classList.contains("immersive-tab-indicator") &&
@@ -2599,6 +2606,10 @@ onBeforeUnmount(() => {
   if (domMutationObserver) {
     domMutationObserver.disconnect();
     domMutationObserver = null;
+  }
+  if (adaptiveSongGridController) {
+    adaptiveSongGridController.dispose();
+    adaptiveSongGridController = null;
   }
   if (tabResizeObserver) {
     tabResizeObserver.disconnect();

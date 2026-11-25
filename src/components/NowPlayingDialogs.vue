@@ -1038,7 +1038,7 @@ function handleJumpToTuner() {
                 WebkitTextStroke: lyricPreviewColors.opticalStrokeCss,
                 paintOrder: 'stroke fill',
                 backgroundImage: store.lyricWordByWord
-                  ? `linear-gradient(90deg, ${lyricPreviewColors.primary} 0%, ${lyricPreviewColors.secondary} 58%, ${lyricPreviewColors.inactiveRgba} 68%, ${lyricPreviewColors.inactiveRgba} 100%)`
+                  ? `linear-gradient(90deg, ${lyricPreviewColors.primary} 0%, ${lyricPreviewColors.secondary} 46%, ${lyricPreviewColors.inactiveRgba} 82%, ${lyricPreviewColors.inactiveRgba} 100%)`
                   : `linear-gradient(90deg, ${lyricPreviewColors.primary} 0%, ${lyricPreviewColors.secondary} 100%)`,
               }"
             >

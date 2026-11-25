@@ -1340,6 +1340,13 @@ export const kugouClient = {
     });
   },
 
+  /** 同步「全屏视频/游戏时自动隐藏 Mini 灵动岛」设置开关 */
+  setMiniPlayerYieldFullscreen(enabled: boolean): Promise<boolean> {
+    return invoke<boolean>("set_mini_player_yield_fullscreen_cmd", {
+      enabled,
+    });
+  },
+
   /** 同步全局有效动效档位到原生窗口过渡引擎 */
   syncMotionLevel(level: string): Promise<boolean> {
     return invoke<boolean>("sync_motion_level_cmd", { level });

@@ -1479,6 +1479,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  container-type: inline-size;
 }
 
 .lmv-monogram {

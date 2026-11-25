@@ -8,6 +8,32 @@
 
 ## [Unreleased]
 
+### 新增 (Added)
+- **「设置 → 常规与窗口」新增「全屏视频/游戏时自动隐藏 Mini 灵动岛」开关**：默认开启，同屏进入真正的 F11 浏览器全屏、全屏视频、PPT 放映或全屏/无边框全屏游戏时自动无痕隐身礼让，退出全屏瞬时恢复，亦支持用户按需关闭以始终保持灵动岛置顶；同步纳入设置中心中英文实时搜索索引。
+- **Mini 灵动岛贴边停靠位置记忆**：贴边吸附与沿边滑动后自动持久化沿边归一化停靠比例（`bm_mini_dock_anchor_v1`），重启或冷启动再次切入小窗时精准回到上次自定义贴边位置。
+
+### 优化 (Changed)
+- **沉浸播放页歌词全面重构为「光晕浮升 · 声浪呼吸」每字独立弹簧 + 120Hz 行级瀑布错峰滚动引擎**：
+  - 新增 [lyricMotionEngine.ts](src/utils/lyricMotionEngine.ts) 并重构 [NowPlayingView.vue](src/views/NowPlayingView.vue) 歌词舞台：彻底告别“进度条式左右擦字”与每帧主线程 `linear-gradient` / `drop-shadow` 重绘，升级为**双层字粒 + 静态预光栅化辉光伪层**纯 GPU 合成管线（每帧仅更新 `transform` 与 `opacity`，60/120/144Hz 全刷帧率一致丝滑，字缘锐利零发毛）。
+  - 为活跃行每个音节引入独立二阶物理弹簧（提前 90ms 轻柔预热联动、105–240ms 广域柔光快速浸润、快连音自动衔接成字浪、长尾音 ≥ 480ms 高点 ~1.35Hz 呼吸声浪微振与柔光吞吐），并支持无缝移交的 **380ms 退场余韵池**（换行时刚唱完行从容回落与辉光渐熄，消除 1 帧硬切变灰）。
+  - 升级整行歌词滚动为 Apple Music / AMLL 式**行级弹性瀑布错峰追随**（当前行率先跃升，后续邻行依次滞后 ~42ms 波浪跟进）并接入 `scrollTop` 子像素残差吸收补偿（消除慢速收尾 1px 阶梯微抖），完整兼容滚轮随时介入、点击跳转、浅/深色双舞台及三档动效设置。
+- **全站歌曲列表升级为「1040px 容器宽度感知 + 空间 FLIP 真实归位」自适应单/双列系统，并根治悬停操作按钮压字**：
+  - 新增 [adaptiveSongGrid.ts](src/utils/adaptiveSongGrid.ts) 并统一全站 8 处 `.frameless-songs-grid-2col`（发现页日推/猜你喜欢/新歌/排行榜、歌单/专辑/歌手详情、搜索、云盘、本地与电台队列弹窗）为 **1040px 容器宽均衡档**（保证双列每列 ≥ 510px）：默认窗口（`1240px`）下无侧栏的日推/猜你喜欢/新歌/云盘/本地自然保持宽裕双列，带侧边栏的排行榜与歌单/专辑/歌手详情自动切为舒展单列；窗口拉宽或最大化跨过滞回阈值（`1056px` 进双列 / `1020px` 退单列，36px 防抖缓冲带）时平滑自适应。
+  - 手动拖拽窗口或最大化切换单/双列时，自动对视口内可见曲目行执行 GPU 合成 `translate3d` 空间 FLIP 真实归位动画（高阻尼弹簧 + 12ms 轻微波浪错峰、绝不压扁封面与字形、`O(log N)` 二分视口扫描、锁定首行滚动锚点防视野跳飞），并完整尊重三档动效（`best` / `standard` / `none`）与系统减弱动态效果。
+  - 全面打磨 `.unified-song-row` 悬停交互：单列宽裕态在右侧预留 `184px` 专属操作通道实现 100% 零压字；双列态升级按钮间距并对超长歌名/歌手尾端施加四主题通用的 `mask-image` 平滑渐隐羽化遮罩（区分 4 键与 5 键行宽，且自动避让内部键盘焦点环）。
+- **彻底重塑主窗口进入 Mini 小窗的零闪屏 GPU 空间收束过渡动效（兼容默认窗口与最大化窗口）**：
+  - 升级 [window_transition.rs](src-tauri/src/window_transition.rs) 与 [lib.rs](src-tauri/src/lib.rs) 为**三段式严格原子交接**（前景极速 `BitBlt` ~1.5ms 截帧 → GPU 静态 100% 不透明锁帧覆盖并先 `Commit` 再显示 → 掩护下零闪烁撤离真实主窗 → 干净单层 120Hz+ 收束起飞），根除“双影叠加 → 底窗骤灭”闪屏及 `PrintWindow` 回读 WebView2 卡顿。
+  - 重调 `EnterMini` 空间动效曲线为 `310ms` 有力等比收束（最大化 `1.0 → 0.54` / 默认窗 `1.0 → 0.48`）、鲜明指向灵动岛的方向牵引飞掠、`0/8px → 36px` 硬件抗锯齿动态圆角与「前 40% 高实体锚定 + 后 60% 柔化消融」两段式透明度曲线；同步接入启动空闲预热 `DCompStage`、`IMMUTABLE + CopySubresourceRegion` 驱动全兼容上传、三级独立变换修正降采样居中对齐，以及 `MiniPlayerWindow` 在 `DWMWA_CLOAK` 隐身斗篷下预合成 `entering` 透明首帧并于 `125ms` 黄金接力点零双闪弹性滑入。
+
+### 修复 (Fixed)
+- **彻底根治自动隐藏任务栏及无任务栏副屏下，浏览器/Web 应用点击中键快速滑动（AutoScroll）或触发弹窗导致 Mini 灵动岛消失的问题**：
+  - 重构全屏检测引擎为 `classify_foreground_is_true_fullscreen`，改用 `DWMWA_EXTENDED_FRAME_BOUNDS` 真实可视边框并结合 `IsZoomed`、`WS_CAPTION` / `WS_THICKFRAME` 与 `SHQueryUserNotificationState`（排除易误报的 `QUNS_BUSY`），100% 剔除自动隐藏任务栏与副屏无任务栏下普通最大化窗口被误判为全屏并遭静默剥离 `WS_EX_TOPMOST` 的缺陷。
+  - 将真全屏礼让升级为 `DWMWA_CLOAK = 1` 原位零闪烁隐身 + 点击穿透（退出全屏瞬时解 cloak 复现），消除全屏礼让期 `300ms` 后台空转唤醒，并新增轻量 `GW_HWNDPREV` Z-order 遮挡探针以防其他实窗压盖灵动岛。
+- **彻底修复点击灵动岛展开小窗时，自动隐藏顶栏经常不随鼠标悬停正常显示的问题**：
+  - 引入跨线程状态世代号 `mini_mode_gen` 并将展开/收起/吸附的 `GWL_EXSTYLE` 穿透与置顶操作统一收敛至 UI 主线程，杜绝后台 16ms 热区轮询线程的迟到闭包将已展开卡片误设回点击穿透或发射过期的 `bm-mini-island-cursor-leave`。
+  - 精细化 `set_overlay_click_through_raw`，纯穿透位切换不再强发 `SWP_FRAMECHANGED` 冲掉 WebView2 悬停态；前端将悬停事件精准收敛到可见卡片实体 `.bm-mini-shell`，构建「展开即显（含 340ms 防误触）+ `@pointermove` 轻量自愈 + 离场事件模式门控 + CSS `:hover` / `:focus-within` / `@media (hover: none)` 原生兜底」四重保障。
+- **加固 Mini 小窗后台预热定位与拖拽指针捕获**：隐藏预热期间仅静默同步贴边偏好与停靠比例，绝不以 `(0,0)` 提前污染定位标志或误设置顶；拖拽新增 `setPointerCapture` 与 `lostpointercapture` / `blur` 安全兜底，杜绝快速甩拖出窗松手卡死。
+
 ---
 
 ## [1.1.0] - 2026-11-23

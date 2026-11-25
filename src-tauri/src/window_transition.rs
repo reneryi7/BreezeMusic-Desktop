@@ -291,33 +291,36 @@ pub fn compute_spatial_transition_plan(
     let is_rich = motion_style == TransitionMotionStyle::Rich;
     // 最大化窗口贴齐屏幕四边，起始/终态圆角必须为 0px；非最大化普通窗对齐 Win11 系统 8px 圆角
     let rest_radius = if main_is_maximized { 0.0 } else { 8.0 * sf };
-    let morph_radius = if is_rich { 22.0 * sf } else { 14.0 * sf };
-
-    // 限制单轴最大牵引位移，既保留鲜明的「飞向/来自 Mini」空间指向，又避免大幅滑移刺眼
-    let max_pull_x = (main_rect.width() as f32 * if is_rich { 0.16 } else { 0.08 }).max(36.0 * sf);
-    let max_pull_y = (main_rect.height() as f32 * if is_rich { 0.18 } else { 0.09 }).max(36.0 * sf);
-    let pull_ratio = match (main_is_maximized, is_rich) {
-        (true, true) => 0.17,
-        (false, true) => 0.24,
-        (true, false) => 0.09,
-        (false, false) => 0.12,
-    };
-    let pull_dx = (raw_dx * pull_ratio).clamp(-max_pull_x, max_pull_x);
-    let pull_dy = (raw_dy * pull_ratio).clamp(-max_pull_y, max_pull_y);
+    let enter_morph_radius = if is_rich { 36.0 * sf } else { 22.0 * sf };
+    let exit_morph_radius = if is_rich { 24.0 * sf } else { 16.0 * sf };
 
     match kind {
         TransitionKind::EnterMini => {
+            // 进入小窗：允许更大范围的方向牵引，让主窗口清晰优雅地朝灵动岛/小窗实体飞掠收束
+            let max_pull_x =
+                (main_rect.width() as f32 * if is_rich { 0.42 } else { 0.24 }).max(64.0 * sf);
+            let max_pull_y =
+                (main_rect.height() as f32 * if is_rich { 0.44 } else { 0.26 }).max(64.0 * sf);
+            let pull_ratio = match (main_is_maximized, is_rich) {
+                (true, true) => 0.54,
+                (false, true) => 0.58,
+                (true, false) => 0.30,
+                (false, false) => 0.34,
+            };
+            let pull_dx = (raw_dx * pull_ratio).clamp(-max_pull_x, max_pull_x);
+            let pull_dy = (raw_dy * pull_ratio).clamp(-max_pull_y, max_pull_y);
+
             let end_scale = match (main_is_maximized, is_rich) {
-                (true, true) => 0.875,
-                (false, true) => 0.835,
-                (true, false) => 0.94,
-                (false, false) => 0.92,
+                (true, true) => 0.54,
+                (false, true) => 0.48,
+                (true, false) => 0.72,
+                (false, false) => 0.68,
             };
             SpatialTransitionPlan {
                 kind,
-                duration_ms: if is_rich { 235 } else { 155 },
+                duration_ms: if is_rich { 310 } else { 210 },
                 reveal_dissolve_ms: 0,
-                mini_handoff_delay_ms: if is_rich { 58 } else { 32 },
+                mini_handoff_delay_ms: if is_rich { 125 } else { 78 },
                 start_scale: 1.0,
                 end_scale,
                 start_dx: 0.0,
@@ -327,22 +330,35 @@ pub fn compute_spatial_transition_plan(
                 start_opacity: 1.0,
                 end_opacity: 0.0,
                 start_radius_px: rest_radius,
-                end_radius_px: morph_radius,
+                end_radius_px: enter_morph_radius,
                 mini_hint_offset_x,
                 mini_hint_offset_y,
                 motion_style,
             }
         }
         TransitionKind::ExitMini => {
+            let max_pull_x =
+                (main_rect.width() as f32 * if is_rich { 0.20 } else { 0.10 }).max(42.0 * sf);
+            let max_pull_y =
+                (main_rect.height() as f32 * if is_rich { 0.22 } else { 0.11 }).max(42.0 * sf);
+            let pull_ratio = match (main_is_maximized, is_rich) {
+                (true, true) => 0.22,
+                (false, true) => 0.28,
+                (true, false) => 0.12,
+                (false, false) => 0.15,
+            };
+            let pull_dx = (raw_dx * pull_ratio).clamp(-max_pull_x, max_pull_x);
+            let pull_dy = (raw_dy * pull_ratio).clamp(-max_pull_y, max_pull_y);
+
             let start_scale = match (main_is_maximized, is_rich) {
-                (true, true) => 0.895,
-                (false, true) => 0.855,
-                (true, false) => 0.945,
-                (false, false) => 0.93,
+                (true, true) => 0.86,
+                (false, true) => 0.82,
+                (true, false) => 0.93,
+                (false, false) => 0.91,
             };
             SpatialTransitionPlan {
                 kind,
-                duration_ms: if is_rich { 245 } else { 160 },
+                duration_ms: if is_rich { 260 } else { 170 },
                 reveal_dissolve_ms: if is_rich { 65 } else { 40 },
                 mini_handoff_delay_ms: 0,
                 start_scale,
@@ -353,7 +369,7 @@ pub fn compute_spatial_transition_plan(
                 end_dy: 0.0,
                 start_opacity: 0.0,
                 end_opacity: 1.0,
-                start_radius_px: morph_radius,
+                start_radius_px: exit_morph_radius,
                 end_radius_px: rest_radius,
                 mini_hint_offset_x,
                 mini_hint_offset_y,
@@ -381,7 +397,7 @@ pub fn compute_spatial_transition_plan(
                 end_dy: 0.0,
                 start_opacity: 0.0,
                 end_opacity: 1.0,
-                start_radius_px: morph_radius * 0.75,
+                start_radius_px: exit_morph_radius * 0.75,
                 end_radius_px: rest_radius,
                 mini_hint_offset_x: 0.0,
                 mini_hint_offset_y: 0.0,
@@ -496,8 +512,9 @@ pub mod win_impl {
         D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_11_0,
     };
     use windows::Win32::Graphics::Direct3D11::{
-        D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-        D3D11_BOX, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+        D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
+        D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+        D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_IMMUTABLE,
     };
     use windows::Win32::Graphics::DirectComposition::{
         DCompositionCreateDevice, IDCompositionAnimation, IDCompositionClip, IDCompositionDevice,
@@ -508,10 +525,11 @@ pub mod win_impl {
     };
     use windows::Win32::Graphics::Dwm::{
         DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAK,
-        DWMWA_COLOR_NONE, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_TRANSITIONS_FORCEDISABLED,
+        DWMWA_CLOAKED, DWMWA_COLOR_NONE, DWMWA_EXTENDED_FRAME_BOUNDS,
+        DWMWA_TRANSITIONS_FORCEDISABLED,
     };
     use windows::Win32::Graphics::Dxgi::Common::{
-        DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
     };
     use windows::Win32::Graphics::Dxgi::IDXGIDevice;
     use windows::Win32::Graphics::Gdi::{
@@ -523,15 +541,16 @@ pub mod win_impl {
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, CreateWindowExW, DefWindowProcW, GetClientRect, GetForegroundWindow,
-        GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsIconic,
-        IsWindowVisible, IsZoomed, RegisterClassExW, SendMessageW, SetForegroundWindow,
-        SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HTTRANSPARENT, HWND_NOTOPMOST,
-        HWND_TOPMOST, SC_RESTORE, SWP_FRAMECHANGED, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMAXIMIZED,
-        SW_SHOWNOACTIVATE, WINDOWPLACEMENT, WM_ERASEBKGND, WM_NCHITTEST, WM_SYSCOMMAND,
-        WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-        WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        BringWindowToTop, CreateWindowExW, DefWindowProcW, GetClassNameW, GetClientRect,
+        GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect,
+        GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, RegisterClassExW,
+        SendMessageW, SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+        GW_HWNDPREV, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, SC_RESTORE, SWP_FRAMECHANGED,
+        SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+        SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, WINDOWPLACEMENT,
+        WM_ERASEBKGND, WM_NCHITTEST, WM_SYSCOMMAND, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED,
+        WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
     };
 
     const PW_CLIENTONLY: u32 = 0x0000_0001;
@@ -548,6 +567,8 @@ pub mod win_impl {
 
     /// 原子切换透明悬浮子窗（如 Mini 灵动岛）的点击穿透态：
     /// 始终保留 WS_EX_TOOLWINDOW 并剥离 WS_EX_APPWINDOW，绝不调用 ShowWindow 或触发 tao apply_diff 篡改可见态。
+    /// 仅当 TOOLWINDOW/APPWINDOW 帧属性确实发生变化时才附带 SWP_FRAMECHANGED，避免纯穿透切换反复触发
+    /// WM_MOUSELEAVE 冲掉 WebView2 悬停态或引发 DWM 非客户区重算抖动。
     pub fn set_overlay_click_through_raw(hwnd_raw: isize, ignore: bool) {
         if hwnd_raw == 0 {
             return;
@@ -556,20 +577,42 @@ pub mod win_impl {
         unsafe {
             let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
             let base = (ex | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
+            let frame_bits = WS_EX_TOOLWINDOW.0 | WS_EX_APPWINDOW.0;
+            let frame_style_changed = (ex & frame_bits) != (base & frame_bits);
             let mask = WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0;
             let next = if ignore { base | mask } else { base & !mask };
             if next != ex {
                 let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, next as i32);
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-                );
+                if frame_style_changed {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                    );
+                }
             }
+        }
+    }
+
+    /// 查询窗口当前是否处于 DWM Cloaked 隐身状态（用于准确过滤挂起 UWP 窗与检验全屏礼让状态）
+    pub fn is_window_cloaked(hwnd_raw: isize) -> bool {
+        if hwnd_raw == 0 {
+            return false;
+        }
+        let mut cloaked: u32 = 0;
+        unsafe {
+            DwmGetWindowAttribute(
+                HWND(hwnd_raw as *mut _),
+                DWMWA_CLOAKED,
+                &mut cloaked as *mut u32 as *mut _,
+                std::mem::size_of::<u32>() as u32,
+            )
+            .is_ok()
+                && cloaked != 0
         }
     }
 
@@ -593,13 +636,15 @@ pub mod win_impl {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW,
             );
         }
+        set_window_cloak(hwnd_raw, false);
     }
 
-    /// 原子显示透明悬浮子窗并维持 HWND_TOPMOST（零抢焦、保 WS_EX_TOOLWINDOW 与目标点击穿透态）
+    /// 原子显示透明悬浮子窗并维持 HWND_TOPMOST（零抢焦、清除 DWM Cloak、保 WS_EX_TOOLWINDOW 与目标点击穿透态）
     pub fn show_overlay_window_native(hwnd_raw: isize, click_through: bool) {
         if hwnd_raw == 0 {
             return;
         }
+        set_window_cloak(hwnd_raw, false);
         set_overlay_click_through_raw(hwnd_raw, click_through);
         let hwnd = HWND(hwnd_raw as *mut _);
         unsafe {
@@ -614,6 +659,152 @@ pub mod win_impl {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
         }
+    }
+
+    /// 在 DWMWA_CLOAK = 1 完全隐身掩护下先唤醒显示悬浮子窗（如刚从 TrySuspend 恢复的 Mini 小窗）：
+    /// 让 WebView2 在屏幕 0 像素可见的前提下完成 entering(opacity=0) 首帧与最新歌曲封面合成，
+    /// 彻底杜绝 ShowWindow 瞬间闪现上一帧再变透明的“双闪”现象。
+    pub fn prepare_overlay_window_cloaked_native(hwnd_raw: isize) {
+        if hwnd_raw == 0 {
+            return;
+        }
+        set_overlay_click_through_raw(hwnd_raw, true);
+        set_window_cloak(hwnd_raw, true);
+        let hwnd = HWND(hwnd_raw as *mut _);
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+    }
+
+    /// 真全屏独占应用（F11 浏览器 / 全屏视频 / 全屏游戏 / PPT 放映）礼让：
+    /// 原位通过 DWMWA_CLOAK = 1 零闪烁隐身 + 开启点击穿透 + 剥离 HWND_TOPMOST，
+    /// 既 0ms 彻底退让不遮挡画面或拦截鼠标，又不调用 SW_HIDE 污染 tao WindowFlags::VISIBLE 缓存。
+    pub fn yield_overlay_window_for_fullscreen_native(hwnd_raw: isize) {
+        if hwnd_raw == 0 {
+            return;
+        }
+        set_overlay_click_through_raw(hwnd_raw, true);
+        set_window_cloak(hwnd_raw, true);
+        let hwnd = HWND(hwnd_raw as *mut _);
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_NOTOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    /// 纯原生无抢焦重申 HWND_TOPMOST（自动解除可能残留的 DWM Cloak），绝不经由 tao 修改其他窗口属性
+    pub fn reassert_overlay_topmost_native(hwnd_raw: isize) {
+        if hwnd_raw == 0 {
+            return;
+        }
+        if is_window_cloaked(hwnd_raw) {
+            set_window_cloak(hwnd_raw, false);
+        }
+        let hwnd = HWND(hwnd_raw as *mut _);
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    /// 轻量 Z-order 遮挡探针：沿 GW_HWNDPREV 向上扫描至多 24 层，检测是否存在与目标视觉区域相交的
+    /// 非穿透普通应用窗口压盖在悬浮窗上方（自动忽略不可见/Cloaked/穿透窗/本应用子窗及系统菜单与任务栏壳层）。
+    pub fn is_overlay_obscured_in_zorder(hwnd_raw: isize, ignore_hwnds: &[isize]) -> bool {
+        if hwnd_raw == 0 {
+            return false;
+        }
+        let hwnd = HWND(hwnd_raw as *mut _);
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+                return false;
+            }
+            let Some(target_rect) = get_window_visual_rect(hwnd_raw) else {
+                return false;
+            };
+            let mut cur = hwnd;
+            let mut steps = 0usize;
+            while steps < 24 {
+                steps += 1;
+                let Ok(prev) = GetWindow(cur, GW_HWNDPREV) else {
+                    break;
+                };
+                if prev.0.is_null() || prev == cur || prev == hwnd {
+                    break;
+                }
+                cur = prev;
+                let prev_raw = prev.0 as isize;
+                if ignore_hwnds.contains(&prev_raw) {
+                    continue;
+                }
+                if !IsWindowVisible(prev).as_bool()
+                    || IsIconic(prev).as_bool()
+                    || is_window_cloaked(prev_raw)
+                {
+                    continue;
+                }
+                let ex = GetWindowLongW(prev, GWL_EXSTYLE) as u32;
+                if (ex & WS_EX_TRANSPARENT.0) != 0 {
+                    continue;
+                }
+                let mut cls_buf = [0u16; 128];
+                let len = GetClassNameW(prev, &mut cls_buf);
+                if len > 0 {
+                    let cls = String::from_utf16_lossy(&cls_buf[..len as usize]);
+                    if matches!(
+                        cls.as_str(),
+                        "#32768"
+                            | "tooltips_class32"
+                            | "Shell_TrayWnd"
+                            | "Shell_SecondaryTrayWnd"
+                            | "NotifyIconOverflowWindow"
+                            | "Windows.UI.Core.CoreWindow"
+                            | "TaskListThumbnailWnd"
+                            | "MultitaskingViewFrame"
+                            | "XamlExplorerHostIslandWindow"
+                            | "Auto-Suggest Dropdown"
+                            | "Windows.UI.Input.InputSite.WindowClass"
+                            | "ApplicationManager_DesktopShellWindow"
+                            | "CEF-OSC-WIDGET"
+                    ) {
+                        continue;
+                    }
+                }
+                let Some(prev_rect) = get_window_visual_rect(prev_raw) else {
+                    continue;
+                };
+                let inter_w = target_rect.right.min(prev_rect.right)
+                    - target_rect.left.max(prev_rect.left);
+                let inter_h = target_rect.bottom.min(prev_rect.bottom)
+                    - target_rect.top.max(prev_rect.top);
+                if inter_w >= 4 && inter_h >= 4 {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub fn set_window_cloak(hwnd_raw: isize, cloaked: bool) {
@@ -938,12 +1129,29 @@ pub mod win_impl {
             }
         };
 
-        if let Some(px) = try_capture(false) {
-            return Some((w, h, px));
-        }
-        if allow_screen_blt_fallback {
+        // 当窗口当前前景可见且允许屏幕捕获时（如 EnterMini 点击切小窗按钮的瞬间），
+        // 若未被其他非本应用实窗遮挡，优先使用极速屏幕 BitBlt（~1.5ms，100% 精准还原 WebView2/WebGL2 真画面，
+        // 彻底规避对 WebView2 调用 PrintWindow(PW_RENDERFULLCONTENT) 带来的 40~100ms 卡顿与重绘闪屏！）。
+        let prefer_fast_screen_blt = allow_screen_blt_fallback
+            && is_hwnd_visible_and_not_minimized(hwnd_raw)
+            && !is_window_cloaked(hwnd_raw)
+            && !is_overlay_obscured_in_zorder(hwnd_raw, &[]);
+
+        if prefer_fast_screen_blt {
             if let Some(px) = try_capture(true) {
                 return Some((w, h, px));
+            }
+            if let Some(px) = try_capture(false) {
+                return Some((w, h, px));
+            }
+        } else {
+            if let Some(px) = try_capture(false) {
+                return Some((w, h, px));
+            }
+            if allow_screen_blt_fallback {
+                if let Some(px) = try_capture(true) {
+                    return Some((w, h, px));
+                }
             }
         }
         None
@@ -1178,9 +1386,19 @@ pub mod win_impl {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct LockedStageGeom {
+        tex_w: u32,
+        tex_h: u32,
+        cw: f32,
+        ch: f32,
+        fit_sx: f32,
+        fit_sy: f32,
+    }
+
     struct DCompStage {
         hwnd: HWND,
-        _d3d_device: ID3D11Device,
+        d3d_device: ID3D11Device,
         d3d_ctx: ID3D11DeviceContext,
         dcomp_device: IDCompositionDevice,
         target: IDCompositionTarget,
@@ -1189,9 +1407,11 @@ pub mod win_impl {
         active_surface: Option<IDCompositionSurface>,
         active_effect: Option<IDCompositionEffectGroup>,
         active_clip: Option<IDCompositionRectangleClip>,
+        active_fit_scale: Option<IDCompositionScaleTransform>,
         active_scale: Option<IDCompositionScaleTransform>,
         active_translate: Option<IDCompositionTranslateTransform>,
         active_transform_group: Option<IDCompositionTransform>,
+        locked_geom: Option<LockedStageGeom>,
         stage_rect: RectPx,
     }
 
@@ -1293,7 +1513,7 @@ pub mod win_impl {
 
                 Ok(Self {
                     hwnd,
-                    _d3d_device: d3d_device,
+                    d3d_device,
                     d3d_ctx,
                     dcomp_device,
                     target,
@@ -1301,9 +1521,11 @@ pub mod win_impl {
                     active_surface: None,
                     active_effect: None,
                     active_clip: None,
+                    active_fit_scale: None,
                     active_scale: None,
                     active_translate: None,
                     active_transform_group: None,
+                    locked_geom: None,
                     stage_rect: RectPx {
                         left: 0,
                         top: 0,
@@ -1347,6 +1569,65 @@ pub mod win_impl {
             }
         }
 
+        /// 进入小窗专属「两段式实体保持」透明度动画：
+        /// - 前 40% 行程维持极高实体感（1.0 -> 0.88），让人眼清晰追踪主窗口圆角化并优雅缩小飞向灵动岛；
+        /// - 后 60% 行程柔和加速消融至 0.0，与灵动岛弹簧浮现无缝接棒，彻底告别“第 1 帧就发虚像闪屏”。
+        fn build_enter_opacity_animation(
+            &self,
+            duration_ms: u64,
+        ) -> windows::core::Result<IDCompositionAnimation> {
+            unsafe {
+                let anim = self.dcomp_device.CreateAnimation()?;
+                let dur_sec = (duration_ms.max(16) as f64) / 1000.0;
+                let split_sec = dur_sec * 0.40;
+                let tail_sec = (dur_sec - split_sec).max(0.005);
+
+                // 阶段 1 [0, split_sec]：1.0 -> 0.88 缓柔微降，保持强烈视觉锚定
+                let segs_head = build_hermite_cubic_segments(
+                    1.0,
+                    0.88,
+                    split_sec,
+                    0.35,
+                    0.0,
+                    0.65,
+                    1.0,
+                    2,
+                );
+                for seg in segs_head {
+                    anim.AddCubic(
+                        seg.begin_offset_sec,
+                        seg.constant,
+                        seg.linear,
+                        seg.quadratic,
+                        seg.cubic,
+                    )?;
+                }
+
+                // 阶段 2 [split_sec, dur_sec]：0.88 -> 0.0 丝滑加速融化消隐
+                let segs_tail = build_hermite_cubic_segments(
+                    0.88,
+                    0.0,
+                    tail_sec,
+                    0.32,
+                    0.0,
+                    0.58,
+                    1.0,
+                    4,
+                );
+                for seg in segs_tail {
+                    anim.AddCubic(
+                        split_sec + seg.begin_offset_sec,
+                        seg.constant,
+                        seg.linear,
+                        seg.quadratic,
+                        seg.cubic,
+                    )?;
+                }
+                anim.End(dur_sec, 0.0)?;
+                Ok(anim)
+            }
+        }
+
         fn upload_bgra_surface(
             &self,
             width: u32,
@@ -1361,57 +1642,99 @@ pub mod win_impl {
                     DXGI_ALPHA_MODE_PREMULTIPLIED,
                 )?;
                 let mut offset = POINT::default();
-                let tex: ID3D11Texture2D = surface.BeginDraw(None, &mut offset)?;
-                let dst_box = D3D11_BOX {
-                    left: offset.x.max(0) as u32,
-                    top: offset.y.max(0) as u32,
-                    front: 0,
-                    right: offset.x.max(0) as u32 + width,
-                    bottom: offset.y.max(0) as u32 + height,
-                    back: 1,
+                let dest_tex: ID3D11Texture2D = surface.BeginDraw(None, &mut offset)?;
+                let dst_x = offset.x.max(0) as u32;
+                let dst_y = offset.y.max(0) as u32;
+
+                // 优先采用 MSDN 官方推荐路径：构建 IMMUTABLE 源纹理 + CopySubresourceRegion 精准拷贝到 BeginDraw 返回的
+                // DComp Atlas 偏移处并 Flush，100% 兼容所有硬件显卡驱动与 WARP 软渲染。
+                let src_desc = D3D11_TEXTURE2D_DESC {
+                    Width: width,
+                    Height: height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_IMMUTABLE,
+                    BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
                 };
-                self.d3d_ctx.UpdateSubresource(
-                    &tex,
-                    0,
-                    Some(&dst_box),
-                    bgra.as_ptr() as *const _,
-                    width * 4,
-                    0,
-                );
+                let init_data = D3D11_SUBRESOURCE_DATA {
+                    pSysMem: bgra.as_ptr() as *const _,
+                    SysMemPitch: width * 4,
+                    SysMemSlicePitch: 0,
+                };
+                let mut src_tex_opt: Option<ID3D11Texture2D> = None;
+                if self
+                    .d3d_device
+                    .CreateTexture2D(&src_desc, Some(&init_data), Some(&mut src_tex_opt))
+                    .is_ok()
+                {
+                    if let Some(src_tex) = src_tex_opt {
+                        let dest_res: ID3D11Resource = dest_tex.cast()?;
+                        let src_res: ID3D11Resource = src_tex.cast()?;
+                        let src_box = D3D11_BOX {
+                            left: 0,
+                            top: 0,
+                            front: 0,
+                            right: width,
+                            bottom: height,
+                            back: 1,
+                        };
+                        self.d3d_ctx.CopySubresourceRegion(
+                            &dest_res,
+                            0,
+                            dst_x,
+                            dst_y,
+                            0,
+                            &src_res,
+                            0,
+                            Some(&src_box),
+                        );
+                    }
+                } else {
+                    let dst_box = D3D11_BOX {
+                        left: dst_x,
+                        top: dst_y,
+                        front: 0,
+                        right: dst_x + width,
+                        bottom: dst_y + height,
+                        back: 1,
+                    };
+                    self.d3d_ctx.UpdateSubresource(
+                        &dest_tex,
+                        0,
+                        Some(&dst_box),
+                        bgra.as_ptr() as *const _,
+                        width * 4,
+                        0,
+                    );
+                }
+                self.d3d_ctx.Flush();
                 surface.EndDraw()?;
                 Ok(surface)
             }
         }
 
-        /// 在目标显示器工作区上呈现静态首帧或完整 GPU 动画
-        fn start_spatial_animation(
+        /// 阶段 1（静态锁帧接管）：先上传纹理并以 100% 不透明、1.0x 原位原尺寸提交到 DirectComposition，
+        /// 遵循「先 Commit 有效首帧、再 SetWindowPos(SWP_SHOWWINDOW) + DwmFlush」铁律，
+        /// 确保 WS_EX_NOREDIRECTIONBITMAP 舞台 0 黑闪/0 空帧完美盖住下方主窗口。
+        fn lock_static_frame(
             &mut self,
             stage_rect: RectPx,
             content_rect: RectPx,
             tex_w: u32,
             tex_h: u32,
             bgra: &[u8],
-            plan: SpatialTransitionPlan,
+            rest_radius_px: f32,
         ) -> windows::core::Result<()> {
             unsafe {
-                // 1. 定位全透明穿透舞台窗到当前显示器区域（动画期间窗口自身不再 SetWindowPos）
-                if self.stage_rect != stage_rect || !IsWindowVisible(self.hwnd).as_bool() {
-                    let _ = SetWindowPos(
-                        self.hwnd,
-                        Some(HWND_TOPMOST),
-                        stage_rect.left,
-                        stage_rect.top,
-                        stage_rect.width().max(1),
-                        stage_rect.height().max(1),
-                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                    );
-                    self.stage_rect = stage_rect;
-                }
-
-                // 2. 上传像素到 GPU IDCompositionSurface
                 let surface = self.upload_bgra_surface(tex_w, tex_h, bgra)?;
 
-                // 3. 配置视觉节点：基坐标精确对齐主窗口客户区
                 let base_x = (content_rect.left - stage_rect.left) as f32;
                 let base_y = (content_rect.top - stage_rect.top) as f32;
                 let cw = content_rect.width().max(1) as f32;
@@ -1423,34 +1746,116 @@ pub mod win_impl {
                 self.root_visual.SetOffsetY2(base_y)?;
                 self.root_visual.SetContent(&surface)?;
 
-                // 4. 硬件抗锯齿动态圆角裁剪（从 0px <-> 22px 平滑演变）
                 let clip = self.dcomp_device.CreateRectangleClip()?;
                 clip.SetLeft2(0.0)?;
                 clip.SetTop2(0.0)?;
                 clip.SetRight2(tex_w as f32)?;
                 clip.SetBottom2(tex_h as f32)?;
+                let rx = (rest_radius_px / fit_sx.max(0.01)).max(0.0);
+                let ry = (rest_radius_px / fit_sy.max(0.01)).max(0.0);
+                clip.SetTopLeftRadiusX2(rx)?;
+                clip.SetTopLeftRadiusY2(ry)?;
+                clip.SetTopRightRadiusX2(rx)?;
+                clip.SetTopRightRadiusY2(ry)?;
+                clip.SetBottomLeftRadiusX2(rx)?;
+                clip.SetBottomLeftRadiusY2(ry)?;
+                clip.SetBottomRightRadiusX2(rx)?;
+                clip.SetBottomRightRadiusY2(ry)?;
+                let clip_base: IDCompositionClip = clip.cast()?;
+                self.root_visual.SetClip(&clip_base)?;
 
-                // 曲线选择：
-                // - 进入小窗（收束）：Apple 流体加速出离 cubic-bezier(0.32, 0.08, 0.24, 1.0)
-                // - 退出小窗（舒展）：Apple 高阻尼稳健减速 cubic-bezier(0.18, 0.96, 0.28, 1.0)
+                // 固定原点缩放把纹理铺满 [0..cw, 0..ch]，彻底杜绝降采样纹理时的 25% 左上偏移！
+                let fit_scale_tf = self.dcomp_device.CreateScaleTransform()?;
+                fit_scale_tf.SetCenterX2(0.0)?;
+                fit_scale_tf.SetCenterY2(0.0)?;
+                fit_scale_tf.SetScaleX2(fit_sx)?;
+                fit_scale_tf.SetScaleY2(fit_sy)?;
+                let tf_fit_base: IDCompositionTransform = fit_scale_tf.cast()?;
+                self.root_visual.SetTransform(&tf_fit_base)?;
+
+                let effect_group = self.dcomp_device.CreateEffectGroup()?;
+                effect_group.SetOpacity2(1.0)?;
+                let effect_base: IDCompositionEffect = effect_group.cast()?;
+                self.root_visual.SetEffect(&effect_base)?;
+
+                // 先 Commit 静态满屏不透明首帧，再显示舞台窗，彻底根治 WS_EX_NOREDIRECTIONBITMAP 首帧黑闪
+                self.dcomp_device.Commit()?;
+
+                if self.stage_rect != stage_rect || !IsWindowVisible(self.hwnd).as_bool() {
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        Some(HWND_TOPMOST),
+                        stage_rect.left,
+                        stage_rect.top,
+                        stage_rect.width().max(1),
+                        stage_rect.height().max(1),
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    );
+                    self.stage_rect = stage_rect;
+                } else {
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        Some(HWND_TOPMOST),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                }
+                // 窗口从隐藏/1x1 展开至显示器全尺寸后补发一次轻量 Commit，确保 DWM 在同一 VSync 帧采样完整视觉树
+                let _ = self.dcomp_device.Commit();
+                let _ = DwmFlush();
+
+                self.active_surface = Some(surface);
+                self.active_effect = Some(effect_group);
+                self.active_clip = Some(clip);
+                self.active_fit_scale = Some(fit_scale_tf);
+                self.active_scale = None;
+                self.active_translate = None;
+                self.active_transform_group = None;
+                self.locked_geom = Some(LockedStageGeom {
+                    tex_w,
+                    tex_h,
+                    cw,
+                    ch,
+                    fit_sx,
+                    fit_sy,
+                });
+                Ok(())
+            }
+        }
+
+        /// 阶段 3（在真实主窗口已撤离屏幕后干净起飞）：复用已静态锁帧的 GPU 纹理与坐标，
+        /// 挂载 120Hz+ 动态圆角、等比缩放、方向牵引与两段式实体保持透明度动画并立即 Commit。
+        fn launch_locked_animation(
+            &mut self,
+            plan: SpatialTransitionPlan,
+        ) -> windows::core::Result<()> {
+            unsafe {
+                let Some(geom) = self.locked_geom else {
+                    return Ok(());
+                };
+                if self.active_surface.is_none() {
+                    return Ok(());
+                }
+
+                let dur = plan.duration_ms.max(16);
                 let (mx1, my1, mx2, my2) = match plan.kind {
-                    TransitionKind::EnterMini => (0.30, 0.06, 0.22, 1.0),
+                    TransitionKind::EnterMini => (0.24, 0.12, 0.20, 1.0),
                     TransitionKind::ExitMini | TransitionKind::RestoreFromTray => {
                         (0.16, 0.96, 0.26, 1.0)
                     }
                 };
-                // 透明度曲线：退场前半程稳住质感、后半程干净消融；入场前半程快速立起实体感
-                let (ox1, oy1, ox2, oy2) = match plan.kind {
-                    TransitionKind::EnterMini => (0.42, 0.0, 0.72, 1.0),
-                    TransitionKind::ExitMini | TransitionKind::RestoreFromTray => {
-                        (0.12, 0.88, 0.28, 1.0)
-                    }
-                };
 
-                let dur = plan.duration_ms.max(16);
+                let clip = self.dcomp_device.CreateRectangleClip()?;
+                clip.SetLeft2(0.0)?;
+                clip.SetTop2(0.0)?;
+                clip.SetRight2(geom.tex_w as f32)?;
+                clip.SetBottom2(geom.tex_h as f32)?;
                 let radius_anim_x = self.build_bezier_animation(
-                    plan.start_radius_px / fit_sx.max(0.01),
-                    plan.end_radius_px / fit_sx.max(0.01),
+                    plan.start_radius_px / geom.fit_sx.max(0.01),
+                    plan.end_radius_px / geom.fit_sx.max(0.01),
                     dur,
                     mx1,
                     my1,
@@ -1458,8 +1863,8 @@ pub mod win_impl {
                     my2,
                 )?;
                 let radius_anim_y = self.build_bezier_animation(
-                    plan.start_radius_px / fit_sy.max(0.01),
-                    plan.end_radius_px / fit_sy.max(0.01),
+                    plan.start_radius_px / geom.fit_sy.max(0.01),
+                    plan.end_radius_px / geom.fit_sy.max(0.01),
                     dur,
                     mx1,
                     my1,
@@ -1477,13 +1882,19 @@ pub mod win_impl {
                 let clip_base: IDCompositionClip = clip.cast()?;
                 self.root_visual.SetClip(&clip_base)?;
 
-                // 5. 等比缩放 + 空间方向牵引位移
+                // 三级独立变换：fit_scale (0,0) -> anim_scale (cw/2, ch/2) -> translate (dx, dy)
+                let fit_scale_tf = self.dcomp_device.CreateScaleTransform()?;
+                fit_scale_tf.SetCenterX2(0.0)?;
+                fit_scale_tf.SetCenterY2(0.0)?;
+                fit_scale_tf.SetScaleX2(geom.fit_sx)?;
+                fit_scale_tf.SetScaleY2(geom.fit_sy)?;
+
                 let scale_tf = self.dcomp_device.CreateScaleTransform()?;
-                scale_tf.SetCenterX2(tex_w as f32 * 0.5)?;
-                scale_tf.SetCenterY2(tex_h as f32 * 0.5)?;
+                scale_tf.SetCenterX2(geom.cw * 0.5)?;
+                scale_tf.SetCenterY2(geom.ch * 0.5)?;
                 let sx_anim = self.build_bezier_animation(
-                    plan.start_scale * fit_sx,
-                    plan.end_scale * fit_sx,
+                    plan.start_scale,
+                    plan.end_scale,
                     dur,
                     mx1,
                     my1,
@@ -1491,8 +1902,8 @@ pub mod win_impl {
                     my2,
                 )?;
                 let sy_anim = self.build_bezier_animation(
-                    plan.start_scale * fit_sy,
-                    plan.end_scale * fit_sy,
+                    plan.start_scale,
+                    plan.end_scale,
                     dur,
                     mx1,
                     my1,
@@ -1524,38 +1935,92 @@ pub mod win_impl {
                 trans_tf.SetOffsetX(&tx_anim)?;
                 trans_tf.SetOffsetY(&ty_anim)?;
 
+                let tf_fit_base: IDCompositionTransform = fit_scale_tf.cast()?;
                 let tf_scale_base: IDCompositionTransform = scale_tf.cast()?;
                 let tf_trans_base: IDCompositionTransform = trans_tf.cast()?;
-                let transforms = [Some(tf_scale_base), Some(tf_trans_base)];
+                let transforms = [Some(tf_fit_base), Some(tf_scale_base), Some(tf_trans_base)];
                 let tf_group = self.dcomp_device.CreateTransformGroup(&transforms)?;
                 self.root_visual.SetTransform(&tf_group)?;
 
-                // 6. 硬件透明淡入淡出
                 let effect_group = self.dcomp_device.CreateEffectGroup()?;
-                let opacity_anim = self.build_bezier_animation(
-                    plan.start_opacity,
-                    plan.end_opacity,
-                    dur,
-                    ox1,
-                    oy1,
-                    ox2,
-                    oy2,
-                )?;
+                let opacity_anim = if plan.kind == TransitionKind::EnterMini {
+                    self.build_enter_opacity_animation(dur)?
+                } else {
+                    self.build_bezier_animation(
+                        plan.start_opacity,
+                        plan.end_opacity,
+                        dur,
+                        0.12,
+                        0.88,
+                        0.28,
+                        1.0,
+                    )?
+                };
                 effect_group.SetOpacity(&opacity_anim)?;
                 let effect_base: IDCompositionEffect = effect_group.cast()?;
                 self.root_visual.SetEffect(&effect_base)?;
 
-                // 7. 原子提交至 Windows DWM 合成器线程（严禁调用 WaitForCommitCompletion 防止无消息泵场景死锁），
-                // 随后以单次非阻塞 DwmFlush 对齐 VSync，确保 GPU 舞台已在屏幕上严丝合缝接管画面
                 self.dcomp_device.Commit()?;
-                let _ = DwmFlush();
 
-                self.active_surface = Some(surface);
                 self.active_effect = Some(effect_group);
                 self.active_clip = Some(clip);
+                self.active_fit_scale = Some(fit_scale_tf);
                 self.active_scale = Some(scale_tf);
                 self.active_translate = Some(trans_tf);
                 self.active_transform_group = Some(tf_group);
+                Ok(())
+            }
+        }
+
+        /// 单步呈现完整 GPU 动画（用于 ExitMini / RestoreFromTray：先 Commit 首帧再显示舞台，杜绝首帧黑闪）
+        fn start_spatial_animation(
+            &mut self,
+            stage_rect: RectPx,
+            content_rect: RectPx,
+            tex_w: u32,
+            tex_h: u32,
+            bgra: &[u8],
+            plan: SpatialTransitionPlan,
+        ) -> windows::core::Result<()> {
+            unsafe {
+                let surface = self.upload_bgra_surface(tex_w, tex_h, bgra)?;
+
+                let base_x = (content_rect.left - stage_rect.left) as f32;
+                let base_y = (content_rect.top - stage_rect.top) as f32;
+                let cw = content_rect.width().max(1) as f32;
+                let ch = content_rect.height().max(1) as f32;
+                let fit_sx = cw / tex_w.max(1) as f32;
+                let fit_sy = ch / tex_h.max(1) as f32;
+
+                self.root_visual.SetOffsetX2(base_x)?;
+                self.root_visual.SetOffsetY2(base_y)?;
+                self.root_visual.SetContent(&surface)?;
+
+                self.active_surface = Some(surface);
+                self.locked_geom = Some(LockedStageGeom {
+                    tex_w,
+                    tex_h,
+                    cw,
+                    ch,
+                    fit_sx,
+                    fit_sy,
+                });
+
+                self.launch_locked_animation(plan)?;
+
+                if self.stage_rect != stage_rect || !IsWindowVisible(self.hwnd).as_bool() {
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        Some(HWND_TOPMOST),
+                        stage_rect.left,
+                        stage_rect.top,
+                        stage_rect.width().max(1),
+                        stage_rect.height().max(1),
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    );
+                    self.stage_rect = stage_rect;
+                }
+                let _ = DwmFlush();
                 let _ = &self.target;
                 Ok(())
             }
@@ -1585,6 +2050,9 @@ pub mod win_impl {
         fn hide_and_release_surface(&mut self) {
             unsafe {
                 let _ = self.root_visual.SetContent(None);
+                let _ = self.root_visual.SetTransform(None);
+                let _ = self.root_visual.SetEffect(None);
+                let _ = self.root_visual.SetClip(None);
                 let _ = self.dcomp_device.Commit();
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
                 let _ = SetWindowPos(
@@ -1606,9 +2074,11 @@ pub mod win_impl {
             self.active_surface = None;
             self.active_effect = None;
             self.active_clip = None;
+            self.active_fit_scale = None;
             self.active_scale = None;
             self.active_translate = None;
             self.active_transform_group = None;
+            self.locked_geom = None;
         }
     }
 
@@ -1630,6 +2100,34 @@ pub mod win_impl {
             }
             opt.as_mut().map(f)
         })
+    }
+
+    /// 启动空闲期静默预热 DirectComposition GPU 过渡舞台（仅建设备与 1x1 隐藏空窗，0 显存纹理占用），
+    /// 彻底消除首次点击进入小窗时的 D3D11/DComp 初始化卡顿与闪屏。
+    pub fn warm_gpu_stage_on_main_thread() {
+        let _ = with_stage(|_| {});
+    }
+
+    /// 阶段 1：以 100% 不透明静态真画面精确覆盖主窗口区域并同步至 DWM（零重影、零黑闪）
+    pub fn lock_static_gpu_stage_on_main_thread(
+        stage_rect: RectPx,
+        content_rect: RectPx,
+        tex_w: u32,
+        tex_h: u32,
+        bgra: &[u8],
+        rest_radius_px: f32,
+    ) -> bool {
+        with_stage(|stage| {
+            stage
+                .lock_static_frame(stage_rect, content_rect, tex_w, tex_h, bgra, rest_radius_px)
+                .is_ok()
+        })
+        .unwrap_or(false)
+    }
+
+    /// 阶段 3：真实主窗口撤离屏幕后，直接基于已锁帧的静态 GPU 表面起飞播放 120Hz+ 收束动效
+    pub fn launch_locked_gpu_transition_on_main_thread(plan: SpatialTransitionPlan) -> bool {
+        with_stage(|stage| stage.launch_locked_animation(plan).is_ok()).unwrap_or(false)
     }
 
     pub fn play_gpu_transition_on_main_thread(
@@ -1746,7 +2244,7 @@ mod tests {
             bottom: 34,
         };
 
-        // 1. 最大化进入顶部灵动岛：起始圆角 0 -> 22px，向上牵引，不拉扁等比缩放
+        // 1. 最大化进入顶部灵动岛：起始圆角 0 -> 36px，明显向上牵引与有力收束缩放，不拉扁等比缩放
         let enter_max = compute_spatial_transition_plan(
             TransitionKind::EnterMini,
             max_rect,
@@ -1756,12 +2254,12 @@ mod tests {
             1.0,
             TransitionMotionStyle::Rich,
         );
-        assert!(enter_max.duration_ms >= 200);
+        assert!(enter_max.duration_ms >= 280);
         assert_eq!(enter_max.start_radius_px, 0.0);
-        assert!(enter_max.end_radius_px >= 20.0);
-        assert!(enter_max.end_scale < 0.92 && enter_max.end_scale > 0.80);
-        assert!(enter_max.end_dy < -20.0, "应朝顶部灵动岛方向牵引");
-        assert!(enter_max.mini_handoff_delay_ms > 0);
+        assert!(enter_max.end_radius_px >= 32.0);
+        assert!(enter_max.end_scale >= 0.45 && enter_max.end_scale <= 0.62);
+        assert!(enter_max.end_dy < -120.0, "应朝顶部灵动岛方向明显牵引飞掠");
+        assert!(enter_max.mini_handoff_delay_ms >= 100);
 
         // 2. 最大化退出小窗：起始圆角 22px -> 0px（贴齐满屏），带交叉溶解揭幕
         let exit_max = compute_spatial_transition_plan(
@@ -1856,6 +2354,22 @@ mod tests {
             1.0,
             TransitionMotionStyle::Rich,
         );
+        // 1. 静态锁帧接管 -> 复用表面起飞播放收束动画（完整验证三段式零闪屏管线 + 1/2 降采样三级变换对齐）
+        win_impl::warm_gpu_stage_on_main_thread();
+        let locked = win_impl::lock_static_gpu_stage_on_main_thread(
+            stage_rect,
+            content_rect,
+            160,
+            100,
+            &synthesize_theme_aura_card_bgra(160, 100, (12, 14, 20), (94, 106, 210), (45, 212, 191)),
+            plan.start_radius_px,
+        );
+        assert!(locked, "静态锁帧 GPU 舞台必须成功提交首帧");
+        let launched = win_impl::launch_locked_gpu_transition_on_main_thread(plan);
+        assert!(launched, "静态锁帧后必须能够复用 GPU 纹理无闪烁起飞播放动画");
+        win_impl::cancel_and_hide_gpu_stage_on_main_thread();
+
+        // 2. 单步展开路径（ExitMini）
         let ok = win_impl::play_gpu_transition_on_main_thread(
             stage_rect,
             content_rect,
@@ -2066,6 +2580,45 @@ mod tests {
                 0,
                 "隐藏后的小窗必须处于点击穿透兜底态"
             );
+            assert!(
+                !win_impl::is_window_cloaked(raw),
+                "隐藏后的小窗不得残留 DWM Cloak 状态"
+            );
+
+            // 4. 真全屏礼让（DWM Cloak 隐身 + 点击穿透 + 剥离 TOPMOST）及退出全屏瞬间恢复
+            win_impl::show_overlay_window_native(raw, false);
+            assert!(IsWindowVisible(hwnd).as_bool());
+            assert!(!win_impl::is_window_cloaked(raw));
+
+            win_impl::yield_overlay_window_for_fullscreen_native(raw);
+            assert!(
+                IsWindowVisible(hwnd).as_bool(),
+                "全屏礼让不得调用 SW_HIDE 污染 tao WindowFlags::VISIBLE 缓存"
+            );
+            assert!(
+                win_impl::is_window_cloaked(raw),
+                "全屏礼让必须通过 DWMWA_CLOAK 立即隐身"
+            );
+            let ex_yielded = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            assert_eq!(ex_yielded & WS_EX_TOPMOST.0, 0, "全屏礼让必须剥离 WS_EX_TOPMOST");
+            assert_ne!(
+                ex_yielded & WS_EX_TRANSPARENT.0,
+                0,
+                "全屏礼让必须开启点击穿透防止拦截鼠标"
+            );
+
+            win_impl::show_overlay_window_native(raw, false);
+            assert!(
+                !win_impl::is_window_cloaked(raw),
+                "退出全屏恢复后必须立即解除 DWMWA_CLOAK"
+            );
+            let ex_restored = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            assert_ne!(ex_restored & WS_EX_TOPMOST.0, 0, "退出全屏后必须恢复 WS_EX_TOPMOST");
+            assert_eq!(ex_restored & WS_EX_TRANSPARENT.0, 0, "退出全屏交互态必须恢复点击响应");
+
+            win_impl::hide_overlay_window_native(raw);
+            assert!(!IsWindowVisible(hwnd).as_bool());
+            assert!(!win_impl::is_window_cloaked(raw));
 
             let _ = DestroyWindow(hwnd);
         }

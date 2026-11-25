@@ -47,14 +47,24 @@ export function useViewportStagger(
 
   function detectGridCols(el: HTMLElement | null): number {
     if (defaultCols <= 1) return 1;
-    if (el && typeof window !== "undefined") {
-      const style = window.getComputedStyle(el);
-      if (style.display.includes("grid") && style.gridTemplateColumns && style.gridTemplateColumns !== "none") {
-        const trackCount = style.gridTemplateColumns
-          .trim()
-          .split(/\s+/)
-          .filter((token) => token && token !== "0px").length;
-        if (trackCount >= 1 && trackCount <= 8) return trackCount;
+    if (el) {
+      const explicitCols = Number(el.dataset.songCols);
+      if (explicitCols === 1 || explicitCols === 2) {
+        return explicitCols;
+      }
+      if (typeof window !== "undefined") {
+        const style = window.getComputedStyle(el);
+        if (style.display.includes("grid") && style.gridTemplateColumns && style.gridTemplateColumns !== "none") {
+          const trackCount = style.gridTemplateColumns
+            .trim()
+            .split(/\s+/)
+            .filter((token) => token && token !== "0px").length;
+          if (trackCount >= 1 && trackCount <= 8) return trackCount;
+        }
+        const rectW = el.getBoundingClientRect().width;
+        if (rectW > 0) {
+          return rectW < 1040 ? 1 : defaultCols;
+        }
       }
     }
     const w = typeof window !== "undefined" ? window.innerWidth : 1280;
