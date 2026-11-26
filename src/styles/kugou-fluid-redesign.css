@@ -151,6 +151,10 @@ button:active:not(:disabled) {
   transform: translate3d(0, 0, 0) scale(1);
 }
 
+.global-smart-tooltip.is-instant-hide:not(.is-visible) {
+  transition: none !important;
+}
+
 .global-smart-tooltip.scheme-watercolor_light,
 .global-smart-tooltip.scheme-light,
 .scheme-watercolor_light .global-smart-tooltip,

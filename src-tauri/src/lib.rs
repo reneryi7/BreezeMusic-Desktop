@@ -385,6 +385,30 @@ fn ensure_desktop_lyric_window(app: &AppHandle) -> Option<tauri::WebviewWindow> 
     }
 }
 
+/// 明确锁定透明悬浮子窗（Mini 小窗等）的 WebView2 默认背景色为全透明 (A=0)，杜绝唤醒首帧闪白/闪黑
+#[cfg(target_os = "windows")]
+fn enforce_transparent_webview2_bg(win: &tauri::WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Controller2, COREWEBVIEW2_COLOR,
+    };
+    use windows_core::Interface;
+
+    let _ = win.with_webview(|webview| unsafe {
+        let controller = webview.controller();
+        if let Ok(ctrl2) = controller.cast::<ICoreWebView2Controller2>() {
+            let _ = ctrl2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                A: 0,
+                R: 0,
+                G: 0,
+                B: 0,
+            });
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn enforce_transparent_webview2_bg(_win: &tauri::WebviewWindow) {}
+
 fn ensure_mini_player_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     if let Some(existing) = app.get_webview_window("mini_player") {
         return Some(existing);
@@ -409,6 +433,14 @@ fn ensure_mini_player_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     match builder.build() {
         Ok(win) => {
             harden_desktop_webview2(&win);
+            enforce_transparent_webview2_bg(&win);
+            #[cfg(target_os = "windows")]
+            if let Ok(raw) = win.hwnd() {
+                let _ = window_transition::win_impl::enforce_frameless_overlay_popup_style_native(
+                    raw.0 as isize,
+                );
+            }
+            #[cfg(not(target_os = "windows"))]
             enforce_transparent_overlay_window_style(&win);
             Some(win)
         }
@@ -1010,7 +1042,10 @@ fn set_mini_click_through(win: &tauri::WebviewWindow, ignore: bool) {
     #[cfg(target_os = "windows")]
     {
         if let Ok(raw) = win.hwnd() {
-            window_transition::win_impl::set_overlay_click_through_raw(raw.0 as isize, ignore);
+            let _ = window_transition::win_impl::set_overlay_click_through_raw(
+                raw.0 as isize,
+                ignore,
+            );
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -1019,15 +1054,12 @@ fn set_mini_click_through(win: &tauri::WebviewWindow, ignore: bool) {
     }
 }
 
-/// 必须在主线程调用：安全显示 Mini 独立悬浮小窗，同步 tao WindowFlags::VISIBLE = true，
-/// 并立即加固 WS_EX_TOOLWINDOW + 零边框零阴影零圆角 + 目标点击穿透态 + HWND_TOPMOST。
+/// 必须在主线程调用：安全显示 Mini 独立悬浮小窗。
+/// Windows 路径彻底绕开 tao::win.show() / win.set_shadow()，避免 tao WindowFlags::apply_diff 覆写
+/// WS_CAPTION | WS_SYSMENU | WS_EX_WINDOWEDGE | WS_EX_APPWINDOW 并调用 ShowWindow(SW_SHOW) 闪现 Win7 Aero Basic 经典窗框。
 fn show_mini_player_window_safely(win: &tauri::WebviewWindow, click_through: bool) {
     set_subwindow_suspended(win, false);
     set_webview_memory_target_low(win, false);
-    set_mini_click_through(win, click_through);
-    let _ = win.show();
-    enforce_transparent_overlay_window_style(win);
-    set_mini_click_through(win, click_through);
     #[cfg(target_os = "windows")]
     {
         if let Ok(raw) = win.hwnd() {
@@ -1036,19 +1068,27 @@ fn show_mini_player_window_safely(win: &tauri::WebviewWindow, click_through: boo
     }
     #[cfg(not(target_os = "windows"))]
     {
+        set_mini_click_through(win, click_through);
+        let _ = win.show();
+        enforce_transparent_overlay_window_style(win);
+        set_mini_click_through(win, click_through);
         let _ = win.set_always_on_top(true);
     }
 }
 
-/// 必须在主线程调用：仅执行底层 HWND 隐藏（开启点击穿透 + tao win.hide() + Win32 强制 SW_HIDE + 去置顶），不触发挂起定时器
+/// 必须在主线程调用：仅执行底层 HWND 隐藏（开启点击穿透 + Win32 原生 SW_HIDE + 去置顶），不触发挂起定时器；
+/// Windows 路径绝不调用 tao::win.hide()，防止后续被 apply_diff 写回非客户区标题栏样式。
 fn hide_mini_player_hwnd_only(win: &tauri::WebviewWindow) {
-    set_mini_click_through(win, true);
-    let _ = win.hide();
     #[cfg(target_os = "windows")]
     {
         if let Ok(raw) = win.hwnd() {
             window_transition::win_impl::hide_overlay_window_native(raw.0 as isize);
         }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        set_mini_click_through(win, true);
+        let _ = win.hide();
     }
 }
 
@@ -1384,16 +1424,17 @@ fn orchestrate_restore_main_window(app: &AppHandle, state: &AppState, from_mini:
             }
 
             // 5. 异步收尾时序：
-            //    - 128ms：只要 mini_player_visible 仍为 false（不因重复点击恢复而跳过！），必执行四重防线强制原生隐藏 Mini
-            //    - p.duration_ms：GPU 舞台 100% 像素级重合归位 -> 揭开真实主窗口 + 触发 65ms 丝滑交叉溶解揭幕
-            //    - p.duration_ms + p.reveal_dissolve_ms + 20ms：隐藏并释放 GPU 过渡舞台
+            //    - p.mini_exit_duration_ms（185ms 最佳 / 135ms 标准）：只要 mini_player_visible 仍为 false，必执行原生强力隐藏 Mini
+            //    - p.duration_ms：GPU 舞台 100% 像素级重合归位 -> 揭开真实主窗口 + 触发 75ms/50ms 丝滑交叉溶解揭幕
+            //    - p.duration_ms + p.reveal_dissolve_ms + 22ms：隐藏并释放 GPU 过渡舞台
             if effective_from_mini && mini_exiting_ref.load(Ordering::Acquire) {
                 let app_hide_mini = app_for_main.clone();
                 let mini_vis_check = mini_vis_ref.clone();
                 let mini_exit_check = mini_exiting_ref.clone();
                 let hotkey_tid_done = hotkey_tid_ref.clone();
+                let mini_exit_wait_ms = p.mini_exit_duration_ms.max(135);
                 tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(128)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(mini_exit_wait_ms)).await;
                     if mini_vis_check.load(Ordering::Acquire) {
                         mini_exit_check.store(false, Ordering::Release);
                         return;
@@ -4126,6 +4167,13 @@ fn orchestrate_enter_mini_mode(
             }
             return;
         };
+        #[cfg(target_os = "windows")]
+        if let Ok(raw) = mini_win.hwnd() {
+            let _ = window_transition::win_impl::enforce_frameless_overlay_popup_style_native(
+                raw.0 as isize,
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
         enforce_transparent_overlay_window_style(&mini_win);
         if !mini_pos_ref.load(Ordering::Relaxed) {
             place_mini_player_default(&app_for_main, &mini_win, &st_ref);
@@ -5146,13 +5194,15 @@ async fn expand_mini_player_from_dock_cmd(
                 }
                 #[cfg(target_os = "windows")]
                 if let Ok(raw) = mw.hwnd() {
-                    window_transition::win_impl::reassert_overlay_topmost_native(raw.0 as isize);
+                    let h = raw.0 as isize;
+                    window_transition::win_impl::reassert_overlay_topmost_native(h);
+                    window_transition::win_impl::focus_overlay_window_native(h);
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
                     let _ = mw.set_always_on_top(true);
+                    let _ = mw.set_focus();
                 }
-                let _ = mw.set_focus();
                 applied = true;
             }
         }
@@ -7178,8 +7228,20 @@ pub fn run() {
                     WindowEvent::Resized(_) => {
                         let app = window.app_handle().clone();
                         let st = app.state::<AppState>();
+                        #[cfg(target_os = "windows")]
+                        let mini_physically_visible = window
+                            .hwnd()
+                            .ok()
+                            .map(|h| {
+                                window_transition::win_impl::is_hwnd_visible_and_not_minimized(
+                                    h.0 as isize,
+                                )
+                            })
+                            .unwrap_or(false);
+                        #[cfg(not(target_os = "windows"))]
+                        let mini_physically_visible = window.is_visible().unwrap_or(false);
                         if st.mini_player_visible.load(Ordering::Acquire)
-                            && window.is_visible().unwrap_or(false)
+                            && mini_physically_visible
                         {
                             std::thread::spawn(move || {
                                 std::thread::sleep(std::time::Duration::from_millis(35));

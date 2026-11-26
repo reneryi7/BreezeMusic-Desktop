@@ -83,6 +83,8 @@ pub struct SpatialTransitionPlan {
     pub reveal_dissolve_ms: u64,
     /// 进入小窗时 Mini 窗口在主窗口收束进行到多少毫秒后接力浮现（ms）
     pub mini_handoff_delay_ms: u64,
+    /// 退出小窗时 Mini 窗口播放退场淡出动画的安全总时长（ms，供后端在动画完全落幕后再原生隐藏）
+    pub mini_exit_duration_ms: u64,
     pub start_scale: f32,
     pub end_scale: f32,
     pub start_dx: f32,
@@ -272,6 +274,7 @@ pub fn compute_spatial_transition_plan(
             duration_ms: 0,
             reveal_dissolve_ms: 0,
             mini_handoff_delay_ms: 0,
+            mini_exit_duration_ms: 0,
             start_scale: 1.0,
             end_scale: 1.0,
             start_dx: 0.0,
@@ -291,36 +294,37 @@ pub fn compute_spatial_transition_plan(
     let is_rich = motion_style == TransitionMotionStyle::Rich;
     // 最大化窗口贴齐屏幕四边，起始/终态圆角必须为 0px；非最大化普通窗对齐 Win11 系统 8px 圆角
     let rest_radius = if main_is_maximized { 0.0 } else { 8.0 * sf };
-    let enter_morph_radius = if is_rich { 36.0 * sf } else { 22.0 * sf };
+    let enter_morph_radius = if is_rich { 40.0 * sf } else { 24.0 * sf };
     let exit_morph_radius = if is_rich { 24.0 * sf } else { 16.0 * sf };
 
     match kind {
         TransitionKind::EnterMini => {
-            // 进入小窗：允许更大范围的方向牵引，让主窗口清晰优雅地朝灵动岛/小窗实体飞掠收束
+            // 进入小窗：充分朝灵动岛/悬浮卡实体聚拢牵引，配合零迟滞丝滑减速曲线自然收束飞入
             let max_pull_x =
-                (main_rect.width() as f32 * if is_rich { 0.42 } else { 0.24 }).max(64.0 * sf);
+                (main_rect.width() as f32 * if is_rich { 0.50 } else { 0.28 }).max(72.0 * sf);
             let max_pull_y =
-                (main_rect.height() as f32 * if is_rich { 0.44 } else { 0.26 }).max(64.0 * sf);
+                (main_rect.height() as f32 * if is_rich { 0.52 } else { 0.30 }).max(72.0 * sf);
             let pull_ratio = match (main_is_maximized, is_rich) {
-                (true, true) => 0.54,
-                (false, true) => 0.58,
-                (true, false) => 0.30,
-                (false, false) => 0.34,
+                (true, true) => 0.66,
+                (false, true) => 0.70,
+                (true, false) => 0.36,
+                (false, false) => 0.40,
             };
             let pull_dx = (raw_dx * pull_ratio).clamp(-max_pull_x, max_pull_x);
             let pull_dy = (raw_dy * pull_ratio).clamp(-max_pull_y, max_pull_y);
 
             let end_scale = match (main_is_maximized, is_rich) {
-                (true, true) => 0.54,
-                (false, true) => 0.48,
-                (true, false) => 0.72,
-                (false, false) => 0.68,
+                (true, true) => 0.42,
+                (false, true) => 0.38,
+                (true, false) => 0.62,
+                (false, false) => 0.58,
             };
             SpatialTransitionPlan {
                 kind,
-                duration_ms: if is_rich { 310 } else { 210 },
+                duration_ms: if is_rich { 360 } else { 240 },
                 reveal_dissolve_ms: 0,
-                mini_handoff_delay_ms: if is_rich { 125 } else { 78 },
+                mini_handoff_delay_ms: if is_rich { 140 } else { 90 },
+                mini_exit_duration_ms: 0,
                 start_scale: 1.0,
                 end_scale,
                 start_dx: 0.0,
@@ -358,9 +362,10 @@ pub fn compute_spatial_transition_plan(
             };
             SpatialTransitionPlan {
                 kind,
-                duration_ms: if is_rich { 260 } else { 170 },
-                reveal_dissolve_ms: if is_rich { 65 } else { 40 },
+                duration_ms: if is_rich { 340 } else { 230 },
+                reveal_dissolve_ms: if is_rich { 75 } else { 50 },
                 mini_handoff_delay_ms: 0,
+                mini_exit_duration_ms: if is_rich { 185 } else { 135 },
                 start_scale,
                 end_scale: 1.0,
                 start_dx: pull_dx * 0.85,
@@ -389,6 +394,7 @@ pub fn compute_spatial_transition_plan(
                 duration_ms: if is_rich { 215 } else { 140 },
                 reveal_dissolve_ms: if is_rich { 55 } else { 35 },
                 mini_handoff_delay_ms: 0,
+                mini_exit_duration_ms: 0,
                 start_scale,
                 end_scale: 1.0,
                 start_dx: 0.0,
@@ -526,7 +532,7 @@ pub mod win_impl {
     use windows::Win32::Graphics::Dwm::{
         DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAK,
         DWMWA_CLOAKED, DWMWA_COLOR_NONE, DWMWA_EXTENDED_FRAME_BOUNDS,
-        DWMWA_TRANSITIONS_FORCEDISABLED,
+        DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE,
     };
     use windows::Win32::Graphics::Dxgi::Common::{
         DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -545,12 +551,15 @@ pub mod win_impl {
         GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect,
         GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, RegisterClassExW,
         SendMessageW, SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-        GW_HWNDPREV, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, SC_RESTORE, SWP_FRAMECHANGED,
-        SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-        SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, WINDOWPLACEMENT,
-        WM_ERASEBKGND, WM_NCHITTEST, WM_SYSCOMMAND, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED,
-        WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        GWL_STYLE, GW_HWNDPREV, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, SC_RESTORE,
+        SWP_FRAMECHANGED, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE,
+        WINDOWPLACEMENT, WM_ERASEBKGND, WM_NCHITTEST, WM_SYSCOMMAND, WNDCLASSEXW,
+        WPF_RESTORETOMAXIMIZED, WS_BORDER, WS_CAPTION, WS_CLIPSIBLINGS, WS_DLGFRAME,
+        WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+        WS_EX_NOREDIRECTIONBITMAP, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WS_EX_TRANSPARENT, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+        WS_THICKFRAME,
     };
 
     const PW_CLIENTONLY: u32 = 0x0000_0001;
@@ -565,19 +574,99 @@ pub mod win_impl {
         MAIN_CLOAKED_FLAG.load(Ordering::Acquire)
     }
 
-    /// 原子切换透明悬浮子窗（如 Mini 灵动岛）的点击穿透态：
-    /// 始终保留 WS_EX_TOOLWINDOW 并剥离 WS_EX_APPWINDOW，绝不调用 ShowWindow 或触发 tao apply_diff 篡改可见态。
-    /// 仅当 TOOLWINDOW/APPWINDOW 帧属性确实发生变化时才附带 SWP_FRAMECHANGED，避免纯穿透切换反复触发
-    /// WM_MOUSELEAVE 冲掉 WebView2 悬停态或引发 DWM 非客户区重算抖动。
-    pub fn set_overlay_click_through_raw(hwnd_raw: isize, ignore: bool) {
+    /// 强制将透明悬浮子窗（如 Mini 灵动岛）固化为纯 `WS_POPUP | WS_CLIPSIBLINGS` 无非客户区样式：
+    /// 彻底剥离 tao-0.37 默认残留的 `WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`
+    /// 以及 `WS_EX_WINDOWEDGE | WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_APPWINDOW`，
+    /// 从 Win32 底层永久断绝 `DefWindowProcW` 绘制 Windows 7 Aero Basic 经典浅蓝标题栏与粗边框的可能。
+    /// 严格幂等：仅在样式位确有变化时才调用 `SetWindowLongW` 与 `SWP_FRAMECHANGED`，并返回是否发生变更。
+    pub fn enforce_frameless_overlay_popup_style_native(hwnd_raw: isize) -> bool {
         if hwnd_raw == 0 {
-            return;
+            return false;
+        }
+        let hwnd = HWND(hwnd_raw as *mut _);
+        const DWMWCP_DONOTROUND_VAL: u32 = 1;
+        unsafe {
+            let disable_trans: u32 = 1;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                &disable_trans as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u32,
+            );
+            let corner_pref: u32 = DWMWCP_DONOTROUND_VAL;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &corner_pref as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u32,
+            );
+            let border_none: u32 = DWMWA_COLOR_NONE;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR,
+                &border_none as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u32,
+            );
+
+            let style_strip = WS_CAPTION.0
+                | WS_SYSMENU.0
+                | WS_THICKFRAME.0
+                | WS_BORDER.0
+                | WS_DLGFRAME.0
+                | WS_MINIMIZEBOX.0
+                | WS_MAXIMIZEBOX.0;
+            let cur_style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            let next_style = (cur_style & !style_strip) | WS_POPUP.0 | WS_CLIPSIBLINGS.0;
+
+            let ex_strip = WS_EX_WINDOWEDGE.0
+                | WS_EX_DLGMODALFRAME.0
+                | WS_EX_CLIENTEDGE.0
+                | WS_EX_STATICEDGE.0
+                | WS_EX_APPWINDOW.0;
+            let cur_ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            let next_ex = (cur_ex & !ex_strip) | WS_EX_TOOLWINDOW.0;
+
+            let mut changed = false;
+            if next_style != cur_style {
+                let _ = SetWindowLongW(hwnd, GWL_STYLE, next_style as i32);
+                changed = true;
+            }
+            if next_ex != cur_ex {
+                let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, next_ex as i32);
+                changed = true;
+            }
+            if changed {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                );
+            }
+            changed
+        }
+    }
+
+    /// 原子切换透明悬浮子窗（如 Mini 灵动岛）的点击穿透态：
+    /// 始终保留 WS_EX_TOOLWINDOW 并剥离 WS_EX_APPWINDOW / WS_EX_WINDOWEDGE 等非客户区位，绝不调用 ShowWindow 或触发 tao apply_diff 篡改可见态。
+    /// 仅当非穿透的帧属性确实发生变化时才附带 SWP_FRAMECHANGED，避免纯穿透切换反复触发 WM_MOUSELEAVE 冲掉 WebView2 悬停态。
+    pub fn set_overlay_click_through_raw(hwnd_raw: isize, ignore: bool) -> bool {
+        if hwnd_raw == 0 {
+            return false;
         }
         let hwnd = HWND(hwnd_raw as *mut _);
         unsafe {
             let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-            let base = (ex | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
-            let frame_bits = WS_EX_TOOLWINDOW.0 | WS_EX_APPWINDOW.0;
+            let ex_strip = WS_EX_APPWINDOW.0
+                | WS_EX_WINDOWEDGE.0
+                | WS_EX_DLGMODALFRAME.0
+                | WS_EX_CLIENTEDGE.0
+                | WS_EX_STATICEDGE.0;
+            let base = (ex | WS_EX_TOOLWINDOW.0) & !ex_strip;
+            let frame_bits = WS_EX_TOOLWINDOW.0 | ex_strip;
             let frame_style_changed = (ex & frame_bits) != (base & frame_bits);
             let mask = WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0;
             let next = if ignore { base | mask } else { base & !mask };
@@ -594,6 +683,23 @@ pub mod win_impl {
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
                     );
                 }
+                return true;
+            }
+            false
+        }
+    }
+
+    /// 纯原生聚焦透明悬浮子窗（用于贴边灵动岛展开为卡片后确保点击外部可稳定收到 window blur 自动收起），
+    /// 不依赖 tao 内部 WindowFlags::VISIBLE 缓存。
+    pub fn focus_overlay_window_native(hwnd_raw: isize) {
+        if hwnd_raw == 0 {
+            return;
+        }
+        let hwnd = HWND(hwnd_raw as *mut _);
+        unsafe {
+            if IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
+                let _ = BringWindowToTop(hwnd);
+                let _ = SetForegroundWindow(hwnd);
             }
         }
     }
@@ -617,12 +723,12 @@ pub mod win_impl {
     }
 
     /// 强制隐藏透明悬浮子窗（如 Mini 灵动岛）并立即开启穿透、剥离 HWND_TOPMOST 与可见态：
-    /// 彻底绕开 tao WindowFlags::VISIBLE 缓存不同步导致 win.hide() 静默空操作（产生不可见点击遮挡幽灵窗）的问题。
+    /// 彻底绕开 tao WindowFlags::VISIBLE 缓存不同步及 apply_diff 覆写 WS_CAPTION 的底层缺陷。
     pub fn hide_overlay_window_native(hwnd_raw: isize) {
         if hwnd_raw == 0 {
             return;
         }
-        set_overlay_click_through_raw(hwnd_raw, true);
+        let _ = set_overlay_click_through_raw(hwnd_raw, true);
         let hwnd = HWND(hwnd_raw as *mut _);
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
@@ -639,16 +745,42 @@ pub mod win_impl {
         set_window_cloak(hwnd_raw, false);
     }
 
-    /// 原子显示透明悬浮子窗并维持 HWND_TOPMOST（零抢焦、清除 DWM Cloak、保 WS_EX_TOOLWINDOW 与目标点击穿透态）
+    /// 原子显示透明悬浮子窗并维持 HWND_TOPMOST：
+    /// 零抢焦、全程在 DWMWA_CLOAK 保护下完成纯 WS_POPUP 样式核验与点击穿透切换，
+    /// 如有任何样式或可见态变更先执行 DwmFlush 等待 DWM 吸收，再最后解除 Cloak 原子揭幕，彻底根绝经典窗框与分层表面闪屏。
     pub fn show_overlay_window_native(hwnd_raw: isize, click_through: bool) {
         if hwnd_raw == 0 {
             return;
         }
-        set_window_cloak(hwnd_raw, false);
-        set_overlay_click_through_raw(hwnd_raw, click_through);
         let hwnd = HWND(hwnd_raw as *mut _);
+        let was_visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+        let was_cloaked = is_window_cloaked(hwnd_raw);
+        let cloak_guard = !was_visible || was_cloaked;
+        if cloak_guard && !was_cloaked {
+            set_window_cloak(hwnd_raw, true);
+        }
+
+        let style_changed = enforce_frameless_overlay_popup_style_native(hwnd_raw);
+        let ct_changed = set_overlay_click_through_raw(hwnd_raw, click_through);
+
         unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            if !was_visible {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            let mut swp_flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+            if !was_visible {
+                swp_flags |= SWP_SHOWWINDOW;
+            }
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, swp_flags);
+        }
+
+        if cloak_guard && (style_changed || ct_changed || !was_visible) {
+            dwm_flush();
+        }
+        set_window_cloak(hwnd_raw, false);
+        // 解除 DWMWA_CLOAK 后紧跟一次无闪烁纯 Z-order 置顶复核（无 SWP_FRAMECHANGED），
+        // 防止 Windows DWM 对首次由隐身态揭幕的 WS_POPUP 窗口忽略 Cloak 期间的 HWND_TOPMOST 提升。
+        unsafe {
             let _ = SetWindowPos(
                 hwnd,
                 Some(HWND_TOPMOST),
@@ -656,19 +788,20 @@ pub mod win_impl {
                 0,
                 0,
                 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
         }
     }
 
     /// 在 DWMWA_CLOAK = 1 完全隐身掩护下先唤醒显示悬浮子窗（如刚从 TrySuspend 恢复的 Mini 小窗）：
-    /// 让 WebView2 在屏幕 0 像素可见的前提下完成 entering(opacity=0) 首帧与最新歌曲封面合成，
-    /// 彻底杜绝 ShowWindow 瞬间闪现上一帧再变透明的“双闪”现象。
+    /// 先确保纯 WS_POPUP 零框样式，再令 WebView2 在屏幕 0 像素可见的前提下完成 entering(opacity=0) 首帧与最新歌曲封面合成，
+    /// 彻底杜绝 ShowWindow 瞬间闪现经典标题栏或上一帧的“双闪”现象。
     pub fn prepare_overlay_window_cloaked_native(hwnd_raw: isize) {
         if hwnd_raw == 0 {
             return;
         }
-        set_overlay_click_through_raw(hwnd_raw, true);
+        let _ = enforce_frameless_overlay_popup_style_native(hwnd_raw);
+        let _ = set_overlay_click_through_raw(hwnd_raw, true);
         set_window_cloak(hwnd_raw, true);
         let hwnd = HWND(hwnd_raw as *mut _);
         unsafe {
@@ -692,7 +825,7 @@ pub mod win_impl {
         if hwnd_raw == 0 {
             return;
         }
-        set_overlay_click_through_raw(hwnd_raw, true);
+        let _ = set_overlay_click_through_raw(hwnd_raw, true);
         set_window_cloak(hwnd_raw, true);
         let hwnd = HWND(hwnd_raw as *mut _);
         unsafe {
@@ -1569,9 +1702,10 @@ pub mod win_impl {
             }
         }
 
-        /// 进入小窗专属「两段式实体保持」透明度动画：
-        /// - 前 40% 行程维持极高实体感（1.0 -> 0.88），让人眼清晰追踪主窗口圆角化并优雅缩小飞向灵动岛；
-        /// - 后 60% 行程柔和加速消融至 0.0，与灵动岛弹簧浮现无缝接棒，彻底告别“第 1 帧就发虚像闪屏”。
+        /// 进入小窗专属「前段锚定 + 顺滑融隐」透明度动画：
+        /// - 前 26% 行程维持清脆实体感（1.0 -> 0.90），让人眼清晰捕捉主窗口圆角化并立即朝灵动岛/小窗启动飞掠；
+        /// - 26%..94% 行程丝滑加速消融至 0.0，与小窗弹簧滑入无缝接棒；
+        /// - 末 6% 彻底归零（0.0），杜绝半屏暗影残留。
         fn build_enter_opacity_animation(
             &self,
             duration_ms: u64,
@@ -1579,17 +1713,18 @@ pub mod win_impl {
             unsafe {
                 let anim = self.dcomp_device.CreateAnimation()?;
                 let dur_sec = (duration_ms.max(16) as f64) / 1000.0;
-                let split_sec = dur_sec * 0.40;
-                let tail_sec = (dur_sec - split_sec).max(0.005);
+                let split_sec = dur_sec * 0.26;
+                let fade_end_sec = dur_sec * 0.94;
+                let tail_sec = (fade_end_sec - split_sec).max(0.005);
 
-                // 阶段 1 [0, split_sec]：1.0 -> 0.88 缓柔微降，保持强烈视觉锚定
+                // 阶段 1 [0, split_sec]：1.0 -> 0.90 轻柔微降，保持清脆视觉锚定
                 let segs_head = build_hermite_cubic_segments(
                     1.0,
-                    0.88,
+                    0.90,
                     split_sec,
-                    0.35,
+                    0.30,
                     0.0,
-                    0.65,
+                    0.60,
                     1.0,
                     2,
                 );
@@ -1603,14 +1738,14 @@ pub mod win_impl {
                     )?;
                 }
 
-                // 阶段 2 [split_sec, dur_sec]：0.88 -> 0.0 丝滑加速融化消隐
+                // 阶段 2 [split_sec, fade_end_sec]：0.90 -> 0.0 丝滑融化消隐，无拖尾暗影
                 let segs_tail = build_hermite_cubic_segments(
-                    0.88,
+                    0.90,
                     0.0,
                     tail_sec,
-                    0.32,
+                    0.28,
                     0.0,
-                    0.58,
+                    0.54,
                     1.0,
                     4,
                 );
@@ -1623,6 +1758,7 @@ pub mod win_impl {
                         seg.cubic,
                     )?;
                 }
+                anim.AddCubic(fade_end_sec, 0.0, 0.0, 0.0, 0.0)?;
                 anim.End(dur_sec, 0.0)?;
                 Ok(anim)
             }
@@ -1842,10 +1978,11 @@ pub mod win_impl {
 
                 let dur = plan.duration_ms.max(16);
                 let (mx1, my1, mx2, my2) = match plan.kind {
-                    TransitionKind::EnterMini => (0.24, 0.12, 0.20, 1.0),
-                    TransitionKind::ExitMini | TransitionKind::RestoreFromTray => {
-                        (0.16, 0.96, 0.26, 1.0)
-                    }
+                    // 零起步迟滞的高阻尼丝滑收束曲线：点击即顺畅起飞并柔和汇聚到小窗方位
+                    TransitionKind::EnterMini => (0.22, 0.78, 0.24, 1.0),
+                    // 略微柔化前段斜率，令加长后的退出展开舒展清晰而不仓促
+                    TransitionKind::ExitMini => (0.18, 0.88, 0.24, 1.0),
+                    TransitionKind::RestoreFromTray => (0.16, 0.96, 0.26, 1.0),
                 };
 
                 let clip = self.dcomp_device.CreateRectangleClip()?;
@@ -1945,6 +2082,16 @@ pub mod win_impl {
                 let effect_group = self.dcomp_device.CreateEffectGroup()?;
                 let opacity_anim = if plan.kind == TransitionKind::EnterMini {
                     self.build_enter_opacity_animation(dur)?
+                } else if plan.kind == TransitionKind::ExitMini {
+                    self.build_bezier_animation(
+                        plan.start_opacity,
+                        plan.end_opacity,
+                        dur,
+                        0.16,
+                        0.82,
+                        0.28,
+                        1.0,
+                    )?
                 } else {
                     self.build_bezier_animation(
                         plan.start_opacity,
@@ -2244,7 +2391,7 @@ mod tests {
             bottom: 34,
         };
 
-        // 1. 最大化进入顶部灵动岛：起始圆角 0 -> 36px，明显向上牵引与有力收束缩放，不拉扁等比缩放
+        // 1. 最大化进入顶部灵动岛：起始圆角 0 -> 40px，充分向上牵引与有力等比收束（0.42）
         let enter_max = compute_spatial_transition_plan(
             TransitionKind::EnterMini,
             max_rect,
@@ -2254,14 +2401,14 @@ mod tests {
             1.0,
             TransitionMotionStyle::Rich,
         );
-        assert!(enter_max.duration_ms >= 280);
+        assert!(enter_max.duration_ms >= 340);
         assert_eq!(enter_max.start_radius_px, 0.0);
-        assert!(enter_max.end_radius_px >= 32.0);
-        assert!(enter_max.end_scale >= 0.45 && enter_max.end_scale <= 0.62);
-        assert!(enter_max.end_dy < -120.0, "应朝顶部灵动岛方向明显牵引飞掠");
-        assert!(enter_max.mini_handoff_delay_ms >= 100);
+        assert!(enter_max.end_radius_px >= 36.0);
+        assert!(enter_max.end_scale >= 0.36 && enter_max.end_scale <= 0.48);
+        assert!(enter_max.end_dy < -160.0, "应朝顶部灵动岛方向充分牵引收束");
+        assert!(enter_max.mini_handoff_delay_ms >= 120);
 
-        // 2. 最大化退出小窗：起始圆角 22px -> 0px（贴齐满屏），带交叉溶解揭幕
+        // 2. 最大化退出小窗：起始圆角 24px -> 0px（贴齐满屏），适度加长至 340ms + 75ms 交叉溶解揭幕
         let exit_max = compute_spatial_transition_plan(
             TransitionKind::ExitMini,
             max_rect,
@@ -2271,12 +2418,14 @@ mod tests {
             1.0,
             TransitionMotionStyle::Rich,
         );
+        assert!(exit_max.duration_ms >= 320);
         assert!(exit_max.start_radius_px >= 20.0);
         assert_eq!(exit_max.end_radius_px, 0.0);
         assert_eq!(exit_max.end_scale, 1.0);
         assert_eq!(exit_max.end_dx, 0.0);
         assert_eq!(exit_max.end_dy, 0.0);
-        assert!(exit_max.reveal_dissolve_ms >= 50);
+        assert!(exit_max.reveal_dissolve_ms >= 65);
+        assert!(exit_max.mini_exit_duration_ms >= 175);
 
         // 3. 普通默认窗口：保留 8px 系统圆角
         let normal_rect = RectPx {
@@ -2619,6 +2768,118 @@ mod tests {
             win_impl::hide_overlay_window_native(raw);
             assert!(!IsWindowVisible(hwnd).as_bool());
             assert!(!win_impl::is_window_cloaked(raw));
+
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_overlay_popup_enforcement_strips_tao_caption_chrome_and_shows_cloaked_cleanly() {
+        use windows::core::w;
+        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongW, IsWindowVisible,
+            RegisterClassExW, GWL_EXSTYLE, GWL_STYLE, WNDCLASSEXW, WS_BORDER, WS_CAPTION,
+            WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME,
+            WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX,
+            WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        };
+
+        unsafe extern "system" fn chrome_test_wnd_proc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+
+        unsafe {
+            let hinst = GetModuleHandleW(None).unwrap();
+            let cls = w!("BmMiniPopupZeroChromeRegressionTest");
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(chrome_test_wnd_proc),
+                hInstance: hinst.into(),
+                lpszClassName: cls,
+                ..Default::default()
+            };
+            let _ = RegisterClassExW(&wc);
+
+            // 模拟 tao-0.37 创建 decorations(false) 窗口时的默认样式（带 WS_CAPTION / WS_SYSMENU / WS_EX_WINDOWEDGE / WS_EX_APPWINDOW）
+            let tao_default_style = WS_CAPTION
+                | WS_CLIPSIBLINGS
+                | WS_SYSMENU
+                | WS_MINIMIZEBOX
+                | WS_MAXIMIZEBOX
+                | WS_THICKFRAME;
+            let tao_default_ex = WS_EX_WINDOWEDGE | WS_EX_APPWINDOW;
+            let hwnd = CreateWindowExW(
+                tao_default_ex,
+                cls,
+                cls,
+                tao_default_style,
+                160,
+                160,
+                480,
+                228,
+                None,
+                None,
+                Some(hinst.into()),
+                None,
+            )
+            .unwrap();
+            let raw = hwnd.0 as isize;
+
+            let chrome_style_mask = WS_CAPTION.0
+                | WS_SYSMENU.0
+                | WS_THICKFRAME.0
+                | WS_BORDER.0
+                | WS_DLGFRAME.0
+                | WS_MINIMIZEBOX.0
+                | WS_MAXIMIZEBOX.0;
+            let chrome_ex_mask = WS_EX_WINDOWEDGE.0
+                | WS_EX_DLGMODALFRAME.0
+                | WS_EX_CLIENTEDGE.0
+                | WS_EX_STATICEDGE.0
+                | WS_EX_APPWINDOW.0;
+
+            // 1. 首次加固必须剥离全部非客户区标题栏与边框位，并转为纯 WS_POPUP + WS_EX_TOOLWINDOW
+            assert!(win_impl::enforce_frameless_overlay_popup_style_native(raw));
+            assert!(
+                !win_impl::enforce_frameless_overlay_popup_style_native(raw),
+                "二次调用必须严格幂等返回 false（不重发 SWP_FRAMECHANGED）"
+            );
+            let style_after = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            let ex_after = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            assert_eq!(style_after & chrome_style_mask, 0, "不得残留任何标题栏/边框样式位");
+            assert_ne!(style_after & WS_POPUP.0, 0, "必须为纯 WS_POPUP 悬浮层");
+            assert_ne!(style_after & WS_CLIPSIBLINGS.0, 0);
+            assert_eq!(ex_after & chrome_ex_mask, 0, "不得残留 WS_EX_WINDOWEDGE 或 WS_EX_APPWINDOW");
+            assert_ne!(ex_after & WS_EX_TOOLWINDOW.0, 0);
+            assert!(!IsWindowVisible(hwnd).as_bool(), "样式加固不得意外暴露隐藏窗");
+
+            // 2. 走完整进出小窗隐身预合成 -> 原子揭幕 -> 原生隐藏闭环，验证全程 0 标题栏样式回弹
+            win_impl::prepare_overlay_window_cloaked_native(raw);
+            assert!(IsWindowVisible(hwnd).as_bool());
+            assert!(win_impl::is_window_cloaked(raw));
+
+            win_impl::show_overlay_window_native(raw, false);
+            assert!(IsWindowVisible(hwnd).as_bool());
+            assert!(!win_impl::is_window_cloaked(raw));
+            let style_shown = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            let ex_shown = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            assert_eq!(style_shown & chrome_style_mask, 0);
+            assert_eq!(ex_shown & chrome_ex_mask, 0);
+            assert_ne!(ex_shown & WS_EX_TOOLWINDOW.0, 0);
+            assert_ne!(ex_shown & WS_EX_TOPMOST.0, 0);
+
+            win_impl::hide_overlay_window_native(raw);
+            assert!(!IsWindowVisible(hwnd).as_bool());
+            assert!(!win_impl::is_window_cloaked(raw));
+            assert_eq!((GetWindowLongW(hwnd, GWL_STYLE) as u32) & chrome_style_mask, 0);
 
             let _ = DestroyWindow(hwnd);
         }

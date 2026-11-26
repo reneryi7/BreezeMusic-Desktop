@@ -450,6 +450,7 @@ const smartTip = ref({
   placement: "top" as "top" | "bottom",
   gliding: false,
   multiline: false,
+  instantHide: false,
 });
 let activeTooltipTarget: HTMLElement | null = null;
 let tooltipRafId: number | null = null;
@@ -729,6 +730,7 @@ function showSmartTooltipFor(el: HTMLElement, text: string) {
     smartTip.value.multiline = text.length > 36 || text.includes("\n");
     smartTip.value.gliding =
       wasAlreadyVisible || performance.now() - lastTooltipHideTime < 320;
+    smartTip.value.instantHide = false;
     smartTip.value.visible = true;
     updateSmartTooltipPosition();
     nextTick(() => {
@@ -758,6 +760,7 @@ function hideSmartTooltip(immediate = false) {
   activeTooltipTarget = null;
   if (smartTip.value.visible) {
     lastTooltipHideTime = immediate ? 0 : performance.now();
+    smartTip.value.instantHide = Boolean(immediate);
     smartTip.value.visible = false;
     smartTip.value.gliding = false;
   }
@@ -2641,6 +2644,7 @@ onBeforeUnmount(() => {
           'is-visible': smartTip.visible && Boolean(smartTip.text),
           'is-gliding': smartTip.gliding,
           'is-multiline': smartTip.multiline,
+          'is-instant-hide': smartTip.instantHide,
         },
       ]"
       :style="{

@@ -351,7 +351,7 @@ function applyMiniStageTransition(payload: MiniTransitionPayload | null | undefi
           stageInstant.value = false;
           stagePhase.value = "visible";
         }
-      }, 240);
+      }, 320);
     }
     return;
   }
@@ -564,7 +564,7 @@ function applySyncPayload(
           stageInstant.value = false;
           stagePhase.value = "visible";
         }
-      }, 220);
+      }, 320);
     }
   }
   if (data.motionLevel) {
@@ -2366,24 +2366,24 @@ onBeforeUnmount(() => {
   transform: translate3d(0, 0, 0) scale(1);
   transform-origin: center center;
   will-change: transform, opacity;
-  /* 弹簧曲线仅用于 transform，opacity 独立使用单调平滑曲线，杜绝透明度闪烁 */
+  /* 弹簧曲线仅用于 transform，opacity 独立使用单调平滑曲线，杜绝透明度超调闪烁 */
   transition:
-    transform 340ms var(--ease-spring-tactile, cubic-bezier(0.22, 1.18, 0.36, 1)),
-    opacity 200ms cubic-bezier(0.22, 1, 0.36, 1);
+    transform 380ms var(--ease-spring-tactile, cubic-bezier(0.22, 1.12, 0.34, 1)),
+    opacity 240ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* 独立窗口级空间势能入场起势态（与主窗口 GPU 收缩舞台 58ms 甜点衔接） */
+/* 独立窗口级空间势能入场起势态（与主窗口 GPU 收缩舞台 140ms 甜点衔接） */
 .bm-mini-stage.is-standalone.stage-phase-entering .bm-mini-shell-anchor,
 .bm-mini-stage.is-standalone.stage-phase-hidden .bm-mini-shell-anchor {
   opacity: 0;
   pointer-events: none;
 }
 
-/* 退出小窗释能收束态（130ms 利落滑向主窗口方向淡出，与主窗口 GPU 展开并行） */
+/* 退出小窗释能收束态（155-175ms 舒展滑向主窗口方向淡出，与加长后的主窗口 GPU 展开并行） */
 .bm-mini-stage.is-standalone.stage-phase-exiting .bm-mini-shell-anchor {
   opacity: 0;
   pointer-events: none;
-  transition: opacity 115ms cubic-bezier(0.36, 0, 0.8, 1);
+  transition: opacity 155ms cubic-bezier(0.32, 0, 0.76, 1);
 }
 
 /* 空间位移与缩放严格在 prefers-reduced-motion: no-preference 下启用，无障碍减弱动效自动收敛为纯柔滑淡入淡出 */
@@ -2421,8 +2421,14 @@ onBeforeUnmount(() => {
       )
       scale(0.87);
     transition:
-      transform 130ms cubic-bezier(0.36, 0, 0.72, 1),
-      opacity 115ms cubic-bezier(0.36, 0, 0.8, 1);
+      transform 175ms cubic-bezier(0.32, 0, 0.68, 1),
+      opacity 155ms cubic-bezier(0.32, 0, 0.76, 1);
+  }
+
+  .bm-mini-stage.is-standalone.motion-standard.stage-phase-exiting .bm-mini-shell-anchor {
+    transition:
+      transform 125ms cubic-bezier(0.32, 0, 0.68, 1),
+      opacity 110ms cubic-bezier(0.32, 0, 0.76, 1);
   }
 
   .bm-mini-stage.is-standalone.dock-top.mode-pill-h.stage-phase-exiting .bm-mini-shell-anchor {
@@ -2445,8 +2451,8 @@ onBeforeUnmount(() => {
 /* standard 动效档位：克制收敛版过渡 */
 .bm-mini-stage.is-standalone.motion-standard .bm-mini-shell-anchor {
   transition:
-    transform 200ms cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 150ms cubic-bezier(0.22, 1, 0.36, 1);
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 165ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* 锁相首帧或 none 动效档位：零过渡直切，始终保证最终态完全可见 */
