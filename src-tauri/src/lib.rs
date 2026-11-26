@@ -426,6 +426,7 @@ fn ensure_desktop_lyric_window(app: &AppHandle) -> Option<tauri::WebviewWindow> 
     .fullscreen(false)
     .decorations(false)
     .transparent(true)
+    .no_redirection_bitmap(true)
     .always_on_top(true)
     .skip_taskbar(true)
     .shadow(false)
@@ -441,6 +442,7 @@ fn ensure_desktop_lyric_window(app: &AppHandle) -> Option<tauri::WebviewWindow> 
                     raw.0 as isize,
                 );
             }
+            #[cfg(not(target_os = "windows"))]
             enforce_transparent_overlay_window_style(&win);
             Some(win)
         }
@@ -488,6 +490,7 @@ fn ensure_mini_player_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     .fullscreen(false)
     .decorations(false)
     .transparent(true)
+    .no_redirection_bitmap(true)
     .always_on_top(true)
     .skip_taskbar(true)
     .shadow(false)
@@ -1123,6 +1126,7 @@ fn set_mini_click_through(win: &tauri::WebviewWindow, ignore: bool) {
 fn show_mini_player_window_safely(win: &tauri::WebviewWindow, click_through: bool) {
     set_subwindow_suspended(win, false);
     set_webview_memory_target_low(win, false);
+    enforce_transparent_webview2_bg(win);
     #[cfg(target_os = "windows")]
     {
         if let Ok(raw) = win.hwnd() {
@@ -3002,103 +3006,10 @@ fn clamp_desktop_lyric_within_work_area(
     }
 }
 
-/// 彻底剥离 Windows 11 透明顶层悬浮窗（桌面歌词）的系统方形阴影、1px 边框与圆角裁切伪影
+/// 彻底剥离非 Windows 平台透明顶层悬浮窗（桌面歌词 / Mini 小窗）的系统阴影
+#[cfg(not(target_os = "windows"))]
 fn enforce_transparent_overlay_window_style(win: &tauri::WebviewWindow) {
     let _ = win.set_shadow(false);
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(raw_hwnd) = win.hwnd() {
-            let hwnd = raw_hwnd.0 as isize;
-            if hwnd != 0 {
-                #[link(name = "dwmapi")]
-                extern "system" {
-                    fn DwmSetWindowAttribute(
-                        hwnd: isize,
-                        dw_attribute: u32,
-                        pv_attribute: *const std::ffi::c_void,
-                        cb_attribute: u32,
-                    ) -> i32;
-                }
-                #[link(name = "user32")]
-                extern "system" {
-                    fn GetWindowLongW(hwnd: isize, n_index: i32) -> i32;
-                    fn SetWindowLongW(hwnd: isize, n_index: i32, dw_new_long: i32) -> i32;
-                    fn GetClassLongPtrW(hwnd: isize, n_index: i32) -> usize;
-                    fn SetClassLongPtrW(hwnd: isize, n_index: i32, dw_new_long: isize) -> usize;
-                    fn SetWindowPos(
-                        hwnd: isize,
-                        hwnd_insert_after: isize,
-                        x: i32,
-                        y: i32,
-                        cx: i32,
-                        cy: i32,
-                        u_flags: u32,
-                    ) -> i32;
-                }
-
-                const DWMWA_TRANSITIONS_FORCEDISABLED: u32 = 3;
-                const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
-                const DWMWA_BORDER_COLOR: u32 = 34;
-                const DWMWCP_DONOTROUND: u32 = 1;
-                const DWMWA_COLOR_NONE: u32 = 0xFFFFFFFE;
-                const GWL_EXSTYLE: i32 = -20;
-                const GCL_STYLE: i32 = -26;
-                const WS_EX_TOOLWINDOW: i32 = 0x00000080;
-                const WS_EX_APPWINDOW: i32 = 0x00040000;
-                const CS_DROPSHADOW: usize = 0x00020000;
-                const SWP_NOSIZE: u32 = 0x0001;
-                const SWP_NOMOVE: u32 = 0x0002;
-                const SWP_NOZORDER: u32 = 0x0004;
-                const SWP_NOACTIVATE: u32 = 0x0010;
-                const SWP_FRAMECHANGED: u32 = 0x0020;
-
-                unsafe {
-                    let disable_trans: u32 = 1;
-                    let _ = DwmSetWindowAttribute(
-                        hwnd,
-                        DWMWA_TRANSITIONS_FORCEDISABLED,
-                        &disable_trans as *const u32 as *const std::ffi::c_void,
-                        std::mem::size_of::<u32>() as u32,
-                    );
-                    let corner_pref: u32 = DWMWCP_DONOTROUND;
-                    let _ = DwmSetWindowAttribute(
-                        hwnd,
-                        DWMWA_WINDOW_CORNER_PREFERENCE,
-                        &corner_pref as *const u32 as *const std::ffi::c_void,
-                        std::mem::size_of::<u32>() as u32,
-                    );
-                    let border_none: u32 = DWMWA_COLOR_NONE;
-                    let _ = DwmSetWindowAttribute(
-                        hwnd,
-                        DWMWA_BORDER_COLOR,
-                        &border_none as *const u32 as *const std::ffi::c_void,
-                        std::mem::size_of::<u32>() as u32,
-                    );
-
-                    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-                    let next_ex = (ex_style | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
-                    if next_ex != ex_style {
-                        SetWindowLongW(hwnd, GWL_EXSTYLE, next_ex);
-                    }
-
-                    let cls_style = GetClassLongPtrW(hwnd, GCL_STYLE);
-                    if (cls_style & CS_DROPSHADOW) != 0 {
-                        SetClassLongPtrW(hwnd, GCL_STYLE, (cls_style & !CS_DROPSHADOW) as isize);
-                    }
-
-                    let _ = SetWindowPos(
-                        hwnd,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-                    );
-                }
-            }
-        }
-    }
 }
 
 #[tauri::command]

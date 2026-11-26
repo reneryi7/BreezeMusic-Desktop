@@ -31,6 +31,9 @@
   - 为全局悬浮提示条 `.global-smart-tooltip` 增加按下瞬隐态（`is-instant-hide`），避免点击切换小窗按钮时悬停气泡残影被截入主窗口缩小快照。
 
 ### 修复 (Fixed)
+- **彻底根除透明悬浮子窗（Mini 灵动岛与桌面悬浮歌词）顶部残留经典浅蓝 `"微风 Mini"` 标题栏条带**：
+  - 精确定位残留成因：`tao` 默认为透明窗分配 GDI 重定向位图并启用 `DwmEnableBlurBehindWindow`（空区域），在窗口初建带 `WS_CAPTION` 阶段或收到系统 `WM_SETTINGCHANGE`（触发 `dark_mode::refresh_titlebar_theme_color` 直调 `DefWindowProcW(WM_NCACTIVATE, 0/1, 0)`）时，Win32 向 GDI 重定向表面写入 `A=0` 的经典浅蓝非客户区标题栏（`COLOR_INACTIVECAPTION` / `COLOR_WINDOWFRAME`）并以加法混合残留于 WebView2 灵动岛后方。
+  - 为 `mini_player` 与 `desktop_lyric` 开启 Tauri 原生 `.no_redirection_bitmap(true)`（`WS_EX_NOREDIRECTIONBITMAP`，从内核层彻底消除 GDI 重定向位图并跳过 `DwmEnableBlurBehindWindow`），同时在 `window_transition.rs` 新增幂等的 Win32 无框子类防火墙（`install_frameless_overlay_subclass_native` + `SetWindowTheme("", "")` + `DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED`），拦截 `WM_NCPAINT`/`WM_NCCALCSIZE`/`WM_ERASEBKGND`/`WM_SETTINGCHANGE`、原地净化 `WM_STYLECHANGING` 阻止 `WS_CAPTION` 回注，并在 `WM_NCACTIVATE` 中透传真实 `wparam` 维持展开卡点击外部自动收起、同时改写 `lparam = -1` 禁绘非客户区。
 - **彻底根治播放页歌词在播放与暂停态均持续触发的 ~0.33s（~3 Hz）周期性 1px 锯齿抖动**：
   - 将 `computeLineTargetScrollTop` 目标位置严格钳制并整像素对齐，消除此前“浮点目标值 vs 收敛强行 `Math.round` 落地”导致 77% 目标行落入弹簧锯齿死循环的根因，移除强注每行的 `subpixelResidual` 偏移，并在暂停静止收敛后对歌词物理链路与 DOM 写入实施零开销休眠门控。
   - 为歌词文本流启用 `text-rendering: geometricPrecision`、移除静态 `will-change: transform` 位图锁定、整数化静止行偏移并补充视口 Resize 同步，消除 Windows DirectWrite 缩放重光栅微抖。

@@ -531,7 +531,7 @@ pub mod win_impl {
     };
     use windows::Win32::Graphics::Dwm::{
         DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAK,
-        DWMWA_CLOAKED, DWMWA_COLOR_NONE, DWMWA_EXTENDED_FRAME_BOUNDS,
+        DWMWA_CLOAKED, DWMWA_COLOR_NONE, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_NCRENDERING_POLICY,
         DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE,
     };
     use windows::Win32::Graphics::Dxgi::Common::{
@@ -547,45 +547,201 @@ pub mod win_impl {
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, CreateWindowExW, DefWindowProcW, GetClassNameW, GetClientRect,
-        GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect,
-        GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, RegisterClassExW,
-        SendMessageW, SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-        GWL_STYLE, GW_HWNDPREV, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, SC_RESTORE,
-        SWP_FRAMECHANGED, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE,
-        WINDOWPLACEMENT, WM_ERASEBKGND, WM_NCHITTEST, WM_SYSCOMMAND, WNDCLASSEXW,
-        WPF_RESTORETOMAXIMIZED, WS_BORDER, WS_CAPTION, WS_CLIPSIBLINGS, WS_DLGFRAME,
-        WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-        WS_EX_NOREDIRECTIONBITMAP, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-        WS_EX_TRANSPARENT, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
-        WS_THICKFRAME,
+        BringWindowToTop, CreateWindowExW, DefWindowProcW, GetClassLongPtrW, GetClassNameW,
+        GetClientRect, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowPlacement,
+        GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
+        RegisterClassExW, SendMessageW, SetClassLongPtrW, SetForegroundWindow, SetWindowLongW,
+        SetWindowPos, ShowWindow, CS_DROPSHADOW, GCL_STYLE, GWL_EXSTYLE, GWL_STYLE, GW_HWNDPREV,
+        HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, SC_RESTORE, SWP_FRAMECHANGED, SWP_HIDEWINDOW,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+        SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, WINDOWPLACEMENT,
+        WM_ERASEBKGND, WM_NCHITTEST, WM_SYSCOMMAND, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_BORDER,
+        WS_CAPTION, WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE,
+        WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+        WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_EX_WINDOWEDGE,
+        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
     };
 
     const PW_CLIENTONLY: u32 = 0x0000_0001;
     const PW_RENDERFULLCONTENT: u32 = 0x0000_0002;
+    const OVERLAY_FRAMELESS_SUBCLASS_ID: usize = 0x424D_4F56_0001;
+    const OVERLAY_CHROME_STYLE_STRIP: u32 = WS_CAPTION.0
+        | WS_SYSMENU.0
+        | WS_THICKFRAME.0
+        | WS_BORDER.0
+        | WS_DLGFRAME.0
+        | WS_MINIMIZEBOX.0
+        | WS_MAXIMIZEBOX.0;
+    const OVERLAY_CHROME_EXSTYLE_STRIP: u32 = WS_EX_WINDOWEDGE.0
+        | WS_EX_DLGMODALFRAME.0
+        | WS_EX_CLIENTEDGE.0
+        | WS_EX_STATICEDGE.0
+        | WS_EX_APPWINDOW.0;
+
+    #[repr(C)]
+    struct OverlayStyleStruct {
+        style_old: u32,
+        style_new: u32,
+    }
 
     #[link(name = "user32")]
     extern "system" {
         fn PrintWindow(hwnd: isize, hdc_blt: isize, n_flags: u32) -> i32;
     }
 
+    #[link(name = "comctl32")]
+    extern "system" {
+        fn SetWindowSubclass(
+            hwnd: isize,
+            pfn_subclass: Option<
+                unsafe extern "system" fn(isize, u32, usize, isize, usize, usize) -> isize,
+            >,
+            uid_subclass: usize,
+            dw_ref_data: usize,
+        ) -> i32;
+        fn GetWindowSubclass(
+            hwnd: isize,
+            pfn_subclass: Option<
+                unsafe extern "system" fn(isize, u32, usize, isize, usize, usize) -> isize,
+            >,
+            uid_subclass: usize,
+            pdw_ref_data: *mut usize,
+        ) -> i32;
+        fn DefSubclassProc(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+        fn RemoveWindowSubclass(
+            hwnd: isize,
+            pfn_subclass: Option<
+                unsafe extern "system" fn(isize, u32, usize, isize, usize, usize) -> isize,
+            >,
+            uid_subclass: usize,
+        ) -> i32;
+    }
+
+    #[link(name = "uxtheme")]
+    extern "system" {
+        fn SetWindowTheme(
+            hwnd: isize,
+            psz_sub_app_name: *const u16,
+            psz_sub_id_list: *const u16,
+        ) -> i32;
+    }
+
+    /// 透明无框悬浮子窗（Mini 灵动岛 / 桌面悬浮歌词）专用 Win32 子类防火墙：
+    /// 1. 彻底拦截 WM_NCPAINT / WM_NCCALCSIZE / WM_ERASEBKGND，确保客户区 100% 占满整窗且零 GDI 标题栏/边框绘制；
+    /// 2. WM_NCACTIVATE 保留原始 wparam 透传给 tao（维持 WindowEvent::Focused 自动收起），但将 lparam 改写为 -1，
+    ///    配合 SetWindowTheme(hwnd, "", "") 令 DefWindowProcW 严格跳过非客户区经典浅蓝标题栏重绘；
+    /// 3. 拦截 WM_SETTINGCHANGE，阻断 tao-0.37 dark_mode::refresh_titlebar_theme_color(redraw_title_bar=true)
+    ///    在系统设置/主题/工作区广播时绕过消息泵直接调用 DefWindowProcW(hwnd, WM_NCACTIVATE, 0/1, 0)；
+    /// 4. WM_STYLECHANGING 原地净化 styleNew，即使任何外部路径触发 tao::apply_diff 也无法将 WS_CAPTION 等写回，
+    ///    同时完整保留 WS_EX_NOREDIRECTIONBITMAP / WS_EX_TOPMOST / WS_EX_LAYERED / WS_EX_TRANSPARENT。
+    unsafe extern "system" fn frameless_overlay_subclass_proc(
+        hwnd: isize,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+        uid_subclass: usize,
+        _ref_data: usize,
+    ) -> isize {
+        const WM_ERASEBKGND_MSG: u32 = 0x0014;
+        const WM_SETTINGCHANGE_MSG: u32 = 0x001A;
+        const WM_STYLECHANGING_MSG: u32 = 0x007C;
+        const WM_NCDESTROY_MSG: u32 = 0x0082;
+        const WM_NCCALCSIZE_MSG: u32 = 0x0083;
+        const WM_NCPAINT_MSG: u32 = 0x0085;
+        const WM_NCACTIVATE_MSG: u32 = 0x0086;
+
+        match msg {
+            WM_NCPAINT_MSG => return 0,
+            WM_NCCALCSIZE_MSG => return 0,
+            WM_NCACTIVATE_MSG => {
+                return DefSubclassProc(hwnd, msg, wparam, -1isize);
+            }
+            WM_ERASEBKGND_MSG => return 1,
+            WM_SETTINGCHANGE_MSG => return 0,
+            WM_STYLECHANGING_MSG => {
+                if lparam != 0 {
+                    let ss = &mut *(lparam as *mut OverlayStyleStruct);
+                    let index = wparam as u32 as i32;
+                    if index == GWL_STYLE.0 {
+                        ss.style_new = (ss.style_new & !OVERLAY_CHROME_STYLE_STRIP)
+                            | WS_POPUP.0
+                            | WS_CLIPSIBLINGS.0;
+                    } else if index == GWL_EXSTYLE.0 {
+                        ss.style_new = (ss.style_new & !OVERLAY_CHROME_EXSTYLE_STRIP)
+                            | WS_EX_TOOLWINDOW.0;
+                    }
+                }
+                return DefSubclassProc(hwnd, msg, wparam, lparam);
+            }
+            WM_NCDESTROY_MSG => {
+                let _ = RemoveWindowSubclass(
+                    hwnd,
+                    Some(frameless_overlay_subclass_proc),
+                    uid_subclass,
+                );
+                return DefSubclassProc(hwnd, msg, wparam, lparam);
+            }
+            _ => {}
+        }
+
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+
+    /// 幂等安装透明悬浮子窗 Win32 无框子类防护并解除该顶层 HWND 的 UxTheme 非客户区视觉样式绘制；
+    /// 仅在首次安装时调用 SetWindowTheme 与 SetWindowSubclass，避免重复广播 WM_THEMECHANGED。
+    pub fn install_frameless_overlay_subclass_native(hwnd_raw: isize) -> bool {
+        if hwnd_raw == 0 {
+            return false;
+        }
+        unsafe {
+            let mut existing_ref: usize = 0;
+            if GetWindowSubclass(
+                hwnd_raw,
+                Some(frameless_overlay_subclass_proc),
+                OVERLAY_FRAMELESS_SUBCLASS_ID,
+                &mut existing_ref as *mut usize,
+            ) != 0
+            {
+                return false;
+            }
+            let empty_wide: [u16; 1] = [0];
+            let _ = SetWindowTheme(hwnd_raw, empty_wide.as_ptr(), empty_wide.as_ptr());
+            SetWindowSubclass(
+                hwnd_raw,
+                Some(frameless_overlay_subclass_proc),
+                OVERLAY_FRAMELESS_SUBCLASS_ID,
+                0,
+            ) != 0
+        }
+    }
+
     pub fn is_main_cloaked() -> bool {
         MAIN_CLOAKED_FLAG.load(Ordering::Acquire)
     }
 
-    /// 强制将透明悬浮子窗（如 Mini 灵动岛）固化为纯 `WS_POPUP | WS_CLIPSIBLINGS` 无非客户区样式：
-    /// 彻底剥离 tao-0.37 默认残留的 `WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`
-    /// 以及 `WS_EX_WINDOWEDGE | WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_APPWINDOW`，
-    /// 从 Win32 底层永久断绝 `DefWindowProcW` 绘制 Windows 7 Aero Basic 经典浅蓝标题栏与粗边框的可能。
-    /// 严格幂等：仅在样式位确有变化时才调用 `SetWindowLongW` 与 `SWP_FRAMECHANGED`，并返回是否发生变更。
+    /// 强制将透明悬浮子窗（Mini 灵动岛 / 桌面悬浮歌词）固化为纯 `WS_POPUP | WS_CLIPSIBLINGS` 无非客户区样式：
+    /// 1. 首次调用时幂等安装 `frameless_overlay_subclass_proc` 样式与消息防火墙并剥离顶层 HWND UxTheme；
+    /// 2. 通过 `DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED` 等属性彻底禁用 DWM 非客户区框架渲染；
+    /// 3. 剥离 tao-0.37 默认残留的 `WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`
+    ///    以及 `WS_EX_WINDOWEDGE | WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_APPWINDOW`，
+    ///    同时完整保留 `WS_EX_NOREDIRECTIONBITMAP`、`WS_EX_TOPMOST`、`WS_EX_LAYERED`、`WS_EX_TRANSPARENT`。
+    /// 严格幂等：仅在样式位确有变化时才调用 `SetWindowLongW` 与 `SWP_FRAMECHANGED`，并返回是否发生样式变更。
     pub fn enforce_frameless_overlay_popup_style_native(hwnd_raw: isize) -> bool {
         if hwnd_raw == 0 {
             return false;
         }
+        let _ = install_frameless_overlay_subclass_native(hwnd_raw);
         let hwnd = HWND(hwnd_raw as *mut _);
+        const DWMNCRP_DISABLED_VAL: u32 = 1;
         const DWMWCP_DONOTROUND_VAL: u32 = 1;
         unsafe {
+            let nc_policy: u32 = DWMNCRP_DISABLED_VAL;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_NCRENDERING_POLICY,
+                &nc_policy as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u32,
+            );
             let disable_trans: u32 = 1;
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -608,23 +764,12 @@ pub mod win_impl {
                 std::mem::size_of::<u32>() as u32,
             );
 
-            let style_strip = WS_CAPTION.0
-                | WS_SYSMENU.0
-                | WS_THICKFRAME.0
-                | WS_BORDER.0
-                | WS_DLGFRAME.0
-                | WS_MINIMIZEBOX.0
-                | WS_MAXIMIZEBOX.0;
             let cur_style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-            let next_style = (cur_style & !style_strip) | WS_POPUP.0 | WS_CLIPSIBLINGS.0;
+            let next_style =
+                (cur_style & !OVERLAY_CHROME_STYLE_STRIP) | WS_POPUP.0 | WS_CLIPSIBLINGS.0;
 
-            let ex_strip = WS_EX_WINDOWEDGE.0
-                | WS_EX_DLGMODALFRAME.0
-                | WS_EX_CLIENTEDGE.0
-                | WS_EX_STATICEDGE.0
-                | WS_EX_APPWINDOW.0;
             let cur_ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-            let next_ex = (cur_ex & !ex_strip) | WS_EX_TOOLWINDOW.0;
+            let next_ex = (cur_ex & !OVERLAY_CHROME_EXSTYLE_STRIP) | WS_EX_TOOLWINDOW.0;
 
             let mut changed = false;
             if next_style != cur_style {
@@ -633,6 +778,12 @@ pub mod win_impl {
             }
             if next_ex != cur_ex {
                 let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, next_ex as i32);
+                changed = true;
+            }
+            let cls_style = GetClassLongPtrW(hwnd, GCL_STYLE);
+            let drop_shadow_bit = CS_DROPSHADOW.0 as usize;
+            if (cls_style & drop_shadow_bit) != 0 {
+                let _ = SetClassLongPtrW(hwnd, GCL_STYLE, (cls_style & !drop_shadow_bit) as isize);
                 changed = true;
             }
             if changed {
@@ -660,13 +811,8 @@ pub mod win_impl {
         let hwnd = HWND(hwnd_raw as *mut _);
         unsafe {
             let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-            let ex_strip = WS_EX_APPWINDOW.0
-                | WS_EX_WINDOWEDGE.0
-                | WS_EX_DLGMODALFRAME.0
-                | WS_EX_CLIENTEDGE.0
-                | WS_EX_STATICEDGE.0;
-            let base = (ex | WS_EX_TOOLWINDOW.0) & !ex_strip;
-            let frame_bits = WS_EX_TOOLWINDOW.0 | ex_strip;
+            let base = (ex | WS_EX_TOOLWINDOW.0) & !OVERLAY_CHROME_EXSTYLE_STRIP;
+            let frame_bits = WS_EX_TOOLWINDOW.0 | OVERLAY_CHROME_EXSTYLE_STRIP;
             let frame_style_changed = (ex & frame_bits) != (base & frame_bits);
             let mask = WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0;
             let next = if ignore { base | mask } else { base & !mask };
@@ -790,6 +936,17 @@ pub mod win_impl {
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
+            if ((GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & WS_EX_TOPMOST.0) == 0 {
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                );
+            }
         }
     }
 
@@ -860,6 +1017,17 @@ pub mod win_impl {
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
+            if ((GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & WS_EX_TOPMOST.0) == 0 {
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                );
+            }
         }
     }
 
@@ -2473,8 +2641,14 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    static WIN32_DESKTOP_WINDOW_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(target_os = "windows")]
     #[test]
     fn test_dcomp_gpu_transition_stage_initializes_and_commits_cleanly() {
+        let _desktop_guard = WIN32_DESKTOP_WINDOW_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let stage_rect = RectPx {
             left: 0,
             top: 0,
@@ -2536,6 +2710,9 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_native_hide_and_cloaked_maximized_restore_never_shrinks_to_normal() {
+        let _desktop_guard = WIN32_DESKTOP_WINDOW_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use windows::core::w;
         use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
         use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
@@ -2563,10 +2740,15 @@ mod tests {
                     ..Default::default()
                 };
                 if !hmon.0.is_null() && GetMonitorInfoW(hmon, &mut mi).as_bool() {
+                    let mut rc = mi.rcWork;
+                    // 与主窗口 WM_NCCALCSIZE 保持一致：自动隐藏任务栏（rcWork == rcMonitor）时保留 1px 底边，避免被系统误判为独占全屏
+                    if rc == mi.rcMonitor {
+                        rc.bottom -= 1;
+                    }
                     if wparam.0 == 0 {
-                        *(lparam.0 as *mut RECT) = mi.rcWork;
+                        *(lparam.0 as *mut RECT) = rc;
                     } else {
-                        (*(lparam.0 as *mut NCCALCSIZE_PARAMS)).rgrc[0] = mi.rcWork;
+                        (*(lparam.0 as *mut NCCALCSIZE_PARAMS)).rgrc[0] = rc;
                     }
                     return LRESULT(0);
                 }
@@ -2641,6 +2823,9 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_overlay_native_show_click_through_and_hide_leaves_zero_ghost_window() {
+        let _desktop_guard = WIN32_DESKTOP_WINDOW_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use windows::core::w;
         use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -2776,6 +2961,9 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_overlay_popup_enforcement_strips_tao_caption_chrome_and_shows_cloaked_cleanly() {
+        let _desktop_guard = WIN32_DESKTOP_WINDOW_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use windows::core::w;
         use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -2882,6 +3070,580 @@ mod tests {
             assert_eq!((GetWindowLongW(hwnd, GWL_STYLE) as u32) & chrome_style_mask, 0);
 
             let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_overlay_subclass_blocks_caption_reinjection_and_nc_painting() {
+        let _desktop_guard = WIN32_DESKTOP_WINDOW_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+        use windows::core::w;
+        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+        use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_NCRENDERING_ENABLED};
+        use windows::Win32::Graphics::Gdi::{
+            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, BITMAPINFO,
+            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        };
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongW, SendMessageW,
+            SetWindowLongW, SetWindowTextW, RegisterClassExW, GWL_EXSTYLE, GWL_STYLE, WNDCLASSEXW,
+            WM_ERASEBKGND, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCPAINT, WM_SETTINGCHANGE, WS_BORDER,
+            WS_CAPTION, WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE,
+            WS_EX_DLGMODALFRAME, WS_EX_NOREDIRECTIONBITMAP, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW,
+            WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        };
+
+        #[link(name = "user32")]
+        extern "system" {
+            fn PrintWindow(hwnd: isize, hdc_blt: isize, n_flags: u32) -> i32;
+        }
+        const PW_RENDERFULLCONTENT: u32 = 0x0000_0002;
+
+        static NCACTIVATE_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static NCACTIVATE_LAST_WPARAM: AtomicUsize = AtomicUsize::new(0);
+        static NCACTIVATE_LAST_LPARAM: AtomicIsize = AtomicIsize::new(0);
+        static SETTINGCHANGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static NCPAINT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "system" fn probe_wnd_proc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            match msg {
+                WM_NCACTIVATE => {
+                    NCACTIVATE_COUNT.fetch_add(1, Ordering::SeqCst);
+                    NCACTIVATE_LAST_WPARAM.store(wparam.0, Ordering::SeqCst);
+                    NCACTIVATE_LAST_LPARAM.store(lparam.0, Ordering::SeqCst);
+                }
+                WM_SETTINGCHANGE => {
+                    SETTINGCHANGE_COUNT.fetch_add(1, Ordering::SeqCst);
+                }
+                WM_NCPAINT => {
+                    NCPAINT_COUNT.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+
+        unsafe {
+            let hinst = GetModuleHandleW(None).unwrap();
+            let cls = w!("BmOverlaySubclassFirewallTest");
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(probe_wnd_proc),
+                hInstance: hinst.into(),
+                lpszClassName: cls,
+                ..Default::default()
+            };
+            let _ = RegisterClassExW(&wc);
+
+            let chrome_style_mask = WS_CAPTION.0
+                | WS_SYSMENU.0
+                | WS_THICKFRAME.0
+                | WS_BORDER.0
+                | WS_DLGFRAME.0
+                | WS_MINIMIZEBOX.0
+                | WS_MAXIMIZEBOX.0;
+            let chrome_ex_mask = WS_EX_WINDOWEDGE.0
+                | WS_EX_DLGMODALFRAME.0
+                | WS_EX_CLIENTEDGE.0
+                | WS_EX_STATICEDGE.0
+                | WS_EX_APPWINDOW.0;
+
+            for use_no_redir in [true, false] {
+                NCACTIVATE_COUNT.store(0, Ordering::SeqCst);
+                NCACTIVATE_LAST_WPARAM.store(99, Ordering::SeqCst);
+                NCACTIVATE_LAST_LPARAM.store(0, Ordering::SeqCst);
+                SETTINGCHANGE_COUNT.store(0, Ordering::SeqCst);
+                NCPAINT_COUNT.store(0, Ordering::SeqCst);
+
+                let init_style = WS_CAPTION
+                    | WS_CLIPSIBLINGS
+                    | WS_SYSMENU
+                    | WS_MINIMIZEBOX
+                    | WS_MAXIMIZEBOX
+                    | WS_THICKFRAME;
+                let init_ex = if use_no_redir {
+                    WS_EX_NOREDIRECTIONBITMAP | WS_EX_WINDOWEDGE | WS_EX_APPWINDOW
+                } else {
+                    WS_EX_WINDOWEDGE | WS_EX_APPWINDOW
+                };
+
+                let hwnd = CreateWindowExW(
+                    init_ex,
+                    cls,
+                    w!("微风 Mini"),
+                    init_style,
+                    180,
+                    140,
+                    480,
+                    228,
+                    None,
+                    None,
+                    Some(hinst.into()),
+                    None,
+                )
+                .unwrap();
+                let raw = hwnd.0 as isize;
+
+                assert!(win_impl::enforce_frameless_overlay_popup_style_native(raw));
+                assert!(
+                    !win_impl::install_frameless_overlay_subclass_native(raw),
+                    "子类安装必须严格幂等（不重复调用 SetWindowTheme）"
+                );
+                assert!(!win_impl::enforce_frameless_overlay_popup_style_native(raw));
+
+                if use_no_redir {
+                    let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+                    assert_ne!(
+                        ex & WS_EX_NOREDIRECTIONBITMAP.0,
+                        0,
+                        "必须完整保留 WS_EX_NOREDIRECTIONBITMAP"
+                    );
+                }
+
+                // 模拟 tao::apply_diff 企图将 WS_CAPTION / WS_EX_WINDOWEDGE / WS_EX_APPWINDOW 写回
+                let _ = SetWindowLongW(
+                    hwnd,
+                    GWL_STYLE,
+                    (WS_CAPTION.0 | WS_SYSMENU.0 | WS_THICKFRAME.0 | WS_CLIPSIBLINGS.0) as i32,
+                );
+                let _ = SetWindowLongW(
+                    hwnd,
+                    GWL_EXSTYLE,
+                    (WS_EX_WINDOWEDGE.0
+                        | WS_EX_APPWINDOW.0
+                        | if use_no_redir {
+                            WS_EX_NOREDIRECTIONBITMAP.0
+                        } else {
+                            0
+                        }) as i32,
+                );
+                let style_after_attack = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+                let ex_after_attack = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+                assert_eq!(
+                    style_after_attack & chrome_style_mask,
+                    0,
+                    "WM_STYLECHANGING 防火墙必须阻止 WS_CAPTION/WS_SYSMENU 回注"
+                );
+                assert_ne!(style_after_attack & WS_POPUP.0, 0);
+                assert_eq!(
+                    ex_after_attack & chrome_ex_mask,
+                    0,
+                    "WM_STYLECHANGING 防火墙必须阻止 WS_EX_WINDOWEDGE/WS_EX_APPWINDOW 回注"
+                );
+                assert_ne!(ex_after_attack & WS_EX_TOOLWINDOW.0, 0);
+                if use_no_redir {
+                    assert_ne!(ex_after_attack & WS_EX_NOREDIRECTIONBITMAP.0, 0);
+                }
+
+                // 验证消息拦截：WM_NCPAINT / WM_NCCALCSIZE / WM_ERASEBKGND / WM_SETTINGCHANGE / WM_NCACTIVATE
+                assert_eq!(
+                    SendMessageW(hwnd, WM_NCPAINT, Some(WPARAM(1)), Some(LPARAM(0))).0,
+                    0
+                );
+                assert_eq!(NCPAINT_COUNT.load(Ordering::SeqCst), 0);
+
+                assert_eq!(
+                    SendMessageW(hwnd, WM_NCCALCSIZE, Some(WPARAM(0)), Some(LPARAM(0))).0,
+                    0
+                );
+                assert_eq!(
+                    SendMessageW(hwnd, WM_ERASEBKGND, Some(WPARAM(0)), Some(LPARAM(0))).0,
+                    1
+                );
+                assert_eq!(
+                    SendMessageW(hwnd, WM_SETTINGCHANGE, Some(WPARAM(0)), Some(LPARAM(0))).0,
+                    0
+                );
+                assert_eq!(
+                    SETTINGCHANGE_COUNT.load(Ordering::SeqCst),
+                    0,
+                    "WM_SETTINGCHANGE 必须被阻断以防 tao refresh_titlebar_theme_color 直绘标题栏"
+                );
+
+                // WM_NCACTIVATE 必须透传真实 wparam 维持 tao Focused 状态，同时将 lparam 改为 -1 禁用非客户区重绘
+                let _ = SendMessageW(hwnd, WM_NCACTIVATE, Some(WPARAM(1)), Some(LPARAM(0)));
+                assert_eq!(NCACTIVATE_COUNT.load(Ordering::SeqCst), 1);
+                assert_eq!(NCACTIVATE_LAST_WPARAM.load(Ordering::SeqCst), 1);
+                assert_eq!(NCACTIVATE_LAST_LPARAM.load(Ordering::SeqCst), -1);
+
+                let _ = SendMessageW(hwnd, WM_NCACTIVATE, Some(WPARAM(0)), Some(LPARAM(0)));
+                assert_eq!(NCACTIVATE_COUNT.load(Ordering::SeqCst), 2);
+                assert_eq!(NCACTIVATE_LAST_WPARAM.load(Ordering::SeqCst), 0);
+                assert_eq!(NCACTIVATE_LAST_LPARAM.load(Ordering::SeqCst), -1);
+
+                // 显示为点击穿透态并检验 DWM 非客户区已禁用、且顶栏 480x24 区域 0 个经典浅蓝标题栏像素
+                win_impl::show_overlay_window_native(raw, true);
+                let mut nc_enabled: i32 = -1;
+                let _ = DwmGetWindowAttribute(
+                    hwnd,
+                    DWMWA_NCRENDERING_ENABLED,
+                    &mut nc_enabled as *mut i32 as *mut _,
+                    std::mem::size_of::<i32>() as u32,
+                );
+                assert_eq!(nc_enabled, 0, "DWMWA_NCRENDERING_ENABLED 必须为 0");
+
+                let _ = SetWindowTextW(hwnd, w!("微风 Mini"));
+                let _ = SendMessageW(hwnd, WM_NCPAINT, Some(WPARAM(1)), Some(LPARAM(0)));
+                let _ = SendMessageW(hwnd, WM_NCACTIVATE, Some(WPARAM(0)), Some(LPARAM(0)));
+                let _ = SendMessageW(hwnd, WM_SETTINGCHANGE, Some(WPARAM(0)), Some(LPARAM(0)));
+
+                let w = 480i32;
+                let h = 228i32;
+                let hdc_mem = CreateCompatibleDC(None);
+                let mut bmi = BITMAPINFO::default();
+                bmi.bmiHeader = BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w,
+                    biHeight: -h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                };
+                let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+                let hbmp = CreateDIBSection(
+                    Some(hdc_mem),
+                    &bmi,
+                    DIB_RGB_COLORS,
+                    &mut bits_ptr,
+                    None,
+                    0,
+                )
+                .unwrap();
+                let old = SelectObject(hdc_mem, hbmp.into());
+                let px_slice = std::slice::from_raw_parts_mut(
+                    bits_ptr as *mut u8,
+                    (w * h * 4) as usize,
+                );
+                px_slice.fill(0);
+                let _ = PrintWindow(raw, hdc_mem.0 as isize, PW_RENDERFULLCONTENT);
+
+                let mut non_zero_caption_rgb_px = 0usize;
+                let mut sample_rgb = [0u8; 4];
+                sample_rgb.copy_from_slice(&px_slice[(10 * 480 + 10) * 4..(10 * 480 + 10) * 4 + 4]);
+                let mut sample_y22 = [0u8; 4];
+                sample_y22.copy_from_slice(&px_slice[(22 * 480 + 10) * 4..(22 * 480 + 10) * 4 + 4]);
+                for y in 0..24usize {
+                    for x in 0..480usize {
+                        let off = (y * 480 + x) * 4;
+                        // PrintWindow(PW_RENDERFULLCONTENT) 将透明区域输出为 BGRA=(0,0,0,255) 或 (0,0,0,0)，
+                        // 而经典标题栏会写入 COLOR_INACTIVECAPTION(#BFCDDB) / COLOR_WINDOWFRAME(#646464) 非零 RGB。
+                        if px_slice[off] != 0
+                            || px_slice[off + 1] != 0
+                            || px_slice[off + 2] != 0
+                        {
+                            non_zero_caption_rgb_px += 1;
+                        }
+                    }
+                }
+                SelectObject(hdc_mem, old);
+                let _ = DeleteObject(hbmp.into());
+                let _ = DeleteDC(hdc_mem);
+
+                assert_eq!(
+                    non_zero_caption_rgb_px, 0,
+                    "use_no_redir={use_no_redir}: 顶栏 480x24 区域绝不允许出现任何经典浅蓝标题栏 RGB 像素 (sample={sample_rgb:?}, y22={sample_y22:?})"
+                );
+
+                win_impl::hide_overlay_window_native(raw);
+                let _ = DestroyWindow(hwnd);
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_overlay_no_redirection_bitmap_dcomp_child_click_through_and_visibility() {
+        let _desktop_guard = WIN32_DESKTOP_WINDOW_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        use windows::core::{w, Interface};
+        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+        use windows::Win32::Graphics::Direct3D::{
+            D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL,
+            D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_11_0,
+        };
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+        };
+        use windows::Win32::Graphics::DirectComposition::{
+            DCompositionCreateDevice, IDCompositionDevice,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM,
+        };
+        use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+        use windows::Win32::Graphics::Gdi::{
+            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, BITMAPINFO,
+            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        };
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongW, RegisterClassExW,
+            WindowFromPoint, GWL_EXSTYLE, WINDOW_EX_STYLE, WNDCLASSEXW, WS_CAPTION, WS_CHILD,
+            WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED,
+            WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+            WS_EX_WINDOWEDGE, WS_SYSMENU, WS_VISIBLE,
+        };
+
+        #[link(name = "user32")]
+        extern "system" {
+            fn PrintWindow(hwnd: isize, hdc_blt: isize, n_flags: u32) -> i32;
+        }
+        const PW_RENDERFULLCONTENT: u32 = 0x0000_0002;
+
+        unsafe extern "system" fn dcomp_overlay_proc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+
+        unsafe {
+            let hinst = GetModuleHandleW(None).unwrap();
+            let cls = w!("BmNoRedirDcompChildOverlayTest");
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(dcomp_overlay_proc),
+                hInstance: hinst.into(),
+                lpszClassName: cls,
+                ..Default::default()
+            };
+            let _ = RegisterClassExW(&wc);
+
+            let top_hwnd = CreateWindowExW(
+                WS_EX_NOREDIRECTIONBITMAP | WS_EX_WINDOWEDGE | WS_EX_APPWINDOW,
+                cls,
+                w!("微风 Mini"),
+                WS_CAPTION | WS_CLIPSIBLINGS | WS_SYSMENU,
+                220,
+                140,
+                480,
+                228,
+                None,
+                None,
+                Some(hinst.into()),
+                None,
+            )
+            .unwrap();
+            let child_hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                cls,
+                w!(""),
+                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+                0,
+                0,
+                480,
+                228,
+                Some(top_hwnd),
+                None,
+                Some(hinst.into()),
+                None,
+            )
+            .unwrap();
+
+            // 模拟 WRY_WEBVIEW 子窗内部的 WebView2 DirectComposition 透明合成表面（仅绘制居中 332x34 胶囊）
+            let feature_levels = [D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0];
+            let mut d3d_dev_opt: Option<ID3D11Device> = None;
+            let mut d3d_ctx_opt: Option<ID3D11DeviceContext> = None;
+            let mut got_level = D3D_FEATURE_LEVEL(0);
+            let hw = D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                Default::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&feature_levels),
+                D3D11_SDK_VERSION,
+                Some(&mut d3d_dev_opt),
+                Some(&mut got_level),
+                Some(&mut d3d_ctx_opt),
+            );
+            if hw.is_err() {
+                D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_WARP,
+                    Default::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    Some(&feature_levels),
+                    D3D11_SDK_VERSION,
+                    Some(&mut d3d_dev_opt),
+                    Some(&mut got_level),
+                    Some(&mut d3d_ctx_opt),
+                )
+                .unwrap();
+            }
+            let d3d_dev = d3d_dev_opt.unwrap();
+            let d3d_ctx = d3d_ctx_opt.unwrap();
+            let dxgi_dev: IDXGIDevice = d3d_dev.cast().unwrap();
+            let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi_dev).unwrap();
+            let target = dcomp.CreateTargetForHwnd(child_hwnd, true).unwrap();
+            let root_visual = dcomp.CreateVisual().unwrap();
+            let pill_visual = dcomp.CreateVisual().unwrap();
+            let surface = dcomp
+                .CreateSurface(
+                    332,
+                    34,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_ALPHA_MODE_PREMULTIPLIED,
+                )
+                .unwrap();
+            let mut offset = POINT::default();
+            let tex: ID3D11Texture2D = surface.BeginDraw(None, &mut offset).unwrap();
+            let mut pill_bgra = vec![0u8; 332 * 34 * 4];
+            for px in pill_bgra.chunks_exact_mut(4) {
+                px[0] = 40;
+                px[1] = 80;
+                px[2] = 240;
+                px[3] = 255;
+            }
+            let upd_box = windows::Win32::Graphics::Direct3D11::D3D11_BOX {
+                left: offset.x as u32,
+                top: offset.y as u32,
+                front: 0,
+                right: offset.x as u32 + 332,
+                bottom: offset.y as u32 + 34,
+                back: 1,
+            };
+            d3d_ctx.UpdateSubresource(&tex, 0, Some(&upd_box), pill_bgra.as_ptr() as *const _, 332 * 4, 0);
+            surface.EndDraw().unwrap();
+            pill_visual.SetContent(&surface).unwrap();
+            pill_visual.SetOffsetX2(74.0).unwrap();
+            pill_visual.SetOffsetY2(0.0).unwrap();
+            root_visual.AddVisual(&pill_visual, false, None).unwrap();
+            target.SetRoot(&root_visual).unwrap();
+            dcomp.Commit().unwrap();
+
+            let raw = top_hwnd.0 as isize;
+            let _ = win_impl::enforce_frameless_overlay_popup_style_native(raw);
+            win_impl::show_overlay_window_native(raw, true);
+            win_impl::dwm_flush();
+
+            // 1. 穿透态：WS_EX_NOREDIRECTIONBITMAP + WS_EX_LAYERED + WS_EX_TRANSPARENT 均保持有效，命中必须穿透
+            let ex_ct = GetWindowLongW(top_hwnd, GWL_EXSTYLE) as u32;
+            assert_ne!(ex_ct & WS_EX_NOREDIRECTIONBITMAP.0, 0);
+            assert_ne!(ex_ct & WS_EX_LAYERED.0, 0);
+            assert_ne!(ex_ct & WS_EX_TRANSPARENT.0, 0);
+            assert_ne!(ex_ct & WS_EX_TOPMOST.0, 0);
+            assert_ne!(ex_ct & WS_EX_TOOLWINDOW.0, 0);
+
+            let hit_ct = WindowFromPoint(POINT {
+                x: 220 + 240,
+                y: 140 + 17,
+            });
+            assert!(
+                hit_ct != top_hwnd && hit_ct != child_hwnd,
+                "穿透态下 WS_EX_NOREDIRECTIONBITMAP + WS_EX_LAYERED | WS_EX_TRANSPARENT 必须放行鼠标命中"
+            );
+
+            // 检查 PrintWindow(PW_RENDERFULLCONTENT) 透明留白区与 DComp 胶囊可见性
+            let capture_counts = || -> (usize, usize) {
+                let hdc_mem = CreateCompatibleDC(None);
+                let mut bmi = BITMAPINFO::default();
+                bmi.bmiHeader = BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: 480,
+                    biHeight: -228,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                };
+                let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+                let hbmp = CreateDIBSection(
+                    Some(hdc_mem),
+                    &bmi,
+                    DIB_RGB_COLORS,
+                    &mut bits_ptr,
+                    None,
+                    0,
+                )
+                .unwrap();
+                let old = SelectObject(hdc_mem, hbmp.into());
+                let px = std::slice::from_raw_parts_mut(bits_ptr as *mut u8, 480 * 228 * 4);
+                px.fill(0);
+                let pw_ok = PrintWindow(raw, hdc_mem.0 as isize, PW_RENDERFULLCONTENT);
+                assert_ne!(pw_ok, 0, "PrintWindow(PW_RENDERFULLCONTENT) 应成功捕获合成结果");
+                let mut left_caption_px = 0usize;
+                for y in 0..24usize {
+                    for x in 0..64usize {
+                        let off = (y * 480 + x) * 4;
+                        if px[off] != 0 || px[off + 1] != 0 || px[off + 2] != 0 {
+                            left_caption_px += 1;
+                        }
+                    }
+                }
+                let mut pill_px = 0usize;
+                for y in 4..30usize {
+                    for x in 84..396usize {
+                        let off = (y * 480 + x) * 4;
+                        if px[off + 2] > 180 {
+                            pill_px += 1;
+                        }
+                    }
+                }
+                SelectObject(hdc_mem, old);
+                let _ = DeleteObject(hbmp.into());
+                let _ = DeleteDC(hdc_mem);
+                (left_caption_px, pill_px)
+            };
+
+            let (ct_cap, ct_pill) = capture_counts();
+            assert_eq!(ct_cap, 0, "穿透态左侧留白区不得有任何经典标题栏像素");
+
+            // 2. 切回交互态：剥离 WS_EX_LAYERED | WS_EX_TRANSPARENT，完整保留 WS_EX_NOREDIRECTIONBITMAP，命中回到本窗
+            let _ = win_impl::set_overlay_click_through_raw(raw, false);
+            win_impl::dwm_flush();
+            let ex_int = GetWindowLongW(top_hwnd, GWL_EXSTYLE) as u32;
+            assert_ne!(ex_int & WS_EX_NOREDIRECTIONBITMAP.0, 0);
+            assert_eq!(ex_int & (WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0), 0);
+
+            let hit_int = WindowFromPoint(POINT {
+                x: 220 + 240,
+                y: 140 + 17,
+            });
+            assert!(
+                hit_int == top_hwnd || hit_int == child_hwnd,
+                "交互态下鼠标必须重新命中悬浮窗或子 WebView 容器"
+            );
+
+            let (int_cap, int_pill) = capture_counts();
+            assert_eq!(int_cap, 0, "交互态左侧留白区不得有任何经典标题栏像素");
+            assert!(
+                int_pill > 0 && ct_pill > 0,
+                "WS_EX_NOREDIRECTIONBITMAP + WS_CHILD DComp 胶囊在穿透态(ct_pill={ct_pill})与交互态(int_pill={int_pill})均必须真实可见！"
+            );
+
+            // 3. 全屏礼让与隐藏后同样不得丢失 WS_EX_NOREDIRECTIONBITMAP
+            win_impl::yield_overlay_window_for_fullscreen_native(raw);
+            assert_ne!(
+                (GetWindowLongW(top_hwnd, GWL_EXSTYLE) as u32) & WS_EX_NOREDIRECTIONBITMAP.0,
+                0
+            );
+            win_impl::hide_overlay_window_native(raw);
+            assert_ne!(
+                (GetWindowLongW(top_hwnd, GWL_EXSTYLE) as u32) & WS_EX_NOREDIRECTIONBITMAP.0,
+                0
+            );
+
+            drop(surface);
+            drop(pill_visual);
+            drop(root_visual);
+            drop(target);
+            drop(dcomp);
+            let _ = DestroyWindow(child_hwnd);
+            let _ = DestroyWindow(top_hwnd);
         }
     }
 }
