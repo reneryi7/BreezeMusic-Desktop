@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+---
+
+## [1.1.2] - 2026-11-27
+
+**BreezeMusic Desktop `v1.1.2`** 带来沉浸播放页与独立透明桌面悬浮歌词双端同源 120Hz 纯 GPU 四套逐字动效引擎与五套高定场景预设、全新动态实时预览工作台及 SVG 圆角抗锯齿无底浮空轮廓，精细打磨主窗口进出 Mini 小窗丝滑空间过渡曲线，并彻底根治播放页歌词 3Hz 周期性微抖、英文折行异常缩进、进入小窗蓝框闪屏及透明悬浮子窗顶部浅蓝标题栏条带残留问题。
+
 ### 新增 (Added)
 - **独立透明桌面悬浮歌词全面翻新（对齐沉浸播放页纯 GPU 引擎与五套高定预设）**：
   - 将 [DesktopLyricWindow.vue](src/components/DesktopLyricWindow.vue) 重构为复用 [lyricMotionEngine.ts](src/utils/lyricMotionEngine.ts) 的纯 GPU 差量合成管线（`WordPhysicsBank` + 静态 300% 宽羽化遮罩 + 静态预光栅辉光伪层 + 整行连贯 OKLab 双色流光），支持同源 4 套逐字动效引擎（桌面端自动收敛微浮幅度）、360ms 退场余韵、液态光珠间奏倒计时、英文词簇与和声轻量化排版，以及暂停收敛后零开销自动休眠。
@@ -36,7 +42,7 @@
   - 为 `mini_player` 与 `desktop_lyric` 开启 Tauri 原生 `.no_redirection_bitmap(true)`（`WS_EX_NOREDIRECTIONBITMAP`，从内核层彻底消除 GDI 重定向位图并跳过 `DwmEnableBlurBehindWindow`），同时在 `window_transition.rs` 新增幂等的 Win32 无框子类防火墙（`install_frameless_overlay_subclass_native` + `SetWindowTheme("", "")` + `DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED`），拦截 `WM_NCPAINT`/`WM_NCCALCSIZE`/`WM_ERASEBKGND`/`WM_SETTINGCHANGE`、原地净化 `WM_STYLECHANGING` 阻止 `WS_CAPTION` 回注，并在 `WM_NCACTIVATE` 中透传真实 `wparam` 维持展开卡点击外部自动收起、同时改写 `lparam = -1` 禁绘非客户区。
 - **彻底根治播放页歌词在播放与暂停态均持续触发的 ~0.33s（~3 Hz）周期性 1px 锯齿抖动**：
   - 将 `computeLineTargetScrollTop` 目标位置严格钳制并整像素对齐，消除此前“浮点目标值 vs 收敛强行 `Math.round` 落地”导致 77% 目标行落入弹簧锯齿死循环的根因，移除强注每行的 `subpixelResidual` 偏移，并在暂停静止收敛后对歌词物理链路与 DOM 写入实施零开销休眠门控。
-  - 为歌词文本流启用 `text-rendering: geometricPrecision`、移除静态 `will-change: transform` 位图锁定、整数化静止行偏移并补充视口 Resize 同步，消除 Windows DirectWrite 缩放重光栅微抖。
+  - 为歌词文本流启用 `text-rendering: geometricPrecision`、移除静态 `will-change: transform` 位图锁定、整数化静止行偏移并补充视口 Resize 同步，消除 Windows DirectWrite 缩放重光栅微抖；同步修复全新配置下播放页歌词辉光强度读取 `null` 被隐式归零的隐患。
 - **修复英文 KRC 多行折行行首异常缩进与单词拦腰截断**：在 `lyricMotionEngine.ts` 新增 `normalizeLyricLinePresentation` 词簇与空白规范化引擎，改用原生内联文本流 + 不可断行拉丁词簇，彻底根除前导空格在 flex 折行时导致的第二行向右缩进（如 `  my sword`）。
 - **彻底根除默认窗口与最大化窗口进入 Mini 小窗时的经典 Windows Aero Basic 蓝框标题栏闪屏**：
   - 定位并修复 `show_mini_player_window_safely` 调用 `tao::win.show()` 触发 `WindowFlags::apply_diff` 覆写 `WS_CAPTION | WS_SYSMENU | WS_EX_WINDOWEDGE | WS_EX_APPWINDOW` 并激活绘制经典非客户区边框的底层缺陷。
@@ -149,7 +155,8 @@
   - 基于 Rust + Tauri 2.0 实现端侧协议通信、本地 Range 音频流代理 (`AudioStreamProxy`) 与 FLAC/MP3/OGG 元数据及封面处理。
   - 采用 Windows DPAPI + AES-256-CBC / HMAC-SHA256 本地凭证加密存储、`zeroize` 内存清零、代理反 SSRF 校验及多窗体 IPC 权限守卫。
 
-[Unreleased]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/reneryi7/BreezeMusic-Desktop/compare/v1.0.0...v1.0.1

@@ -1,7 +1,7 @@
 {
   "name": "breezemusic-windows",
   "private": true,
-  "version": "1.1.1",
+  "version": "1.1.2",
   "license": "GPL-3.0",
   "description": "BreezeMusic Windows Desktop Client (Rust + Tauri 2.0 + Vue 3 + TypeScript)",
   "type": "module",
