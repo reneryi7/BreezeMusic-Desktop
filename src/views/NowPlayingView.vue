@@ -48,9 +48,13 @@ import {
 import {
   computeLineTargetRest,
   LyricLineCascadeBank,
+  normalizeLyricLinePresentation,
   stepSpringScalar,
+  sweepToMaskPositionPct,
   WordPhysicsBank,
   type LineCascadeOptions,
+  type NormalizedLyricLinePresentation,
+  type NormalizedLyricWord,
   type WordPhysicsOptions,
 } from "../utils/lyricMotionEngine";
 import NowPlayingCoverStage from "../components/NowPlayingCoverStage.vue";
@@ -838,7 +842,8 @@ function updateScrubFromClientX(clientX: number) {
     Math.min(1, (clientX - rect.left) / rect.width)
   );
   syncTimelineProgressDom(scrubFraction.value, true);
-  syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
+  markLyricDirty();
+  lyricWordsSettled = syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
 }
 
 function handleTimelineMouseMove(e: MouseEvent) {
@@ -874,7 +879,8 @@ function handleProgressPointerDown(e: MouseEvent) {
     syncDisplayElapsedSec(targetMs);
     isScrubbingProgress.value = false;
     syncTimelineProgressDom(computeProgressFrac(targetMs), true);
-    syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
+    markLyricDirty();
+    lyricWordsSettled = syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
     store.seekToMs(targetMs);
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", onUp);
@@ -904,10 +910,12 @@ function triggerSkipNudge(isNext: boolean) {
   }
 }
 
-// ================= 7. 「光晕浮升 · 声浪呼吸」逐字弹簧 & 120Hz 行级瀑布错峰滚动引擎 =================
+// ================= 7. 四套纯 GPU 逐字动效引擎 & 120Hz 零抖动物理滚屏系统 =================
 const lyricViewportRef = ref<HTMLElement | null>(null);
 const hoveredLyricIndex = ref<number | null>(null);
 const isUserScrollingLyrics = ref(false);
+const manualCenterLineIdx = ref<number>(-1);
+const isHoveringManualGuide = ref(false);
 let lyricScrubResetTimer: number | null = null;
 let breathingDotPhaseVal = 0;
 const activeLineIndex = ref<number>(-1);
@@ -922,18 +930,39 @@ let cachedLeavingLineIdx = -1;
 let cachedLeavingWordEls: HTMLElement[] = [];
 let cachedInterludeDotEls: HTMLElement[] = [];
 
-// 每字独立物理弹簧池（活跃行 + 380ms 退场余韵行）与行级瀑布错峰物理池
+// 每字独立物理弹簧池（活跃行 + 360ms 退场余韵行）与行级瀑布错峰物理池
 const activeWordBank = new WordPhysicsBank();
 const leavingWordBank = new WordPhysicsBank();
 const lineCascadeBank = new LyricLineCascadeBank();
 let leavingStartedWallMs = 0;
 let prevCascadeWindowIndices = new Set<number>();
 
-// 120Hz 临界阻尼弹簧滚动状态（配子像素残差补偿消除 1px 收尾微抖）
+// 120Hz 临界阻尼弹簧滚动状态（严格整像素目标 + 落地归零守卫，100% 消除锯齿振荡）
 let lyricTargetScrollTop = 0;
 let lyricCurrentScrollTop = 0;
 let lyricScrollVelocity = 0;
 let lyricScrollInitialized = false;
+
+// 暂停静止零功耗 / 零 DOM 覆写休眠门控
+let lyricWordsSettled = true;
+let lyricScrollSettled = true;
+let lyricCascadeSettled = true;
+let lyricForceSyncNextTick = true;
+
+function markLyricDirty() {
+  lyricForceSyncNextTick = true;
+}
+
+const isMaskSweepMotionStyle = computed(
+  () => store.lyricMotionStyle !== "luminous_bloom"
+);
+
+const manualCenterLine = computed<LyricLine | null>(() => {
+  const lines = store.currentLyric?.lines;
+  const idx = manualCenterLineIdx.value;
+  if (!lines || idx < 0 || idx >= lines.length) return null;
+  return lines[idx];
+});
 
 function getEffectiveLyricTimeMs(): number {
   const baseMs =
@@ -968,6 +997,7 @@ function getWordPhysicsOpts(): WordPhysicsOptions {
   return {
     wordByWord: tok.wordByWord,
     bounceEnabled: store.lyricWordBounceEnabled !== false,
+    motionStyle: store.lyricMotionStyle || "silk_flow",
     motionLevel: motion.effectiveLevel,
     glowRatio: tok.glowRatio,
     isLightStage: store.isNowPlayingLightStage,
@@ -979,6 +1009,7 @@ function getLineCascadeOpts(): LineCascadeOptions {
   return {
     focusScaleEnabled: store.lyricFocusScaleEnabled !== false,
     focusScaleRatio: store.lyricFocusScaleRatio || 1.08,
+    scrollCascadeMode: store.lyricScrollCascadeMode || "wave",
     motionLevel: motion.effectiveLevel,
   };
 }
@@ -990,36 +1021,81 @@ function clearWordElementVars(els: HTMLElement[]) {
     el.style.removeProperty("--kw-y");
     el.style.removeProperty("--kw-s");
     el.style.removeProperty("--kw-lit");
+    el.style.removeProperty("--kw-mask-x");
+    el.style.removeProperty("--kw-base-fade");
     el.style.removeProperty("--kw-glow");
   }
 }
 
-function flushWordBankToDom(bank: WordPhysicsBank, els: HTMLElement[], forceAll = false) {
+function flushWordBankToDom(
+  bank: WordPhysicsBank,
+  els: HTMLElement[],
+  forceAll = false,
+) {
   const n = Math.min(bank.count, els.length);
+  const useSweepMask = isMaskSweepMotionStyle.value;
   for (let i = 0; i < n; i++) {
     const el = els[i];
     if (!el) continue;
 
     const y = bank.y[i];
-    if (forceAll || Number.isNaN(bank.writtenY[i]) || Math.abs(y - bank.writtenY[i]) >= 0.025) {
+    if (
+      forceAll ||
+      Number.isNaN(bank.writtenY[i]) ||
+      Math.abs(y - bank.writtenY[i]) >= 0.025
+    ) {
       bank.writtenY[i] = y;
       el.style.setProperty("--kw-y", `${y.toFixed(2)}px`);
     }
 
     const s = bank.scale[i];
-    if (forceAll || Number.isNaN(bank.writtenScale[i]) || Math.abs(s - bank.writtenScale[i]) >= 0.0008) {
+    if (
+      forceAll ||
+      Number.isNaN(bank.writtenScale[i]) ||
+      Math.abs(s - bank.writtenScale[i]) >= 0.0008
+    ) {
       bank.writtenScale[i] = s;
       el.style.setProperty("--kw-s", s.toFixed(4));
     }
 
     const lit = bank.lit[i];
-    if (forceAll || Number.isNaN(bank.writtenLit[i]) || Math.abs(lit - bank.writtenLit[i]) >= 0.004) {
+    const sweep = bank.sweep[i];
+    const litChanged =
+      forceAll ||
+      Number.isNaN(bank.writtenLit[i]) ||
+      Math.abs(lit - bank.writtenLit[i]) >= 0.004;
+    const sweepChanged =
+      forceAll ||
+      Number.isNaN(bank.writtenSweep[i]) ||
+      Math.abs(sweep - bank.writtenSweep[i]) >= 0.003;
+
+    if (litChanged) {
       bank.writtenLit[i] = lit;
       el.style.setProperty("--kw-lit", lit.toFixed(3));
     }
 
+    if (sweepChanged) {
+      bank.writtenSweep[i] = sweep;
+      el.style.setProperty("--kw-mask-x", `${sweepToMaskPositionPct(sweep)}%`);
+    }
+
+    if (litChanged || sweepChanged) {
+      // 宽羽化扫光模式下保留未扫过半字的 100% 未唱基色，待扫满后再平滑隐去底层避免边缘发灰
+      const sweepCover = !useSweepMask
+        ? 1
+        : sweep <= 0.84
+        ? 0
+        : Math.min(1, (sweep - 0.84) / 0.14);
+      const baseFade = lit * sweepCover * 0.92;
+      el.style.setProperty("--kw-base-fade", baseFade.toFixed(3));
+    }
+
     const glow = bank.glow[i];
-    if (forceAll || Number.isNaN(bank.writtenGlow[i]) || Math.abs(glow - bank.writtenGlow[i]) >= 0.004) {
+    if (
+      forceAll ||
+      Number.isNaN(bank.writtenGlow[i]) ||
+      Math.abs(glow - bank.writtenGlow[i]) >= 0.004
+    ) {
       bank.writtenGlow[i] = glow;
       el.style.setProperty("--kw-glow", glow.toFixed(3));
     }
@@ -1088,10 +1164,11 @@ function ensureActiveLyricDomCache(lineIdx: number) {
   cachedActiveWordEls = spans;
   activeWordBank.invalidateDomCache();
   cachedInterludeDotEls = Array.from(
-    lineEl.querySelectorAll<HTMLElement>(".np-interlude-dot")
+    lineEl.querySelectorAll<HTMLElement>(".np-interlude-bead")
   );
 }
 
+/** 计算严格钳制且整像素对齐的目标滚动位，彻底根绝浮点目标 / 整像素落地冲突 */
 function computeLineTargetScrollTop(lineIdx: number): number | null {
   const viewport = lyricViewportRef.value;
   if (!viewport) return null;
@@ -1099,10 +1176,10 @@ function computeLineTargetScrollTop(lineIdx: number): number | null {
   const lineEl = getCachedLineEl(lineIdx);
   if (!lineEl) return null;
   const viewportH = viewport.clientHeight;
-  return Math.max(
-    0,
-    lineEl.offsetTop - viewportH * 0.41 + lineEl.offsetHeight * 0.5
-  );
+  const maxScroll = Math.max(0, viewport.scrollHeight - viewportH);
+  const rawTarget =
+    lineEl.offsetTop - viewportH * 0.41 + lineEl.offsetHeight * 0.5;
+  return Math.round(Math.max(0, Math.min(maxScroll, rawTarget)));
 }
 
 function clearCascadeInlineTransforms() {
@@ -1123,18 +1200,28 @@ function scrollToActiveLyricLine(smooth = true) {
   const targetTop = computeLineTargetScrollTop(activeIdx);
   if (targetTop === null) return;
   lyricTargetScrollTop = targetTop;
+  markLyricDirty();
 
-  if (!smooth || !lyricScrollInitialized) {
+  const motion = getMotionRuntimeProfile();
+  if (
+    !smooth ||
+    !lyricScrollInitialized ||
+    motion.effectiveLevel === "none" ||
+    store.lyricScrollCascadeMode === "instant"
+  ) {
     lyricCurrentScrollTop = targetTop;
     lyricScrollVelocity = 0;
-    viewport.scrollTop = Math.round(targetTop);
+    viewport.scrollTop = targetTop;
     lyricScrollInitialized = true;
+    lyricScrollSettled = true;
     lineCascadeBank.clear();
     clearCascadeInlineTransforms();
+  } else {
+    lyricScrollSettled = false;
   }
 }
 
-/** 换行核心编排：无缝移交 380ms 退场余韵 + 触发行级弹性瀑布错峰滚动 */
+/** 换行核心编排：无缝移交 360ms 退场余韵 + 触发行级弹性瀑布错峰滚动 */
 function transitionActiveLyricLine(
   prevIdx: number,
   nextIdx: number,
@@ -1143,6 +1230,7 @@ function transitionActiveLyricLine(
 ) {
   const lines = store.currentLyric?.lines || [];
   const motion = getMotionRuntimeProfile();
+  markLyricDirty();
 
   // 1. 若有正在退场的更早一行，先干净清理其残留变量
   if (cachedLeavingWordEls.length > 0 && cachedLeavingLineIdx !== prevIdx) {
@@ -1179,13 +1267,13 @@ function transitionActiveLyricLine(
     if (isSeekOrJump || motion.effectiveLevel === "none") {
       activeWordBank.snapToTime(nextLine.startTimeMs, nextWords, posMs, getWordPhysicsOpts());
     } else {
-      // 顺序换行从 0 平滑起跳，再由后续帧弹簧托举，丝滑无突兀闪现
       activeWordBank.ensureSize(nextWords.length);
       activeWordBank.y.fill(0);
       activeWordBank.vy.fill(0);
       activeWordBank.scale.fill(1);
       activeWordBank.vScale.fill(0);
-      activeWordBank.lit.fill(0);
+      activeWordBank.lit.fill(isMaskSweepMotionStyle.value ? 1 : 0);
+      activeWordBank.sweep.fill(isMaskSweepMotionStyle.value ? 0 : 1);
       activeWordBank.glow.fill(0);
       activeWordBank.invalidateDomCache();
     }
@@ -1193,19 +1281,25 @@ function transitionActiveLyricLine(
     activeWordBank.ensureSize(0);
   }
 
-  // 4. 触发 AMLL 式行级弹性瀑布错峰脉冲并推进滚动目标
+  // 4. 触发行级滚屏与瀑布错峰脉冲
   const nextTargetTop = computeLineTargetScrollTop(nextIdx);
   if (nextTargetTop !== null && !isUserScrollingLyrics.value) {
     const scrollDelta = nextTargetTop - lyricCurrentScrollTop;
     lyricTargetScrollTop = nextTargetTop;
-    if (!lyricScrollInitialized) {
+    if (
+      !lyricScrollInitialized ||
+      motion.effectiveLevel === "none" ||
+      store.lyricScrollCascadeMode === "instant"
+    ) {
       lyricCurrentScrollTop = nextTargetTop;
       lyricScrollVelocity = 0;
       if (lyricViewportRef.value) {
-        lyricViewportRef.value.scrollTop = Math.round(nextTargetTop);
+        lyricViewportRef.value.scrollTop = nextTargetTop;
       }
       lyricScrollInitialized = true;
+      lyricScrollSettled = true;
     } else {
+      lyricScrollSettled = false;
       lineCascadeBank.triggerLineAdvance(
         prevIdx,
         nextIdx,
@@ -1213,6 +1307,7 @@ function transitionActiveLyricLine(
         lines.length,
         getLineCascadeOpts(),
       );
+      lyricCascadeSettled = false;
     }
   }
 
@@ -1227,8 +1322,12 @@ function transitionActiveLyricLine(
       const accurateTop = computeLineTargetScrollTop(nextIdx);
       if (accurateTop !== null) {
         lyricTargetScrollTop = accurateTop;
+        if (accurateTop !== lyricCurrentScrollTop) {
+          lyricScrollSettled = false;
+        }
       }
     }
+    markLyricDirty();
   });
 }
 
@@ -1240,13 +1339,16 @@ watch(
     lineCascadeBank.clear();
     clearCascadeInlineTransforms();
     cachedLineEls = [];
+    manualCenterLineIdx.value = -1;
     const posMs = getEffectiveLyricTimeMs();
     const initialIdx = findLyricLineIndexAt(posMs);
     activeLineIndex.value = initialIdx;
+    markLyricDirty();
     nextTick(() => {
       refreshCachedLineElements();
       scrollToActiveLyricLine(false);
-      syncLyricRealtimeDom(posMs, 0.016, true);
+      lyricWordsSettled = syncLyricRealtimeDom(posMs, 0.016, true);
+      lyricCascadeSettled = stepAndApplyLineCascadeDom(0.016);
     });
   }
 );
@@ -1255,15 +1357,20 @@ watch(
   [
     () => store.lyricFontSize,
     () => store.lyricLineSpacing,
+    () => store.lyricLetterSpacing,
+    () => store.lyricFontFamily,
+    () => store.lyricHarmonyStyleEnabled,
     () => store.showTranslation,
     () => store.showPhonetic,
     () => store.playerStageStyle,
   ],
   () => {
+    markLyricDirty();
     nextTick(() => {
       refreshCachedLineElements();
       scrollToActiveLyricLine(true);
-      syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
+      lyricWordsSettled = syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
+      lyricCascadeSettled = stepAndApplyLineCascadeDom(0.016);
     });
   }
 );
@@ -1274,6 +1381,8 @@ watch(
     () => store.lyricSungMode,
     () => store.lyricWordByWord,
     () => store.lyricWordBounceEnabled,
+    () => store.lyricMotionStyle,
+    () => store.lyricScrollCascadeMode,
     () => store.lyricFocusScaleEnabled,
     () => store.lyricFocusScaleRatio,
     () => store.lyricGlowIntensity,
@@ -1283,13 +1392,18 @@ watch(
     () => store.lyricCustomPrimaryHex,
     () => store.lyricCustomSecondaryHex,
     () => store.lyricFontWeight,
+    () => store.lyricOffsetMs,
+    () => store.bluetoothDelayMs,
     () => store.isNowPlayingLightStage,
     () => store.effectiveCoverPalette.dominantAccent,
     () => store.effectiveCoverPalette.secondaryAccent,
   ],
   () => {
+    markLyricDirty();
     nextTick(() => {
-      syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
+      activeWordBank.invalidateDomCache();
+      lyricWordsSettled = syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
+      lyricCascadeSettled = stepAndApplyLineCascadeDom(0.016);
     });
   }
 );
@@ -1298,6 +1412,7 @@ watch(
   () => store.currentSong?.hash,
   () => {
     isUserScrollingLyrics.value = false;
+    manualCenterLineIdx.value = -1;
     lyricScrollInitialized = false;
     lyricScrollVelocity = 0;
     settledSeekTargetMs.value = -1;
@@ -1315,37 +1430,114 @@ watch(
     activeLineIndex.value = findLyricLineIndexAt(posMs);
     syncDisplayElapsedSec(store.currentPositionMs);
     syncTimelineProgressDom(computeProgressFrac(store.currentPositionMs), true);
+    markLyricDirty();
     nextTick(() => {
       refreshCachedLineElements();
       scrollToActiveLyricLine(false);
-      syncLyricRealtimeDom(posMs, 0.016, true);
+      lyricWordsSettled = syncLyricRealtimeDom(posMs, 0.016, true);
+      lyricCascadeSettled = stepAndApplyLineCascadeDom(0.016);
     });
   }
 );
+
+function updateManualCenterLineFromViewport() {
+  const viewport = lyricViewportRef.value;
+  if (!viewport) return;
+  if (cachedLineEls.length === 0) refreshCachedLineElements();
+  const els = cachedLineEls;
+  if (els.length === 0) {
+    manualCenterLineIdx.value = -1;
+    return;
+  }
+  const focusY = viewport.scrollTop + viewport.clientHeight * 0.41;
+  let lo = 0;
+  let hi = els.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    const midCenter = els[mid].offsetTop + els[mid].offsetHeight * 0.5;
+    if (midCenter < focusY) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  let bestIdx = lo;
+  if (lo > 0) {
+    const distCur = Math.abs(els[lo].offsetTop + els[lo].offsetHeight * 0.5 - focusY);
+    const distPrev = Math.abs(
+      els[lo - 1].offsetTop + els[lo - 1].offsetHeight * 0.5 - focusY
+    );
+    if (distPrev < distCur) bestIdx = lo - 1;
+  }
+  if (manualCenterLineIdx.value !== bestIdx) {
+    manualCenterLineIdx.value = bestIdx;
+  }
+}
+
+function scheduleManualScrollAutoReturn() {
+  if (lyricScrubResetTimer) window.clearTimeout(lyricScrubResetTimer);
+  const autoReturnMs = Math.max(1500, (store.lyricAutoReturnSec || 3) * 1000);
+  lyricScrubResetTimer = window.setTimeout(() => {
+    if (isHoveringManualGuide.value) {
+      scheduleManualScrollAutoReturn();
+      return;
+    }
+    handleReturnToActiveLyric();
+  }, autoReturnMs);
+}
 
 function handleUserLyricWheel() {
   const viewport = lyricViewportRef.value;
   if (viewport) {
     lyricCurrentScrollTop = viewport.scrollTop;
-    lyricTargetScrollTop = viewport.scrollTop;
+    lyricTargetScrollTop = Math.round(viewport.scrollTop);
     lyricScrollVelocity = 0;
+    lyricScrollSettled = true;
   }
   lineCascadeBank.dampenForUserScroll();
   isUserScrollingLyrics.value = true;
-  if (lyricScrubResetTimer) window.clearTimeout(lyricScrubResetTimer);
-  const autoReturnMs = Math.max(1500, (store.lyricAutoReturnSec || 3) * 1000);
-  lyricScrubResetTimer = window.setTimeout(() => {
-    if (lyricViewportRef.value) {
-      lyricCurrentScrollTop = lyricViewportRef.value.scrollTop;
-      lyricScrollVelocity = 0;
-    }
-    isUserScrollingLyrics.value = false;
-    scrollToActiveLyricLine(true);
-  }, autoReturnMs);
+  markLyricDirty();
+  updateManualCenterLineFromViewport();
+  scheduleManualScrollAutoReturn();
 }
 
-function handleClickLyricLine(line: LyricLine) {
-  if (!store.lyricClickSeekEnabled) return;
+function handleLyricViewportScroll() {
+  if (!isUserScrollingLyrics.value) return;
+  updateManualCenterLineFromViewport();
+}
+
+function handleReturnToActiveLyric() {
+  if (lyricScrubResetTimer) {
+    window.clearTimeout(lyricScrubResetTimer);
+    lyricScrubResetTimer = null;
+  }
+  isHoveringManualGuide.value = false;
+  if (lyricViewportRef.value) {
+    lyricCurrentScrollTop = lyricViewportRef.value.scrollTop;
+    lyricScrollVelocity = 0;
+  }
+  isUserScrollingLyrics.value = false;
+  manualCenterLineIdx.value = -1;
+  scrollToActiveLyricLine(true);
+}
+
+function handleSeekToManualCenterLine() {
+  const line = manualCenterLine.value;
+  if (!line) {
+    handleReturnToActiveLyric();
+    return;
+  }
+  if (lyricScrubResetTimer) {
+    window.clearTimeout(lyricScrubResetTimer);
+    lyricScrubResetTimer = null;
+  }
+  isHoveringManualGuide.value = false;
+  manualCenterLineIdx.value = -1;
+  handleClickLyricLine(line, true);
+}
+
+function handleClickLyricLine(line: LyricLine, bypassSetting = false) {
+  if (!bypassSetting && !store.lyricClickSeekEnabled) return;
   const targetMs = Math.max(
     0,
     line.startTimeMs - store.lyricOffsetMs + store.bluetoothDelayMs
@@ -1361,6 +1553,7 @@ function handleClickLyricLine(line: LyricLine) {
     lyricScrollVelocity = 0;
   }
   isUserScrollingLyrics.value = false;
+  manualCenterLineIdx.value = -1;
   const effMs = getEffectiveLyricTimeMs();
   const prevIdx = activeLineIndex.value;
   const nextIdx = findLyricLineIndexAt(effMs);
@@ -1405,16 +1598,22 @@ function getLyricLineContainerStyle(idx: number) {
     store.lyricFocusScaleRatio || 1.08,
   );
 
-  // 仅歌词非当前行可启用景深模糊（关闭时全屏零模糊）
+  const isManualFocused =
+    isUserScrollingLyrics.value && manualCenterLineIdx.value === idx;
+
+  // 仅歌词非当前行且非手动聚焦行可启用景深模糊（关闭时全屏零模糊）
   const blurPx =
-    !isCurrent && store.lyricBlurEnabled && hoveredLyricIndex.value !== idx
+    !isCurrent &&
+    !isManualFocused &&
+    store.lyricBlurEnabled &&
+    hoveredLyricIndex.value !== idx
       ? Math.min(dist * 1.05 * store.lyricBlurIntensity, 4.5)
       : 0;
 
   const typo = isCurrent ? lyricTypographyActive.value : lyricTypographyInactive.value;
 
   return {
-    opacity: hoveredLyricIndex.value === idx ? 0.96 : alpha,
+    opacity: hoveredLyricIndex.value === idx || isManualFocused ? 0.96 : alpha,
     "--np-line-rest-y": `${rest.floatY.toFixed(2)}px`,
     "--np-line-rest-s": rest.scale.toFixed(4),
     transformOrigin:
@@ -1488,10 +1687,31 @@ function buildInterpolatedLineWords(
   });
 }
 
-const resolvedLyricWordsList = computed<LyricWord[][]>(() => {
+const resolvedLyricPresentations = computed<NormalizedLyricLinePresentation[]>(() => {
   const lines = store.currentLyric?.lines || [];
-  return lines.map((line, i) => buildInterpolatedLineWords(line, lines[i + 1]));
+  return lines.map((line, i) =>
+    normalizeLyricLinePresentation(
+      buildInterpolatedLineWords(line, lines[i + 1]),
+      line.text
+    )
+  );
 });
+
+const resolvedLyricWordsList = computed<NormalizedLyricWord[][]>(() =>
+  resolvedLyricPresentations.value.map((p) => p.words)
+);
+
+function getWordLitStyle(w: NormalizedLyricWord): Record<string, string> {
+  const tok = karaokeRenderTokens.value;
+  if (tok.isSolid) {
+    return {};
+  }
+  const c0 = lerpOklabHex(tok.pearlPrimary, tok.pearlSecondary, w.lineStartFrac);
+  const c1 = lerpOklabHex(tok.pearlPrimary, tok.pearlSecondary, w.lineEndFrac);
+  return {
+    backgroundImage: `linear-gradient(108deg, ${c0} 0%, ${c1} 100%)`,
+  };
+}
 
 function getTranslationLineStyle(idx: number) {
   const isCurrent = idx === activeLineIndex.value;
@@ -1609,6 +1829,7 @@ const karaokeRenderTokens = computed(() => {
   return {
     primary,
     secondary,
+    isSolid,
     midDotColor,
     dimDotColor: palette.value.lyricInactiveRgba || "rgba(255, 255, 255, 0.28)",
     pearlPrimary,
@@ -1659,27 +1880,28 @@ function getInterludeDotStyle(idx: number, dotIndex: number) {
   if (!curr || !next) return {};
   const currEnd = getResolvedLineEndMs(idx);
   const gapMs = Math.max(1, next.startTimeMs - currEnd);
-  const totalProg = Math.max(
-    0,
-    Math.min(1, (getEffectiveLyricTimeMs() - currEnd) / gapMs)
-  );
-  const segStart = dotIndex / 3;
-  const segEnd = (dotIndex + 1) / 3;
-  const dotProg = Math.max(
-    0,
-    Math.min(1, (totalProg - segStart) / (segEnd - segStart))
-  );
+  const posMs = getEffectiveLyricTimeMs();
+  const totalProg = Math.max(0, Math.min(1, (posMs - currEnd) / gapMs));
+  const remainingMs = Math.max(0, next.startTimeMs - posMs);
+  const cueShrink =
+    remainingMs < 950 ? Math.max(0.18, remainingMs / 950) : 1;
+  const dotProg = Math.max(0, Math.min(1, (totalProg - dotIndex / 3) * 3));
   const tok = karaokeRenderTokens.value;
   const dotColor =
     dotIndex === 0 ? tok.primary : dotIndex === 1 ? tok.midDotColor : tok.secondary;
-  const wave = Math.sin(breathingDotPhaseVal - dotIndex * 0.75);
-  const ty = -2.2 * Math.max(0, wave) * (0.35 + 0.65 * dotProg);
-  const s = 1 + 0.14 * Math.max(0, wave) * dotProg;
+  const wave = 0.5 + 0.5 * Math.sin(breathingDotPhaseVal - dotIndex * 0.85);
+  const ty = -2.2 * wave * (0.28 + 0.72 * dotProg) * cueShrink;
+  const sx = (0.88 + 0.36 * dotProg + 0.14 * wave * dotProg) * (0.55 + 0.45 * cueShrink);
+  const sy = (0.88 + 0.18 * dotProg + 0.12 * wave * dotProg) * (0.55 + 0.45 * cueShrink);
 
   return {
-    color: dotProg > 0.35 ? dotColor : tok.dimDotColor,
-    transform: `translateY(${ty.toFixed(2)}px) scale(${s.toFixed(3)})`,
-    opacity: 0.45 + 0.55 * dotProg,
+    background: dotProg > 0.2 ? dotColor : tok.dimDotColor,
+    boxShadow:
+      dotProg > 0.35
+        ? `0 0 ${Math.round(10 * dotProg * cueShrink)}px ${hexWithAlpha(dotColor, 0.58 * dotProg)}`
+        : "none",
+    transform: `translate3d(0, ${ty.toFixed(2)}px, 0) scale(${sx.toFixed(3)}, ${sy.toFixed(3)})`,
+    opacity: ((0.35 + 0.65 * dotProg) * cueShrink).toFixed(3),
   };
 }
 
@@ -1766,24 +1988,37 @@ function syncLyricRealtimeDom(
     if (cachedInterludeDotEls.length !== 3 || !cachedInterludeDotEls[0]?.isConnected) {
       const lineEl = getCachedLineEl(nextIdx);
       cachedInterludeDotEls = lineEl
-        ? Array.from(lineEl.querySelectorAll<HTMLElement>(".np-interlude-dot"))
+        ? Array.from(lineEl.querySelectorAll<HTMLElement>(".np-interlude-bead"))
         : [];
     }
     if (cachedInterludeDotEls.length === 3 && nextIdx + 1 < lines.length) {
       const currEnd = getResolvedLineEndMs(nextIdx);
-      const gapMs = Math.max(1, lines[nextIdx + 1].startTimeMs - currEnd);
+      const nextStart = lines[nextIdx + 1].startTimeMs;
+      const gapMs = Math.max(1, nextStart - currEnd);
       const totalProg = Math.max(0, Math.min(1, (posMs - currEnd) / gapMs));
+      const remainingMs = Math.max(0, nextStart - posMs);
+      const cueShrink =
+        remainingMs < 950 ? Math.max(0.18, remainingMs / 950) : 1;
       const dotColors = [tok.primary, tok.midDotColor, tok.secondary];
       for (let d = 0; d < 3; d++) {
         const dotEl = cachedInterludeDotEls[d];
         if (!dotEl) continue;
         const dotProg = Math.max(0, Math.min(1, (totalProg - d / 3) * 3));
-        const wave = Math.sin(breathingDotPhaseVal - d * 0.75);
-        const ty = -2.2 * Math.max(0, wave) * (0.35 + 0.65 * dotProg);
-        const s = 1 + 0.14 * Math.max(0, wave) * dotProg;
-        dotEl.style.color = dotProg > 0.35 ? dotColors[d] : tok.dimDotColor;
-        dotEl.style.transform = `translateY(${ty.toFixed(2)}px) scale(${s.toFixed(3)})`;
-        dotEl.style.opacity = (0.45 + 0.55 * dotProg).toFixed(3);
+        const wave = 0.5 + 0.5 * Math.sin(breathingDotPhaseVal - d * 0.85);
+        const ty = -2.2 * wave * (0.28 + 0.72 * dotProg) * cueShrink;
+        const sx =
+          (0.88 + 0.36 * dotProg + 0.14 * wave * dotProg) *
+          (0.55 + 0.45 * cueShrink);
+        const sy =
+          (0.88 + 0.18 * dotProg + 0.12 * wave * dotProg) *
+          (0.55 + 0.45 * cueShrink);
+        dotEl.style.background = dotProg > 0.2 ? dotColors[d] : tok.dimDotColor;
+        dotEl.style.boxShadow =
+          dotProg > 0.35
+            ? `0 0 ${Math.round(10 * dotProg * cueShrink)}px ${hexWithAlpha(dotColors[d], 0.58 * dotProg)}`
+            : "none";
+        dotEl.style.transform = `translate3d(0, ${ty.toFixed(2)}px, 0) scale(${sx.toFixed(3)}, ${sy.toFixed(3)})`;
+        dotEl.style.opacity = ((0.35 + 0.65 * dotProg) * cueShrink).toFixed(3);
       }
     }
   }
@@ -1791,7 +2026,7 @@ function syncLyricRealtimeDom(
   return activeSettled && leavingSettled;
 }
 
-function stepAndApplyLineCascadeDom(dtSec: number, subpixelResidualPx: number): boolean {
+function stepAndApplyLineCascadeDom(dtSec: number): boolean {
   const lines = store.currentLyric?.lines;
   if (!lines || lines.length === 0) {
     clearCascadeInlineTransforms();
@@ -1822,7 +2057,7 @@ function stepAndApplyLineCascadeDom(dtSec: number, subpixelResidualPx: number): 
     const node = lineCascadeBank.getNode(idx);
     const el = getCachedLineEl(idx);
     if (!node || !el) continue;
-    const totalY = node.floatY + node.cascadeY + subpixelResidualPx;
+    const totalY = node.floatY + node.cascadeY;
     const transformStr = `translate3d(0, ${totalY.toFixed(2)}px, 0) scale(${node.scale.toFixed(4)})`;
     if (transformStr !== node.lastTransform) {
       node.lastTransform = transformStr;
@@ -1857,8 +2092,9 @@ function startNowPlayingMasterLoop() {
   liveInterpolatedPosMs = initialPos;
   syncDisplayElapsedSec(initialPos);
   syncTimelineProgressDom(computeProgressFrac(initialPos), true);
-  syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
-  stepAndApplyLineCascadeDom(0.016, 0);
+  lyricWordsSettled = syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
+  lyricCascadeSettled = stepAndApplyLineCascadeDom(0.016);
+  lyricForceSyncNextTick = false;
   drawDynamicBackground(prevLoopWallMs, 0.016);
   if (mainLoopRafId === null) {
     mainLoopRafId = requestAnimationFrame(tickNowPlayingMasterLoop);
@@ -1957,61 +2193,80 @@ function tickNowPlayingMasterLoop(now: number) {
     posSettled = false;
   }
 
-  // 直接 GPU 合成驱动活跃行逐字弹簧、380ms 退场余韵与间奏呼吸点
-  const effLyricMs = getEffectiveLyricTimeMs();
-  if (store.isPlaying && activeInterludeVisible.value) {
-    breathingDotPhaseVal =
-      (breathingDotPhaseVal + dtSec * ((2 * Math.PI) / 1.4)) %
-      (Math.PI * 2);
-  }
-  const wordsSettled = syncLyricRealtimeDom(effLyricMs, dtSec, false);
-
-  // 120Hz 子步进临界阻尼弹簧驱动歌词视口平滑滚动 + 子像素残差无抖补偿
   const motion = getMotionRuntimeProfile();
-  let scrollSettled = true;
-  let subpixelResidual = 0;
-  const viewport = lyricViewportRef.value;
-  if (viewport && !isUserScrollingLyrics.value) {
-    if (!lyricScrollInitialized) {
-      scrollToActiveLyricLine(false);
-    } else if (motion.effectiveLevel === "none") {
-      if (Math.abs(lyricTargetScrollTop - lyricCurrentScrollTop) > 0.5) {
-        lyricCurrentScrollTop = lyricTargetScrollTop;
-        lyricScrollVelocity = 0;
-        viewport.scrollTop = Math.round(lyricTargetScrollTop);
-      }
-    } else {
-      const disp = lyricTargetScrollTop - lyricCurrentScrollTop;
-      if (Math.abs(disp) > 0.12 || Math.abs(lyricScrollVelocity) > 0.35) {
-        scrollSettled = false;
-        const [nextScroll, nextVel] = stepSpringScalar(
-          lyricCurrentScrollTop,
-          lyricScrollVelocity,
-          lyricTargetScrollTop,
-          motion.effectiveLevel === "standard" ? 136 : 114,
-          motion.effectiveLevel === "standard" ? 23.4 : 21.4,
-          dtSec,
-        );
-        lyricCurrentScrollTop = nextScroll;
-        lyricScrollVelocity = nextVel;
-        if (Math.abs(lyricTargetScrollTop - lyricCurrentScrollTop) < 0.18 && Math.abs(lyricScrollVelocity) < 0.35) {
-          lyricCurrentScrollTop = Math.round(lyricTargetScrollTop);
+  const shouldTickLyrics =
+    store.isPlaying ||
+    !posSettled ||
+    lyricForceSyncNextTick ||
+    !lyricWordsSettled ||
+    !lyricScrollSettled ||
+    !lyricCascadeSettled ||
+    activeInterludeVisible.value;
+
+  if (shouldTickLyrics) {
+    lyricForceSyncNextTick = false;
+
+    // 直接 GPU 合成驱动活跃行四风格逐字动效、360ms 退场余韵与液态间奏光珠
+    const effLyricMs = getEffectiveLyricTimeMs();
+    if (store.isPlaying && activeInterludeVisible.value) {
+      breathingDotPhaseVal =
+        (breathingDotPhaseVal + dtSec * ((2 * Math.PI) / 1.45)) %
+        (Math.PI * 2);
+    }
+    lyricWordsSettled = syncLyricRealtimeDom(effLyricMs, dtSec, false);
+
+    // 120Hz 零抖动临界阻尼弹簧驱动歌词视口平滑滚动（整数目标 + 严格落地归零）
+    let scrollSettled = true;
+    const viewport = lyricViewportRef.value;
+    if (viewport && !isUserScrollingLyrics.value) {
+      if (!lyricScrollInitialized) {
+        scrollToActiveLyricLine(false);
+      } else if (
+        motion.effectiveLevel === "none" ||
+        store.lyricScrollCascadeMode === "instant"
+      ) {
+        if (Math.abs(lyricTargetScrollTop - lyricCurrentScrollTop) > 0.25) {
+          lyricCurrentScrollTop = lyricTargetScrollTop;
           lyricScrollVelocity = 0;
-          viewport.scrollTop = lyricCurrentScrollTop;
-          subpixelResidual = 0;
-          scrollSettled = true;
-        } else {
-          const roundedScroll = Math.round(lyricCurrentScrollTop);
-          viewport.scrollTop = roundedScroll;
-          // 将 scrollTop 取整产生的 ±0.5px 误差吸收到行级 GPU translate3d，彻底消除慢速收尾 1px 阶梯抖动
-          subpixelResidual = -(lyricCurrentScrollTop - roundedScroll);
+          viewport.scrollTop = lyricTargetScrollTop;
+        }
+      } else {
+        const disp = lyricTargetScrollTop - lyricCurrentScrollTop;
+        if (Math.abs(disp) > 0.25 || Math.abs(lyricScrollVelocity) > 0.5) {
+          scrollSettled = false;
+          const [nextScroll, nextVel] = stepSpringScalar(
+            lyricCurrentScrollTop,
+            lyricScrollVelocity,
+            lyricTargetScrollTop,
+            motion.effectiveLevel === "standard" ? 136 : 114,
+            motion.effectiveLevel === "standard" ? 23.4 : 21.8,
+            dtSec,
+          );
+          lyricCurrentScrollTop = nextScroll;
+          lyricScrollVelocity = nextVel;
+          if (
+            Math.abs(lyricTargetScrollTop - lyricCurrentScrollTop) <= 0.25 &&
+            Math.abs(lyricScrollVelocity) <= 0.5
+          ) {
+            lyricCurrentScrollTop = lyricTargetScrollTop;
+            lyricScrollVelocity = 0;
+            viewport.scrollTop = lyricTargetScrollTop;
+            scrollSettled = true;
+          } else {
+            viewport.scrollTop = lyricCurrentScrollTop;
+          }
+        } else if (lyricCurrentScrollTop !== lyricTargetScrollTop) {
+          lyricCurrentScrollTop = lyricTargetScrollTop;
+          lyricScrollVelocity = 0;
+          viewport.scrollTop = lyricTargetScrollTop;
         }
       }
     }
-  }
+    lyricScrollSettled = scrollSettled;
 
-  // 推进 AMLL 式行级弹性瀑布错峰与景深缩放
-  const cascadeSettled = stepAndApplyLineCascadeDom(dtSec, subpixelResidual);
+    // 推进 AMLL 式行级弹性瀑布错峰与景深缩放
+    lyricCascadeSettled = stepAndApplyLineCascadeDom(dtSec);
+  }
 
   drawDynamicBackground(now, dtSec);
 
@@ -2019,9 +2274,9 @@ function tickNowPlayingMasterLoop(now: number) {
   if (
     !store.isPlaying &&
     posSettled &&
-    scrollSettled &&
-    wordsSettled &&
-    cascadeSettled &&
+    lyricScrollSettled &&
+    lyricWordsSettled &&
+    lyricCascadeSettled &&
     motion.effectiveLevel === "none"
   ) {
     mainLoopRafId = null;
@@ -2101,8 +2356,9 @@ watch(
         lyricScrollInitialized = false;
         refreshCachedLineElements();
         scrollToActiveLyricLine(false);
-        syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
-        stepAndApplyLineCascadeDom(0.016, 0);
+        markLyricDirty();
+        lyricWordsSettled = syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
+        lyricCascadeSettled = stepAndApplyLineCascadeDom(0.016);
         measureMetaOverflow();
       });
     } else {
@@ -2142,12 +2398,13 @@ watch(
   }
 );
 
-watch([titleViewportRef, qualityViewportRef], ([tEl, qEl]) => {
+watch([titleViewportRef, qualityViewportRef, lyricViewportRef], ([tEl, qEl, lvEl]) => {
   if (!metaResizeObserver) return;
   metaResizeObserver.disconnect();
   if (tEl) metaResizeObserver.observe(tEl);
   if (qEl) metaResizeObserver.observe(qEl);
   if (backdropRef.value) metaResizeObserver.observe(backdropRef.value);
+  if (lvEl) metaResizeObserver.observe(lvEl);
   nextTick(() => {
     measureMetaOverflow();
     measureCoverFocusPoint();
@@ -2166,6 +2423,7 @@ watch(
     () => store.lyricBackgroundDim,
   ],
   () => {
+    markLyricDirty();
     if (store.isNowPlayingOpen && isAppForegroundActive() && mainLoopRafId === null) {
       startNowPlayingMasterLoop();
     }
@@ -2192,17 +2450,33 @@ onMounted(() => {
     metaResizeObserver = new ResizeObserver(() => {
       measureMetaOverflow();
       measureCoverFocusPoint();
+      if (store.isNowPlayingOpen && !isUserScrollingLyrics.value) {
+        refreshCachedLineElements();
+        const updatedTarget = computeLineTargetScrollTop(activeLineIndex.value);
+        if (updatedTarget !== null && updatedTarget !== lyricTargetScrollTop) {
+          lyricTargetScrollTop = updatedTarget;
+          lyricCurrentScrollTop = updatedTarget;
+          lyricScrollVelocity = 0;
+          if (lyricViewportRef.value) {
+            lyricViewportRef.value.scrollTop = updatedTarget;
+          }
+          lyricScrollSettled = true;
+          markLyricDirty();
+        }
+      }
     });
     if (titleViewportRef.value) metaResizeObserver.observe(titleViewportRef.value);
     if (qualityViewportRef.value) metaResizeObserver.observe(qualityViewportRef.value);
     if (backdropRef.value) metaResizeObserver.observe(backdropRef.value);
+    if (lyricViewportRef.value) metaResizeObserver.observe(lyricViewportRef.value);
   }
   nextTick(() => {
     measureMetaOverflow();
     measureCoverFocusPoint();
     refreshCachedLineElements();
-    syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
-    stepAndApplyLineCascadeDom(0.016, 0);
+    markLyricDirty();
+    lyricWordsSettled = syncLyricRealtimeDom(getEffectiveLyricTimeMs(), 0.016, true);
+    lyricCascadeSettled = stepAndApplyLineCascadeDom(0.016);
   });
   if (store.isNowPlayingOpen) {
     ensureBgEngineAttached();
@@ -2783,14 +3057,16 @@ onBeforeUnmount(() => {
           </span>
         </div>
 
-        <!-- 歌词滚动主视口 (采用 vh 内边距锚定中心，大字号 + 对称宽松左右边距 + 行级瀑布弹簧滚动) -->
+        <!-- 歌词滚动主视口 (整像素零抖动物理滚屏 + 四风格逐字引擎 + 英文词簇排版与连贯双色流光) -->
         <div
           v-else
           ref="lyricViewportRef"
           class="np-lyric-scroll-viewport"
+          :class="isMaskSweepMotionStyle ? 'np-motion-sweep' : 'np-motion-bloom'"
           :style="karaokeRenderTokens.stageCssVars"
           @wheel.passive="handleUserLyricWheel"
           @touchmove.passive="handleUserLyricWheel"
+          @scroll.passive="handleLyricViewportScroll"
         >
           <div
             v-for="(line, idx) in store.currentLyric.lines"
@@ -2804,6 +3080,11 @@ onBeforeUnmount(() => {
               'is-next': idx === activeLineIndex + 1,
               'is-far': idx > activeLineIndex + 1,
               'is-hovered': hoveredLyricIndex === idx,
+              'is-manual-focus':
+                isUserScrollingLyrics && manualCenterLineIdx === idx,
+              'is-harmony-line':
+                store.lyricHarmonyStyleEnabled &&
+                resolvedLyricPresentations[idx]?.isHarmonyLine,
             }"
             :style="getLyricLineContainerStyle(idx)"
             @mouseenter="hoveredLyricIndex = idx"
@@ -2833,27 +3114,45 @@ onBeforeUnmount(() => {
               {{ getLinePhoneticText(line) }}
             </div>
 
-            <!-- 2. 主歌词行：「光晕浮升 · 声浪呼吸」双层纯 GPU 合成逐字引擎 -->
+            <!-- 2. 主歌词行：原生词簇文本流（零前导缩进）+ 四风格纯 GPU 合成逐字引擎 -->
             <div
-              v-if="resolvedLyricWordsList[idx]?.length"
+              v-if="resolvedLyricPresentations[idx]?.clusters.length"
               class="np-karaoke-words-flow"
               :class="`align-${store.lyricAlignment}`"
               :style="{
-                fontSize: `${store.lyricFontSize}px`,
+                fontSize: `${Math.round(
+                  store.lyricFontSize *
+                    (store.lyricHarmonyStyleEnabled &&
+                    resolvedLyricPresentations[idx]?.isHarmonyLine
+                      ? 0.8
+                      : 1)
+                )}px`,
                 fontWeight: lyricTypographyActive.fontWeight,
                 lineHeight: 1.44,
               }"
             >
-              <span
-                v-for="(w, wIdx) in resolvedLyricWordsList[idx]"
-                :key="wIdx"
-                class="np-karaoke-word-span"
-                :data-text="w.text"
-              ><span class="np-kw-base">{{ w.text }}</span><span
-                  v-if="idx === activeLineIndex || idx === leavingLineIndex"
-                  class="np-kw-lit"
-                  aria-hidden="true"
-                >{{ w.text }}</span></span>
+              <template
+                v-for="(cluster, cIdx) in resolvedLyricPresentations[idx].clusters"
+                :key="cIdx"
+              ><span
+                  class="np-word-cluster"
+                  :class="{
+                    'is-harmony-word':
+                      store.lyricHarmonyStyleEnabled &&
+                      cluster.isHarmony &&
+                      !resolvedLyricPresentations[idx].isHarmonyLine,
+                  }"
+                ><span
+                    v-for="w in cluster.words"
+                    :key="w.wordIdx"
+                    class="np-karaoke-word-span"
+                    :data-text="w.text"
+                  ><span class="np-kw-base">{{ w.text }}</span><span
+                      v-if="idx === activeLineIndex || idx === leavingLineIndex"
+                      class="np-kw-lit"
+                      :style="getWordLitStyle(w)"
+                      aria-hidden="true"
+                    >{{ w.text }}</span></span></span><template v-if="cluster.trailingSpace">{{ " " }}</template></template>
             </div>
 
             <!-- 兜底空文本/纯文本行 -->
@@ -2861,7 +3160,13 @@ onBeforeUnmount(() => {
               v-else
               class="np-lyric-plain-main"
               :style="{
-                fontSize: `${store.lyricFontSize}px`,
+                fontSize: `${Math.round(
+                  store.lyricFontSize *
+                    (store.lyricHarmonyStyleEnabled &&
+                    resolvedLyricPresentations[idx]?.isHarmonyLine
+                      ? 0.8
+                      : 1)
+                )}px`,
                 fontWeight: lyricTypographyActive.fontWeight,
                 WebkitTextStroke:
                   idx === activeLineIndex
@@ -2898,7 +3203,7 @@ onBeforeUnmount(() => {
               {{ line.translation }}
             </div>
 
-            <!-- 4. 间奏呼吸三圆点倒计时 -->
+            <!-- 4. 液态光珠间奏倒计时（入拍前 1s 自然聚能收拢） -->
             <div
               v-if="shouldShowInterludeDots(idx)"
               class="np-interlude-dots-row"
@@ -2907,22 +3212,60 @@ onBeforeUnmount(() => {
               <span
                 v-for="dotIdx in [0, 1, 2]"
                 :key="dotIdx"
-                class="np-interlude-dot"
+                class="np-interlude-bead"
                 :style="getInterludeDotStyle(idx, dotIdx)"
-              >
-                ●
-              </span>
+              ></span>
             </div>
 
             <!-- 悬停行右侧即点即播时间胶囊 -->
             <span
-              v-if="store.lyricClickSeekEnabled && hoveredLyricIndex === idx"
+              v-if="
+                store.lyricClickSeekEnabled &&
+                hoveredLyricIndex === idx &&
+                !isUserScrollingLyrics
+              "
               class="np-lyric-hover-seek-badge"
             >
               ▶ {{ formatDuration(line.startTimeMs / 1000) }}
             </span>
           </div>
         </div>
+
+        <!-- 手动滚轮浏览中线参考尺 + 一键跳播 / 立即回中悬浮胶囊（100% 无框渐隐光带） -->
+        <transition name="np-popover-fade">
+          <div
+            v-if="
+              isUserScrollingLyrics &&
+              manualCenterLine &&
+              store.currentLyric?.lines?.length
+            "
+            class="np-lyric-manual-guide"
+            @mouseenter="isHoveringManualGuide = true"
+            @mouseleave="
+              isHoveringManualGuide = false;
+              scheduleManualScrollAutoReturn();
+            "
+          >
+            <button
+              type="button"
+              class="np-manual-guide-pill is-seek"
+              title="点击直接从该句播放"
+              @click.stop="handleSeekToManualCenterLine"
+            >
+              <span class="np-manual-play-tri" aria-hidden="true">▶</span>
+              <span>{{ formatDuration(manualCenterLine.startTimeMs / 1000) }}</span>
+            </button>
+            <span class="np-manual-guide-beam" aria-hidden="true"></span>
+            <button
+              type="button"
+              class="np-manual-guide-pill is-return"
+              title="立即返回当前演唱句"
+              @click.stop="handleReturnToActiveLyric"
+            >
+              回到当前
+            </button>
+          </div>
+        </transition>
 
         <!-- 右下角纯图标悬浮歌词控制条 (翻译 / 音译 / 歌词设置) -->
         <div class="np-lyric-floating-toolbar">
@@ -4319,37 +4662,61 @@ onBeforeUnmount(() => {
   transition: color 0.38s ease;
 }
 
+.np-lyric-line-item.is-manual-focus {
+  background: color-mix(in oklab, var(--np-accent-primary, #5e6ad2) 8%, transparent);
+}
+
+.np-lyric-line-item.is-harmony-line .np-karaoke-words-flow,
+.np-lyric-line-item.is-harmony-line .np-lyric-plain-main {
+  font-style: italic;
+  opacity: 0.84;
+}
+
 .np-karaoke-words-flow {
-  display: flex;
-  flex-wrap: wrap;
+  display: block;
   letter-spacing: inherit;
+  text-rendering: geometricPrecision;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .np-karaoke-words-flow.align-left {
-  justify-content: flex-start;
+  text-align: left;
 }
 .np-karaoke-words-flow.align-center {
-  justify-content: center;
+  text-align: center;
 }
 .np-karaoke-words-flow.align-right {
-  justify-content: flex-end;
+  text-align: right;
 }
 
-/* 「光晕浮升 · 声浪呼吸」双层纯 GPU 合成字粒结构（零每帧 gradient/drop-shadow 重绘） */
+/* 不可断行词簇：保障英文多音节词不被拦腰折行，且词间原生空格在折行时自然折叠零缩进 */
+.np-word-cluster {
+  display: inline-block;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+
+.np-word-cluster.is-harmony-word {
+  font-size: 0.78em;
+  font-style: italic;
+  opacity: 0.82;
+  margin: 0 0.08em;
+}
+
+/* 纯 GPU 合成字粒结构（禁用固定 will-change 位图锁定，避免缩放发虚与卸载 1px 回弹） */
 .np-karaoke-word-span {
   position: relative;
   display: inline-block;
-  white-space: pre-wrap;
   transform-origin: center 72%;
 }
 
 .np-lyric-line-item.is-active .np-karaoke-word-span,
 .np-lyric-line-item.is-leaving .np-karaoke-word-span {
   transform: translate3d(0, var(--kw-y, 0px), 0) scale(var(--kw-s, 1));
-  will-change: transform;
 }
 
-/* 静态预光栅化辉光伪层：仅在活跃行与 380ms 退场余韵行启用，每帧仅合成 opacity，字缘零发毛 */
+/* 静态预光栅化辉光伪层：仅在活跃行与退场余韵行启用，每帧仅合成 opacity，字缘零发毛 */
 .np-lyric-line-item.is-active .np-karaoke-word-span::before,
 .np-lyric-line-item.is-leaving .np-karaoke-word-span::before {
   content: attr(data-text);
@@ -4358,7 +4725,6 @@ onBeforeUnmount(() => {
   z-index: 0;
   pointer-events: none;
   user-select: none;
-  white-space: pre-wrap;
   color: transparent;
   -webkit-text-fill-color: transparent;
   text-shadow:
@@ -4371,7 +4737,6 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 1;
   display: inline-block;
-  white-space: pre-wrap;
   color: var(--np-kw-far-color, rgba(255, 255, 255, 0.62));
   -webkit-text-stroke: var(--np-kw-stroke-inactive, 0px transparent);
   paint-order: stroke fill;
@@ -4395,7 +4760,7 @@ onBeforeUnmount(() => {
 
 .np-lyric-line-item.is-active .np-kw-base,
 .np-lyric-line-item.is-leaving .np-kw-base {
-  opacity: calc(1 - var(--kw-lit, 0) * 0.92);
+  opacity: calc(1 - var(--kw-base-fade, 0));
 }
 
 .np-kw-lit {
@@ -4403,7 +4768,6 @@ onBeforeUnmount(() => {
   inset: 0;
   z-index: 2;
   display: inline-block;
-  white-space: pre-wrap;
   pointer-events: none;
   user-select: none;
   background-image: var(--np-kw-lit-bg);
@@ -4416,9 +4780,43 @@ onBeforeUnmount(() => {
   opacity: var(--kw-lit, 0);
 }
 
+/* 宽柔羽化遮罩扫光（silk_flow / kinetic_pop / apple_minimal）：静态 300% 遮罩仅驱动 mask-position */
+.np-lyric-scroll-viewport.np-motion-sweep .np-kw-lit {
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 34%,
+    rgba(0, 0, 0, 0.68) 41%,
+    rgba(0, 0, 0, 0.22) 48%,
+    transparent 55%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 34%,
+    rgba(0, 0, 0, 0.68) 41%,
+    rgba(0, 0, 0, 0.22) 48%,
+    transparent 55%,
+    transparent 100%
+  );
+  -webkit-mask-size: 300% 100%;
+  mask-size: 300% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: var(--kw-mask-x, 100%) 0;
+  mask-position: var(--kw-mask-x, 100%) 0;
+}
+
+.np-lyric-scroll-viewport.np-motion-bloom .np-kw-lit {
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
 .np-lyric-plain-main {
   word-break: break-word;
   letter-spacing: -0.01em;
+  text-rendering: geometricPrecision;
   transition:
     color 0.38s ease,
     text-shadow 0.38s ease;
@@ -4427,6 +4825,7 @@ onBeforeUnmount(() => {
 .np-lyric-trans-line {
   margin-top: 7px;
   line-height: 1.44;
+  text-rendering: geometricPrecision;
   transition:
     color 0.38s ease,
     text-shadow 0.38s ease;
@@ -4434,9 +4833,10 @@ onBeforeUnmount(() => {
 
 .np-interlude-dots-row {
   display: flex;
-  gap: 8px;
-  margin-top: 10px;
-  font-size: var(--bm-fs-body, 14.5px);
+  align-items: center;
+  gap: 9px;
+  margin-top: 12px;
+  height: 14px;
 }
 .np-interlude-dots-row.align-left {
   justify-content: flex-start;
@@ -4448,9 +4848,94 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
 }
 
-.np-interlude-dot {
+.np-interlude-bead {
   display: inline-block;
-  transition: transform 0.14s ease, color 0.18s ease;
+  width: 9px;
+  height: 9px;
+  border-radius: var(--bm-r-pill, 999px);
+  transform-origin: center center;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* 手动滚轮中线参考尺 + 跳播/回中浮标（100% 无框渐隐光带） */
+.np-lyric-manual-guide {
+  position: absolute;
+  left: clamp(24px, 2.8vw, 48px);
+  right: clamp(24px, 2.8vw, 48px);
+  top: 41%;
+  transform: translateY(-50%);
+  z-index: 16;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.np-manual-guide-beam {
+  flex: 1;
+  height: 1px;
+  border-radius: 1px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--np-accent-primary, #5e6ad2) 48%, transparent) 0%,
+    color-mix(in oklab, var(--np-ink-1, #ffffff) 14%, transparent) 50%,
+    color-mix(in oklab, var(--np-accent-secondary, #38d2c0) 48%, transparent) 100%
+  );
+}
+
+.np-manual-guide-pill {
+  pointer-events: auto;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: var(--bm-r-pill, 999px);
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--bm-fs-micro, 11.5px);
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  backdrop-filter: blur(18px) saturate(165%);
+  -webkit-backdrop-filter: blur(18px) saturate(165%);
+  transition:
+    transform 0.2s cubic-bezier(0.22, 1.35, 0.36, 1),
+    background 0.18s ease,
+    box-shadow 0.2s ease;
+}
+
+.np-manual-guide-pill.is-seek {
+  background: var(--np-accent-primary, #5e6ad2);
+  color: var(--np-on-accent-primary, #ffffff);
+  box-shadow: 0 6px 18px var(--np-accent-glow, rgba(94, 106, 210, 0.34));
+}
+
+.np-manual-guide-pill.is-seek:hover {
+  transform: scale(1.05);
+}
+
+.np-manual-guide-pill.is-return {
+  background: color-mix(
+    in oklab,
+    var(--np-surface-container-low, #141923) 86%,
+    transparent
+  );
+  color: var(--np-ink-1, #ffffff);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.36);
+}
+
+.np-manual-guide-pill.is-return:hover {
+  transform: scale(1.05);
+  background: color-mix(
+    in oklab,
+    var(--np-accent-secondary, #38d2c0) 20%,
+    var(--np-surface-container-low, #141923)
+  );
+}
+
+.np-manual-play-tri {
+  font-size: 9px;
+  line-height: 1;
 }
 
 .np-lyric-hover-seek-badge {
@@ -4712,7 +5197,8 @@ onBeforeUnmount(() => {
 }
 
 .np-root.is-light-stage .np-timeline-scrub-pill,
-.np-root.is-light-stage .np-lyric-hover-seek-badge {
+.np-root.is-light-stage .np-lyric-hover-seek-badge,
+.np-root.is-light-stage .np-manual-guide-pill.is-return {
   background: var(--np-surface-container-highest, #ffffff);
   color: var(--np-ink-1);
   box-shadow: 0 8px 20px rgba(24, 24, 27, 0.14);

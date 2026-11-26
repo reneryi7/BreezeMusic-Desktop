@@ -8,6 +8,9 @@ import type {
   LyricFontFamily,
   LyricFontWeightLevel,
   LyricHighlightThemeId,
+  LyricMotionStyle,
+  LyricScenePresetId,
+  LyricScrollCascadeMode,
   LyricUnsungPresetId,
   ReverbPresetId,
   Song,
@@ -27,12 +30,22 @@ import {
 import {
   LYRIC_FONT_FAMILY_OPTIONS,
   LYRIC_FONT_WEIGHT_OPTIONS,
+  LYRIC_MOTION_STYLE_OPTIONS,
+  LYRIC_SCENE_PRESETS,
+  LYRIC_SCROLL_CASCADE_OPTIONS,
   LYRIC_SUNG_PRESETS,
   LYRIC_UNSUNG_PRESETS,
   resolveLyricTypographyStyle,
   resolveSungLyricPalette,
   resolveUnsungLyricHex,
 } from "../utils/lyricTypography";
+import {
+  computeWordOpticalTarget,
+  normalizeLyricLinePresentation,
+  sweepToMaskPositionPct,
+  type NormalizedLyricLinePresentation,
+} from "../utils/lyricMotionEngine";
+import { getMotionRuntimeProfile } from "../utils/motionRuntime";
 import { useFloatingModalTheme } from "../composables/useFloatingModalTheme";
 import {
   getSongAvailableQualities,
@@ -133,8 +146,126 @@ const floatingWindowStyle = computed(() => {
   };
 });
 
-// ================= 1. 播放页歌词设置中心 (LyricSettingsWindow · 纯粹播放页专属 · 3 页签 + 顶部固定实时预览) =================
-const lyricSubTab = ref<"style" | "layout" | "sync">("style");
+// ================= 1. 播放页歌词设置中心 (LyricSettingsWindow · 保持原位 + 真实动态预览 + 5 预设 + 精简 3 页签) =================
+const lyricSubTab = ref<"motion" | "style" | "sync">("motion");
+const isPeekingStage = ref(false);
+const isPreviewAnimationPaused = ref(false);
+const previewClockMs = ref(1750);
+let previewRafId: number | null = null;
+let previewLastWallMs = 0;
+const PREVIEW_CYCLE_MS = 3600;
+
+function stopPreviewLoop() {
+  if (previewRafId !== null) {
+    cancelAnimationFrame(previewRafId);
+    previewRafId = null;
+  }
+}
+
+function stepPreviewLoop(now: number) {
+  if (!props.showLyricSettings || isPreviewAnimationPaused.value) {
+    previewRafId = null;
+    return;
+  }
+  const motion = getMotionRuntimeProfile();
+  if (motion.effectiveLevel === "none") {
+    previewClockMs.value = 1750;
+    previewRafId = null;
+    return;
+  }
+  const dtMs = Math.min(50, Math.max(4, now - previewLastWallMs));
+  previewLastWallMs = now;
+  previewClockMs.value = (previewClockMs.value + dtMs) % PREVIEW_CYCLE_MS;
+  previewRafId = requestAnimationFrame(stepPreviewLoop);
+}
+
+function syncPreviewLoopState() {
+  const motion = getMotionRuntimeProfile();
+  if (
+    props.showLyricSettings &&
+    !isPreviewAnimationPaused.value &&
+    motion.effectiveLevel !== "none"
+  ) {
+    if (previewRafId === null) {
+      previewLastWallMs = performance.now();
+      previewRafId = requestAnimationFrame(stepPreviewLoop);
+    }
+  } else {
+    stopPreviewLoop();
+    if (motion.effectiveLevel === "none") {
+      previewClockMs.value = 1750;
+    }
+  }
+}
+
+function releasePeekStage() {
+  isPeekingStage.value = false;
+  window.removeEventListener("pointerup", releasePeekStage);
+  window.removeEventListener("pointercancel", releasePeekStage);
+}
+
+function startPeekStage() {
+  isPeekingStage.value = true;
+  window.addEventListener("pointerup", releasePeekStage, { once: true });
+  window.addEventListener("pointercancel", releasePeekStage, { once: true });
+}
+
+watch(
+  [
+    () => props.showLyricSettings,
+    isPreviewAnimationPaused,
+    () => store.motionLevel,
+  ],
+  () => {
+    if (!props.showLyricSettings) {
+      releasePeekStage();
+    }
+    syncPreviewLoopState();
+  },
+  { immediate: true }
+);
+
+const scenePresetOptions = LYRIC_SCENE_PRESETS;
+const motionStyleOptions = LYRIC_MOTION_STYLE_OPTIONS;
+const scrollCascadeOptions = LYRIC_SCROLL_CASCADE_OPTIONS;
+
+const activeMotionStyleLabel = computed(
+  () =>
+    motionStyleOptions.find((m) => m.id === store.lyricMotionStyle)?.label ||
+    "丝绸羽化扫光"
+);
+
+const activeScenePresetLabel = computed(() => {
+  if (store.activeLyricScenePreset === "custom") return "自定义微调";
+  return (
+    scenePresetOptions.find((p) => p.id === store.activeLyricScenePreset)
+      ?.label || "自定义微调"
+  );
+});
+
+function handleApplyLyricScenePreset(
+  presetId: Exclude<LyricScenePresetId, "custom">
+) {
+  store.applyLyricScenePreset(presetId);
+  const found = scenePresetOptions.find((p) => p.id === presetId);
+  if (found) {
+    store.notify(`已套用「${found.label}」高定歌词场景预设`);
+  }
+}
+
+function selectDialogPresetFontFamily(fam: LyricFontFamily) {
+  store.lyricFontFamily = fam;
+  if (store.typographyConfig.stageLyricMode !== "preset") {
+    void store.updateTypographyConfig({ stageLyricMode: "preset" });
+  }
+}
+
+function selectDialogFontWeight(w: LyricFontWeightLevel) {
+  store.lyricFontWeight = w;
+  if (store.typographyConfig.stageLyricMode === "custom") {
+    void store.updateTypographyConfig({ stageLyricWeight: w });
+  }
+}
 
 const sungPresetThemes = computed<
   Array<{
@@ -233,11 +364,11 @@ const autoReturnOptions: Array<{ sec: 2 | 3 | 5; label: string }> = [
 ];
 
 const lyricHeaderSubtitle = computed(() => {
-  if (lyricSubTab.value === "style") {
-    return "双通道独立配色、字形与四档字重";
+  if (lyricSubTab.value === "motion") {
+    return "5 套高定场景预设 · 4 套纯 GPU 动效";
   }
-  if (lyricSubTab.value === "layout") {
-    return "字号字距、焦点倍率与景深动效";
+  if (lyricSubTab.value === "style") {
+    return "双通道连贯配色与字形排版";
   }
   return "双档时间校准与在线词源检索";
 });
@@ -384,6 +515,94 @@ const lyricPreviewColors = computed(() => {
     fontWeight: typo.fontWeight,
     opticalStrokeCss: typo.opticalStrokeCss,
   };
+});
+
+// 真实动态预览词簇与逐字物理态（复用与播放页 100% 同源的排版词簇与 4 风格引擎）
+const previewPresentation = computed<NormalizedLyricLinePresentation>(() => {
+  const rawText = (livePreviewSample.value.main || "").trim() || "夜空中最亮的星 能否听清";
+  const tokenRegex =
+    /([A-Za-z0-9''\-]+[\s,.!?;:'"’”]*|[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af][^\S\r\n]*[，。！？、；：…,.!?;:’”」』）】]*|\S+\s*)/g;
+  const tokens = rawText.match(tokenRegex) || [rawText];
+  const spanMs = 2500;
+  const startMs = 220;
+  const weights = tokens.map((tok) => {
+    const trimmed = tok.trim();
+    if (!trimmed) return 0.2;
+    if (/[A-Za-z0-9]/.test(trimmed)) {
+      return Math.max(1.0, trimmed.replace(/[^A-Za-z0-9]/g, "").length * 0.42);
+    }
+    return 1.0;
+  });
+  const totalW = Math.max(0.5, weights.reduce((a, b) => a + b, 0));
+  let cur = startMs;
+  const rawWords = tokens.map((text, i) => {
+    const dur = Math.max(130, (weights[i] / totalW) * spanMs);
+    const item = { startTimeMs: cur, durationMs: dur, text };
+    cur += dur;
+    return item;
+  });
+  return normalizeLyricLinePresentation(rawWords, rawText);
+});
+
+const isPreviewMaskSweep = computed(
+  () => store.lyricMotionStyle !== "luminous_bloom"
+);
+
+const previewWordRenderStyles = computed(() => {
+  const pres = previewPresentation.value;
+  const col = lyricPreviewColors.value;
+  const isSolid = store.lyricSungMode === "solid";
+  const useSweep = isPreviewMaskSweep.value;
+  const motion = getMotionRuntimeProfile();
+  const glowRatio = Math.max(0, Math.min(2, (store.lyricGlowIntensity ?? 100) / 100));
+  const opts = {
+    wordByWord: Boolean(store.lyricWordByWord),
+    bounceEnabled: store.lyricWordBounceEnabled !== false,
+    motionStyle: (store.lyricMotionStyle || "silk_flow") as LyricMotionStyle,
+    motionLevel: motion.effectiveLevel,
+    glowRatio,
+    isLightStage: store.isNowPlayingLightStage,
+  };
+  const posMs = previewClockMs.value;
+  const lineStartMs = 220;
+  const hasStarted = posMs >= lineStartMs;
+
+  return pres.words.map((w) => {
+    const t = computeWordOpticalTarget(lineStartMs, w, posMs, opts, hasStarted);
+    const c0 = isSolid
+      ? col.primary
+      : lerpOklabHex(col.primary, col.secondary, w.lineStartFrac);
+    const c1 = isSolid
+      ? col.primary
+      : lerpOklabHex(col.primary, col.secondary, w.lineEndFrac);
+    const sweepCover = !useSweep
+      ? 1
+      : t.targetSweep <= 0.84
+      ? 0
+      : Math.min(1, (t.targetSweep - 0.84) / 0.14);
+    const baseFade = t.targetLit * sweepCover * 0.92;
+    const glowR = Math.max(5, Math.round(13 * Math.max(0.4, glowRatio)));
+    return {
+      spanStyle: {
+        transform: `translate3d(0, ${t.targetY.toFixed(2)}px, 0) scale(${t.targetScale.toFixed(4)})`,
+      },
+      baseStyle: {
+        color: col.inactiveRgba,
+        opacity: (1 - baseFade).toFixed(3),
+      },
+      litStyle: {
+        backgroundImage: `linear-gradient(108deg, ${c0} 0%, ${c1} 100%)`,
+        WebkitTextStroke: col.opticalStrokeCss,
+        paintOrder: "stroke fill",
+        opacity: t.targetLit.toFixed(3),
+        "--kw-mask-x": `${sweepToMaskPositionPct(t.targetSweep)}%`,
+        filter:
+          t.targetGlow > 0.03
+            ? `drop-shadow(0 0 ${glowR}px ${hexWithAlpha(c0, Math.min(0.65, t.targetGlow * 0.62))})`
+            : "none",
+      } as Record<string, string>,
+    };
+  });
 });
 
 const activeDownloadTaskInModal = computed(() =>
@@ -905,6 +1124,8 @@ const coreTuningSliders = computed<
 ]);
 
 onUnmounted(() => {
+  stopPreviewLoop();
+  releasePeekStage();
   if (dspPersistDebounceTimer !== null) {
     window.clearTimeout(dspPersistDebounceTimer);
   }
@@ -927,7 +1148,7 @@ function handleJumpToTuner() {
 
 <template>
   <!-- =========================================================================
-       1. 播放页歌词设置中心 (LyricSettingsWindow · 顶部固定预览 + 3 页签纯粹分区)
+       1. 播放页歌词设置中心 (LyricSettingsWindow · 保持原位 + 真实动态预览 + 5 预设 + 精简 3 页签)
        ========================================================================= -->
   <transition name="np-float-spring">
     <div
@@ -937,7 +1158,10 @@ function handleJumpToTuner() {
     >
       <div
         class="np-floating-window w-lyric-studio"
-        :class="{ 'is-dark-surface': !isLightSurface }"
+        :class="{
+          'is-dark-surface': !isLightSurface,
+          'is-peek-transparent': isPeekingStage,
+        }"
         :style="floatingWindowStyle"
         @click.stop
       >
@@ -962,20 +1186,20 @@ function handleJumpToTuner() {
               <button
                 type="button"
                 class="nfw-pill-tab"
-                :class="{ active: lyricSubTab === 'style' }"
-                :aria-pressed="lyricSubTab === 'style'"
-                @click="lyricSubTab = 'style'"
+                :class="{ active: lyricSubTab === 'motion' }"
+                :aria-pressed="lyricSubTab === 'motion'"
+                @click="lyricSubTab = 'motion'"
               >
-                配色与字形
+                预设与动效
               </button>
               <button
                 type="button"
                 class="nfw-pill-tab"
-                :class="{ active: lyricSubTab === 'layout' }"
-                :aria-pressed="lyricSubTab === 'layout'"
-                @click="lyricSubTab = 'layout'"
+                :class="{ active: lyricSubTab === 'style' }"
+                :aria-pressed="lyricSubTab === 'style'"
+                @click="lyricSubTab = 'style'"
               >
-                排版与动效
+                配色与排版
               </button>
               <button
                 type="button"
@@ -987,6 +1211,15 @@ function handleJumpToTuner() {
                 校准与词源
               </button>
             </div>
+
+            <button
+              type="button"
+              class="nfw-peek-btn"
+              title="按住可半隐弹窗，直接观察背后全屏歌词效果"
+              @pointerdown.prevent="startPeekStage"
+            >
+              按住透视
+            </button>
 
             <button
               type="button"
@@ -1011,40 +1244,63 @@ function handleJumpToTuner() {
           </div>
         </div>
 
-        <!-- 顶部常驻实时双行预览台（切页时始终保持所见即所得） -->
+        <!-- 顶部常驻真实动态循环预览台（与播放页共享词簇、连贯渐变与 4 套纯 GPU 动效引擎） -->
         <div
           class="nfw-lyric-preview-card"
+          :class="isPreviewMaskSweep ? 'is-preview-sweep' : 'is-preview-bloom'"
           :style="{
             textAlign: store.lyricAlignment,
             fontFamily: lyricPreviewColors.fontFamily,
             background: lyricPreviewColors.stageBg,
           }"
         >
-          <span class="nfw-preview-corner-tag">
-            {{ livePreviewSample.isRealSong ? "当前曲目实时预览" : "效果实时预览" }}
-          </span>
+          <div class="nfw-preview-corner-bar">
+            <span class="nfw-preview-corner-tag">
+              {{ activeMotionStyleLabel }} ·
+              {{ livePreviewSample.isRealSong ? "当前曲目" : "实时演绎" }}
+            </span>
+            <button
+              type="button"
+              class="nfw-preview-play-btn"
+              :aria-label="isPreviewAnimationPaused ? '继续动态预览' : '暂停动态预览'"
+              @click="isPreviewAnimationPaused = !isPreviewAnimationPaused"
+            >
+              {{ isPreviewAnimationPaused ? "播放演示" : "暂停演示" }}
+            </button>
+          </div>
+
           <div
             class="nfw-lp-main"
             :style="{
-              fontSize: `${Math.max(15, Math.min(25, Math.round(store.lyricFontSize * 0.66 * (store.lyricFocusScaleEnabled ? store.lyricFocusScaleRatio : 1))))}px`,
+              fontSize: `${Math.max(16, Math.min(26, Math.round(store.lyricFontSize * 0.68 * (store.lyricFocusScaleEnabled ? store.lyricFocusScaleRatio : 1))))}px`,
               fontWeight: lyricPreviewColors.fontWeight,
               letterSpacing: `${Number(store.lyricLetterSpacing || 0).toFixed(1)}px`,
-              textShadow: lyricPreviewColors.glowShadow,
             }"
           >
-            <span
-              class="nfw-lp-sung"
-              :style="{
-                WebkitTextStroke: lyricPreviewColors.opticalStrokeCss,
-                paintOrder: 'stroke fill',
-                backgroundImage: store.lyricWordByWord
-                  ? `linear-gradient(90deg, ${lyricPreviewColors.primary} 0%, ${lyricPreviewColors.secondary} 46%, ${lyricPreviewColors.inactiveRgba} 82%, ${lyricPreviewColors.inactiveRgba} 100%)`
-                  : `linear-gradient(90deg, ${lyricPreviewColors.primary} 0%, ${lyricPreviewColors.secondary} 100%)`,
-              }"
-            >
-              {{ livePreviewSample.main }}
-            </span>
+            <template
+              v-for="(cluster, cIdx) in previewPresentation.clusters"
+              :key="cIdx"
+            ><span
+                class="nfw-lp-cluster"
+                :class="{
+                  'is-harmony':
+                    store.lyricHarmonyStyleEnabled && cluster.isHarmony,
+                }"
+              ><span
+                  v-for="w in cluster.words"
+                  :key="w.wordIdx"
+                  class="nfw-lp-word"
+                  :style="previewWordRenderStyles[w.wordIdx]?.spanStyle"
+                ><span
+                    class="nfw-lp-word-base"
+                    :style="previewWordRenderStyles[w.wordIdx]?.baseStyle"
+                  >{{ w.text }}</span><span
+                    class="nfw-lp-word-lit"
+                    :style="previewWordRenderStyles[w.wordIdx]?.litStyle"
+                    aria-hidden="true"
+                  >{{ w.text }}</span></span></span><template v-if="cluster.trailingSpace">{{ " " }}</template></template>
           </div>
+
           <div
             v-if="store.showTranslation"
             class="nfw-lp-trans"
@@ -1070,12 +1326,368 @@ function handleJumpToTuner() {
           </div>
         </div>
 
-        <!-- ======================= 子页 A：配色与字形（已唱/未唱双通道独立工作台） ======================= -->
-        <div v-if="lyricSubTab === 'style'" class="nfw-lyric-body">
-          <!-- 1. 已唱部分配色（8 款高定新预设 + 纯色/渐变切换 + 自定义双色取色器） -->
+        <!-- ======================= 子页 A：一键高定场景预设 + 四套动效引擎 + 氛围开关 ======================= -->
+        <div v-if="lyricSubTab === 'motion'" class="nfw-lyric-body">
+          <!-- 1. 一键高定场景预设（5 套） -->
           <div class="nfw-section-block">
             <div class="nfw-block-head">
-              <span>已唱部分配色</span>
+              <span>一键高定场景预设</span>
+              <span class="nfw-block-tag">{{ activeScenePresetLabel }}</span>
+            </div>
+            <div class="nfw-scene-grid-5">
+              <button
+                v-for="preset in scenePresetOptions"
+                :key="preset.id"
+                type="button"
+                class="nfw-scene-tile"
+                :class="{ active: store.activeLyricScenePreset === preset.id }"
+                :style="
+                  store.activeLyricScenePreset === preset.id
+                    ? activeTileStyle(true)
+                    : {}
+                "
+                @click="handleApplyLyricScenePreset(preset.id)"
+              >
+                <span
+                  class="nfw-scene-bar"
+                  :style="{ background: preset.accentSwatch }"
+                  aria-hidden="true"
+                ></span>
+                <span class="nfw-scene-name">{{ preset.label }}</span>
+                <span class="nfw-scene-tag">{{ preset.tagline }}</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 2. 逐字动效引擎（4 套）与滚屏质感 -->
+          <div class="nfw-section-block">
+            <div class="nfw-block-head">
+              <span>逐字动效引擎</span>
+              <span class="nfw-block-tag">{{ activeMotionStyleLabel }}</span>
+            </div>
+            <div class="nfw-motion-grid-2col">
+              <button
+                v-for="ms in motionStyleOptions"
+                :key="ms.id"
+                type="button"
+                class="nfw-motion-tile"
+                :class="{ active: store.lyricMotionStyle === ms.id }"
+                :style="
+                  store.lyricMotionStyle === ms.id ? activeTileStyle(true) : {}
+                "
+                @click="store.lyricMotionStyle = ms.id"
+              >
+                <div class="nfw-mt-head">
+                  <span class="nfw-mt-title">{{ ms.label }}</span>
+                  <span v-if="ms.badge" class="nfw-mt-badge">{{ ms.badge }}</span>
+                </div>
+                <span class="nfw-mt-desc">{{ ms.desc }}</span>
+              </button>
+            </div>
+
+            <div class="nfw-inline-pair-row">
+              <div class="nfw-inline-group">
+                <span class="nfw-inline-label">滚屏</span>
+                <div class="nfw-mini-pills">
+                  <button
+                    v-for="sc in scrollCascadeOptions"
+                    :key="sc.id"
+                    type="button"
+                    class="nfw-mini-pill"
+                    :class="{ active: store.lyricScrollCascadeMode === sc.id }"
+                    :title="sc.desc"
+                    @click="store.lyricScrollCascadeMode = sc.id"
+                  >
+                    {{ sc.label }}
+                  </button>
+                </div>
+              </div>
+
+              <div class="nfw-inline-group">
+                <span class="nfw-inline-label">回中</span>
+                <div class="nfw-mini-pills">
+                  <button
+                    v-for="opt in autoReturnOptions"
+                    :key="opt.sec"
+                    type="button"
+                    class="nfw-mini-pill"
+                    :class="{ active: store.lyricAutoReturnSec === opt.sec }"
+                    @click="store.lyricAutoReturnSec = opt.sec"
+                  >
+                    {{ opt.label }}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3. 光学氛围与精细开关 -->
+          <div class="nfw-section-block">
+            <div class="nfw-block-head">
+              <span>光学氛围与交互开关</span>
+              <span class="nfw-block-tag">120Hz 零抖动</span>
+            </div>
+
+            <div class="nfw-sliders-3col">
+              <div
+                class="nfw-slider-stack-card"
+                :class="{ 'is-disabled': !store.lyricFocusScaleEnabled }"
+              >
+                <div class="nfw-slider-stack-head">
+                  <span class="nfw-slider-stack-label">焦点倍率</span>
+                  <span class="nfw-slider-badge">
+                    {{ Number(store.lyricFocusScaleRatio).toFixed(2) }}x
+                  </span>
+                </div>
+                <input
+                  v-model.number="store.lyricFocusScaleRatio"
+                  type="range"
+                  min="1.0"
+                  max="1.24"
+                  step="0.02"
+                  :disabled="!store.lyricFocusScaleEnabled"
+                  aria-label="焦点放大倍率"
+                  class="nfw-range nfw-range-fill"
+                  :style="rangeProgressStyle(store.lyricFocusScaleRatio, 1.0, 1.24)"
+                />
+              </div>
+
+              <div class="nfw-slider-stack-card">
+                <div class="nfw-slider-stack-head">
+                  <span class="nfw-slider-stack-label">逐字辉光</span>
+                  <span class="nfw-slider-badge">
+                    {{ Math.round(store.lyricGlowIntensity) }}%
+                  </span>
+                </div>
+                <input
+                  v-model.number="store.lyricGlowIntensity"
+                  type="range"
+                  min="0"
+                  max="200"
+                  step="5"
+                  aria-label="逐字辉光"
+                  class="nfw-range nfw-range-fill"
+                  :style="rangeProgressStyle(store.lyricGlowIntensity, 0, 200)"
+                />
+              </div>
+
+              <div
+                class="nfw-slider-stack-card"
+                :class="{ 'is-disabled': !store.lyricBlurEnabled }"
+              >
+                <div class="nfw-slider-stack-head">
+                  <span class="nfw-slider-stack-label">景深模糊</span>
+                  <span class="nfw-slider-badge">
+                    {{ Number(store.lyricBlurIntensity).toFixed(1) }}x
+                  </span>
+                </div>
+                <input
+                  v-model.number="store.lyricBlurIntensity"
+                  type="range"
+                  min="0.4"
+                  max="1.8"
+                  step="0.05"
+                  :disabled="!store.lyricBlurEnabled"
+                  aria-label="景深强度"
+                  class="nfw-range nfw-range-fill"
+                  :style="rangeProgressStyle(store.lyricBlurIntensity, 0.4, 1.8)"
+                />
+              </div>
+            </div>
+
+            <div class="nfw-switch-matrix-3col">
+              <button
+                type="button"
+                class="nfw-switch-tile"
+                :class="{ on: store.lyricWordByWord }"
+                @click="store.lyricWordByWord = !store.lyricWordByWord"
+              >
+                <div class="nfw-st-copy">
+                  <span class="nfw-st-title">逐字演绎</span>
+                  <span class="nfw-st-desc">KRC 逐音节同步</span>
+                </div>
+                <span class="nfw-switch-pill" :class="{ on: store.lyricWordByWord }">
+                  <span class="nfw-switch-thumb"></span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="nfw-switch-tile"
+                :class="{
+                  on:
+                    store.lyricWordByWord &&
+                    store.lyricWordBounceEnabled &&
+                    store.lyricMotionStyle !== 'apple_minimal',
+                  'is-disabled':
+                    !store.lyricWordByWord ||
+                    store.lyricMotionStyle === 'apple_minimal',
+                }"
+                :disabled="
+                  !store.lyricWordByWord ||
+                  store.lyricMotionStyle === 'apple_minimal'
+                "
+                @click="
+                  store.lyricWordBounceEnabled = !store.lyricWordBounceEnabled
+                "
+              >
+                <div class="nfw-st-copy">
+                  <span class="nfw-st-title">逐字微浮</span>
+                  <span class="nfw-st-desc">
+                    {{
+                      store.lyricMotionStyle === "apple_minimal"
+                        ? "静谧风保持静止"
+                        : "演唱字轻盈托举"
+                    }}
+                  </span>
+                </div>
+                <span
+                  class="nfw-switch-pill"
+                  :class="{
+                    on:
+                      store.lyricWordByWord &&
+                      store.lyricWordBounceEnabled &&
+                      store.lyricMotionStyle !== 'apple_minimal',
+                  }"
+                >
+                  <span class="nfw-switch-thumb"></span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="nfw-switch-tile"
+                :class="{ on: store.lyricHarmonyStyleEnabled }"
+                @click="
+                  store.lyricHarmonyStyleEnabled = !store.lyricHarmonyStyleEnabled
+                "
+              >
+                <div class="nfw-st-copy">
+                  <span class="nfw-st-title">和声降阶</span>
+                  <span class="nfw-st-desc">括号伴唱轻量化</span>
+                </div>
+                <span
+                  class="nfw-switch-pill"
+                  :class="{ on: store.lyricHarmonyStyleEnabled }"
+                >
+                  <span class="nfw-switch-thumb"></span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="nfw-switch-tile"
+                :class="{ on: store.lyricFocusScaleEnabled }"
+                @click="
+                  store.lyricFocusScaleEnabled = !store.lyricFocusScaleEnabled
+                "
+              >
+                <div class="nfw-st-copy">
+                  <span class="nfw-st-title">焦点放大</span>
+                  <span class="nfw-st-desc">当前行突出聚焦</span>
+                </div>
+                <span
+                  class="nfw-switch-pill"
+                  :class="{ on: store.lyricFocusScaleEnabled }"
+                >
+                  <span class="nfw-switch-thumb"></span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="nfw-switch-tile"
+                :class="{ on: store.lyricBlurEnabled }"
+                @click="store.lyricBlurEnabled = !store.lyricBlurEnabled"
+              >
+                <div class="nfw-st-copy">
+                  <span class="nfw-st-title">景深模糊</span>
+                  <span class="nfw-st-desc">关闭则全屏锐利</span>
+                </div>
+                <span class="nfw-switch-pill" :class="{ on: store.lyricBlurEnabled }">
+                  <span class="nfw-switch-thumb"></span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="nfw-switch-tile"
+                :class="{ on: store.lyricInterludeDotsEnabled }"
+                @click="
+                  store.lyricInterludeDotsEnabled = !store.lyricInterludeDotsEnabled
+                "
+              >
+                <div class="nfw-st-copy">
+                  <span class="nfw-st-title">液态间奏</span>
+                  <span class="nfw-st-desc">光珠呼吸倒计时</span>
+                </div>
+                <span
+                  class="nfw-switch-pill"
+                  :class="{ on: store.lyricInterludeDotsEnabled }"
+                >
+                  <span class="nfw-switch-thumb"></span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="nfw-switch-tile"
+                :class="{ on: store.lyricClickSeekEnabled }"
+                @click="
+                  store.lyricClickSeekEnabled = !store.lyricClickSeekEnabled
+                "
+              >
+                <div class="nfw-st-copy">
+                  <span class="nfw-st-title">点击跳转</span>
+                  <span class="nfw-st-desc">点按任意行切进度</span>
+                </div>
+                <span
+                  class="nfw-switch-pill"
+                  :class="{ on: store.lyricClickSeekEnabled }"
+                >
+                  <span class="nfw-switch-thumb"></span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="nfw-switch-tile"
+                :class="{ on: store.showTranslation }"
+                @click="store.showTranslation = !store.showTranslation"
+              >
+                <div class="nfw-st-copy">
+                  <span class="nfw-st-title">双语译文</span>
+                  <span class="nfw-st-desc">外语展示中文翻译</span>
+                </div>
+                <span class="nfw-switch-pill" :class="{ on: store.showTranslation }">
+                  <span class="nfw-switch-thumb"></span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="nfw-switch-tile"
+                :class="{ on: store.showPhonetic }"
+                @click="store.showPhonetic = !store.showPhonetic"
+              >
+                <div class="nfw-st-copy">
+                  <span class="nfw-st-title">音译注音</span>
+                  <span class="nfw-st-desc">粤拼 / 日韩罗马音</span>
+                </div>
+                <span class="nfw-switch-pill" :class="{ on: store.showPhonetic }">
+                  <span class="nfw-switch-thumb"></span>
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ======================= 子页 B：配色与排版（双通道连贯配色 + 字体字重 + 排版尺码） ======================= -->
+        <div v-else-if="lyricSubTab === 'style'" class="nfw-lyric-body">
+          <!-- 1. 已唱部分配色（8 款高定预设 + 连贯渐变/纯色切换 + 自定义双色） -->
+          <div class="nfw-section-block">
+            <div class="nfw-block-head">
+              <span>已唱流光配色</span>
               <div class="nfw-inline-ctrl-bar">
                 <div class="nfw-mini-pills">
                   <button
@@ -1084,7 +1696,7 @@ function handleJumpToTuner() {
                     :class="{ active: store.lyricSungMode === 'gradient' }"
                     @click="store.lyricSungMode = 'gradient'"
                   >
-                    流光渐变
+                    整行流光
                   </button>
                   <button
                     type="button"
@@ -1162,14 +1774,27 @@ function handleJumpToTuner() {
                   <span>自定义终色</span>
                 </label>
               </div>
-              <span class="nfw-slider-badge">点击圆点自由调色</span>
+              <button
+                type="button"
+                class="nfw-inline-toggle-chip"
+                :class="{ active: store.lyricTranslationTintEnabled }"
+                @click="
+                  store.lyricTranslationTintEnabled = !store.lyricTranslationTintEnabled
+                "
+              >
+                <span>译文随主色</span>
+                <span
+                  class="nfw-mini-dot"
+                  :class="{ on: store.lyricTranslationTintEnabled }"
+                ></span>
+              </button>
             </div>
           </div>
 
-          <!-- 2. 未唱部分独立配色（6 款精选未唱色 + 自定义色 + 未唱透明度） -->
+          <!-- 2. 未唱部分独立配色 -->
           <div class="nfw-section-block">
             <div class="nfw-block-head">
-              <span>未唱部分配色</span>
+              <span>未唱基调配色</span>
               <span class="nfw-block-tag">
                 {{ activeUnsungLabel }} · {{ Math.round(store.lyricInactiveOpacity * 100) }}%
               </span>
@@ -1234,11 +1859,17 @@ function handleJumpToTuner() {
             </div>
           </div>
 
-          <!-- 3. 字形、四档真实字重与对齐 -->
+          <!-- 3. 字体风格、四档字重与排版尺码 -->
           <div class="nfw-section-block">
             <div class="nfw-block-head">
-              <span>字体风格与四档字重</span>
-              <span class="nfw-block-tag">Windows 实装阶梯</span>
+              <span>字形风格与排版尺码</span>
+              <span class="nfw-block-tag">
+                {{
+                  store.stageLyricFontOverride.familyStack
+                    ? `自定义：${store.stageLyricFontOverride.label}`
+                    : `${Math.round(store.lyricFontSize)}px`
+                }}
+              </span>
             </div>
 
             <div class="nfw-font-grid-4col">
@@ -1247,8 +1878,13 @@ function handleJumpToTuner() {
                 :key="font.id"
                 type="button"
                 class="nfw-font-pill"
-                :style="activeTileStyle(store.lyricFontFamily === font.id)"
-                @click="store.lyricFontFamily = font.id"
+                :style="
+                  activeTileStyle(
+                    store.lyricFontFamily === font.id &&
+                      store.typographyConfig.stageLyricMode === 'preset'
+                  )
+                "
+                @click="selectDialogPresetFontFamily(font.id)"
               >
                 <span class="nfw-font-label">{{ font.label }}</span>
                 <span class="nfw-font-desc">{{ font.desc }}</span>
@@ -1265,7 +1901,7 @@ function handleJumpToTuner() {
                     type="button"
                     class="nfw-mini-pill"
                     :class="{ active: store.lyricFontWeight === fw.id }"
-                    @click="store.lyricFontWeight = fw.id"
+                    @click="selectDialogFontWeight(fw.id)"
                   >
                     {{ fw.label }}
                   </button>
@@ -1288,17 +1924,6 @@ function handleJumpToTuner() {
                 </div>
               </div>
             </div>
-          </div>
-        </div>
-
-        <!-- ======================= 子页 B：排版、光学与动效开关 ======================= -->
-        <div v-else-if="lyricSubTab === 'layout'" class="nfw-lyric-body">
-          <!-- 1. 排版尺寸与光学质感 -->
-          <div class="nfw-section-block">
-            <div class="nfw-block-head">
-              <span>排版尺寸与光学质感</span>
-              <span class="nfw-block-tag">{{ Math.round(store.lyricFontSize) }}px</span>
-            </div>
 
             <div class="nfw-sliders-2col">
               <div class="nfw-slider-item">
@@ -1313,7 +1938,9 @@ function handleJumpToTuner() {
                   class="nfw-range nfw-range-fill"
                   :style="rangeProgressStyle(store.lyricFontSize, 20, 48)"
                 />
-                <span class="nfw-slider-badge">{{ Math.round(store.lyricFontSize) }}px</span>
+                <span class="nfw-slider-badge">
+                  {{ Math.round(store.lyricFontSize) }}px
+                </span>
               </div>
 
               <div class="nfw-slider-item">
@@ -1345,7 +1972,9 @@ function handleJumpToTuner() {
                   class="nfw-range nfw-range-fill"
                   :style="rangeProgressStyle(store.lyricLineSpacing, 8, 28)"
                 />
-                <span class="nfw-slider-badge">{{ Math.round(store.lyricLineSpacing) }}px</span>
+                <span class="nfw-slider-badge">
+                  {{ Math.round(store.lyricLineSpacing) }}px
+                </span>
               </div>
 
               <div class="nfw-slider-item">
@@ -1363,236 +1992,6 @@ function handleJumpToTuner() {
                 <span class="nfw-slider-badge">
                   {{ Number(store.lyricLetterSpacing).toFixed(1) }}px
                 </span>
-              </div>
-
-              <div
-                class="nfw-slider-item"
-                :class="{ 'is-disabled': !store.lyricFocusScaleEnabled }"
-              >
-                <span class="nfw-slider-name">焦点倍率</span>
-                <input
-                  v-model.number="store.lyricFocusScaleRatio"
-                  type="range"
-                  min="1.0"
-                  max="1.24"
-                  step="0.02"
-                  :disabled="!store.lyricFocusScaleEnabled"
-                  aria-label="焦点放大倍率"
-                  class="nfw-range nfw-range-fill"
-                  :style="rangeProgressStyle(store.lyricFocusScaleRatio, 1.0, 1.24)"
-                />
-                <span class="nfw-slider-badge">
-                  {{ Number(store.lyricFocusScaleRatio).toFixed(2) }}x
-                </span>
-              </div>
-
-              <div class="nfw-slider-item">
-                <span class="nfw-slider-name">逐字辉光</span>
-                <input
-                  v-model.number="store.lyricGlowIntensity"
-                  type="range"
-                  min="0"
-                  max="200"
-                  step="5"
-                  aria-label="逐字辉光"
-                  class="nfw-range nfw-range-fill"
-                  :style="rangeProgressStyle(store.lyricGlowIntensity, 0, 200)"
-                />
-                <span class="nfw-slider-badge">{{ Math.round(store.lyricGlowIntensity) }}%</span>
-              </div>
-
-              <div
-                class="nfw-slider-item"
-                :class="{ 'is-disabled': !store.lyricBlurEnabled }"
-              >
-                <span class="nfw-slider-name">景深模糊</span>
-                <input
-                  v-model.number="store.lyricBlurIntensity"
-                  type="range"
-                  min="0.4"
-                  max="1.8"
-                  step="0.05"
-                  :disabled="!store.lyricBlurEnabled"
-                  aria-label="景深强度"
-                  class="nfw-range nfw-range-fill"
-                  :style="rangeProgressStyle(store.lyricBlurIntensity, 0.4, 1.8)"
-                />
-                <span class="nfw-slider-badge">
-                  {{ Number(store.lyricBlurIntensity).toFixed(1) }}x
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 2. 动效与交互开关矩阵 -->
-          <div class="nfw-section-block">
-            <div class="nfw-block-head">
-              <span>视觉动效与交互开关</span>
-              <span class="nfw-block-tag">实时联动</span>
-            </div>
-
-            <div class="nfw-switch-matrix">
-              <button
-                type="button"
-                class="nfw-switch-tile"
-                :class="{ on: store.lyricWordByWord }"
-                @click="store.lyricWordByWord = !store.lyricWordByWord"
-              >
-                <div class="nfw-st-copy">
-                  <span class="nfw-st-title">逐字染色</span>
-                  <span class="nfw-st-desc">KRC 逐字流光推进</span>
-                </div>
-                <span class="nfw-switch-pill" :class="{ on: store.lyricWordByWord }">
-                  <span class="nfw-switch-thumb"></span>
-                </span>
-              </button>
-
-              <button
-                type="button"
-                class="nfw-switch-tile"
-                :class="{
-                  on: store.lyricWordByWord && store.lyricWordBounceEnabled,
-                  'is-disabled': !store.lyricWordByWord,
-                }"
-                :disabled="!store.lyricWordByWord"
-                @click="store.lyricWordBounceEnabled = !store.lyricWordBounceEnabled"
-              >
-                <div class="nfw-st-copy">
-                  <span class="nfw-st-title">逐字弹跳</span>
-                  <span class="nfw-st-desc">
-                    {{ store.lyricWordByWord ? "在唱文字轻盈上浮" : "需先开启逐字染色" }}
-                  </span>
-                </div>
-                <span
-                  class="nfw-switch-pill"
-                  :class="{ on: store.lyricWordByWord && store.lyricWordBounceEnabled }"
-                >
-                  <span class="nfw-switch-thumb"></span>
-                </span>
-              </button>
-
-              <button
-                type="button"
-                class="nfw-switch-tile"
-                :class="{ on: store.lyricFocusScaleEnabled }"
-                @click="store.lyricFocusScaleEnabled = !store.lyricFocusScaleEnabled"
-              >
-                <div class="nfw-st-copy">
-                  <span class="nfw-st-title">焦点放大</span>
-                  <span class="nfw-st-desc">当前行突出缩放聚焦</span>
-                </div>
-                <span class="nfw-switch-pill" :class="{ on: store.lyricFocusScaleEnabled }">
-                  <span class="nfw-switch-thumb"></span>
-                </span>
-              </button>
-
-              <button
-                type="button"
-                class="nfw-switch-tile"
-                :class="{ on: store.lyricBlurEnabled }"
-                @click="store.lyricBlurEnabled = !store.lyricBlurEnabled"
-              >
-                <div class="nfw-st-copy">
-                  <span class="nfw-st-title">歌词景深模糊</span>
-                  <span class="nfw-st-desc">关闭则全部歌词锐利清晰</span>
-                </div>
-                <span class="nfw-switch-pill" :class="{ on: store.lyricBlurEnabled }">
-                  <span class="nfw-switch-thumb"></span>
-                </span>
-              </button>
-
-              <button
-                type="button"
-                class="nfw-switch-tile"
-                :class="{ on: store.lyricTranslationTintEnabled }"
-                @click="store.lyricTranslationTintEnabled = !store.lyricTranslationTintEnabled"
-              >
-                <div class="nfw-st-copy">
-                  <span class="nfw-st-title">译文随色</span>
-                  <span class="nfw-st-desc">关闭则跟随未唱墨色</span>
-                </div>
-                <span class="nfw-switch-pill" :class="{ on: store.lyricTranslationTintEnabled }">
-                  <span class="nfw-switch-thumb"></span>
-                </span>
-              </button>
-
-              <button
-                type="button"
-                class="nfw-switch-tile"
-                :class="{ on: store.showTranslation }"
-                @click="store.showTranslation = !store.showTranslation"
-              >
-                <div class="nfw-st-copy">
-                  <span class="nfw-st-title">双语译文</span>
-                  <span class="nfw-st-desc">外语歌曲展示中文翻译</span>
-                </div>
-                <span class="nfw-switch-pill" :class="{ on: store.showTranslation }">
-                  <span class="nfw-switch-thumb"></span>
-                </span>
-              </button>
-
-              <button
-                type="button"
-                class="nfw-switch-tile"
-                :class="{ on: store.showPhonetic }"
-                @click="store.showPhonetic = !store.showPhonetic"
-              >
-                <div class="nfw-st-copy">
-                  <span class="nfw-st-title">音译注音</span>
-                  <span class="nfw-st-desc">粤拼 / 日韩罗马音</span>
-                </div>
-                <span class="nfw-switch-pill" :class="{ on: store.showPhonetic }">
-                  <span class="nfw-switch-thumb"></span>
-                </span>
-              </button>
-
-              <button
-                type="button"
-                class="nfw-switch-tile"
-                :class="{ on: store.lyricInterludeDotsEnabled }"
-                @click="store.lyricInterludeDotsEnabled = !store.lyricInterludeDotsEnabled"
-              >
-                <div class="nfw-st-copy">
-                  <span class="nfw-st-title">间奏呼吸</span>
-                  <span class="nfw-st-desc">长间奏三点倒计时</span>
-                </div>
-                <span class="nfw-switch-pill" :class="{ on: store.lyricInterludeDotsEnabled }">
-                  <span class="nfw-switch-thumb"></span>
-                </span>
-              </button>
-
-              <button
-                type="button"
-                class="nfw-switch-tile"
-                :class="{ on: store.lyricClickSeekEnabled }"
-                @click="store.lyricClickSeekEnabled = !store.lyricClickSeekEnabled"
-              >
-                <div class="nfw-st-copy">
-                  <span class="nfw-st-title">点击跳转</span>
-                  <span class="nfw-st-desc">关闭可防止误触切进度</span>
-                </div>
-                <span class="nfw-switch-pill" :class="{ on: store.lyricClickSeekEnabled }">
-                  <span class="nfw-switch-thumb"></span>
-                </span>
-              </button>
-
-              <div class="nfw-return-delay-tile">
-                <div class="nfw-st-copy">
-                  <span class="nfw-st-title">滚轮自动回中</span>
-                  <span class="nfw-st-desc">翻看歌词后回弹等待</span>
-                </div>
-                <div class="nfw-mini-pills">
-                  <button
-                    v-for="opt in autoReturnOptions"
-                    :key="opt.sec"
-                    type="button"
-                    class="nfw-mini-pill"
-                    :class="{ active: store.lyricAutoReturnSec === opt.sec }"
-                    @click="store.lyricAutoReturnSec = opt.sec"
-                  >
-                    {{ opt.label }}
-                  </button>
-                </div>
               </div>
             </div>
           </div>
@@ -2928,8 +3327,13 @@ function handleJumpToTuner() {
 }
 
 .np-floating-window.w-lyric-studio {
-  width: min(720px, 92vw);
-  height: min(660px, 88vh);
+  width: min(736px, 92vw);
+  height: min(678px, 88vh);
+  transition: opacity 0.2s ease;
+}
+
+.np-floating-window.w-lyric-studio.is-peek-transparent {
+  opacity: 0.14;
 }
 
 .np-floating-window.w-more-hub {
@@ -3353,42 +3757,144 @@ function handleJumpToTuner() {
   flex-shrink: 0;
 }
 
+.nfw-peek-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: var(--fm-chip-bg);
+  color: var(--fm-text-2);
+  font-size: var(--bm-fs-micro, 11px);
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.nfw-peek-btn:hover {
+  background: var(--fm-primary-soft);
+  color: var(--fm-text-1);
+}
+
 .nfw-lyric-preview-card {
   position: relative;
   border-radius: var(--bm-r-lg, 18px);
-  padding: 14px 16px 12px;
+  padding: 16px 18px 13px;
   background: var(--fm-input-bg);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
   flex-shrink: 0;
+  overflow: hidden;
   transition: background 0.25s ease;
 }
 
+.nfw-preview-corner-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
 .nfw-preview-corner-tag {
-  position: absolute;
-  top: 8px;
-  right: 12px;
   font-size: var(--bm-fs-micro, 11px);
   font-weight: 700;
-  padding: 2px 8px;
+  padding: 2px 9px;
   border-radius: var(--bm-r-pill, 999px);
   background: var(--fm-chip-bg);
   color: var(--fm-text-3);
   pointer-events: none;
 }
 
-.nfw-lp-main {
-  font-weight: 800;
-  line-height: 1.35;
+.nfw-preview-play-btn {
+  height: 22px;
+  padding: 0 9px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: var(--fm-chip-bg);
+  color: var(--fm-text-2);
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
 }
 
-.nfw-lp-sung {
+.nfw-preview-play-btn:hover {
+  background: var(--fm-primary-soft);
+  color: var(--fm-text-1);
+}
+
+.nfw-lp-main {
+  font-weight: 800;
+  line-height: 1.42;
+  text-rendering: geometricPrecision;
+}
+
+.nfw-lp-cluster {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.nfw-lp-cluster.is-harmony {
+  font-size: 0.78em;
+  font-style: italic;
+  opacity: 0.82;
+}
+
+.nfw-lp-word {
+  position: relative;
+  display: inline-block;
+  transform-origin: center 72%;
+}
+
+.nfw-lp-word-base {
+  position: relative;
+  z-index: 1;
+  display: inline-block;
+}
+
+.nfw-lp-word-lit {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: inline-block;
+  pointer-events: none;
+  user-select: none;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
   -webkit-text-fill-color: transparent;
-  transition: background-image 0.25s ease;
+}
+
+.nfw-lyric-preview-card.is-preview-sweep .nfw-lp-word-lit {
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 34%,
+    rgba(0, 0, 0, 0.68) 41%,
+    rgba(0, 0, 0, 0.22) 48%,
+    transparent 55%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 34%,
+    rgba(0, 0, 0, 0.68) 41%,
+    rgba(0, 0, 0, 0.22) 48%,
+    transparent 55%,
+    transparent 100%
+  );
+  -webkit-mask-size: 300% 100%;
+  mask-size: 300% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: var(--kw-mask-x, 100%) 0;
+  mask-position: var(--kw-mask-x, 100%) 0;
+}
+
+.nfw-lyric-preview-card.is-preview-bloom .nfw-lp-word-lit {
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 
 .nfw-lp-trans {
@@ -3404,6 +3910,201 @@ function handleJumpToTuner() {
   transition:
     opacity 0.2s ease,
     filter 0.2s ease;
+}
+
+.nfw-scene-grid-5 {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.nfw-scene-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 9px 10px;
+  border-radius: var(--bm-r-md, 14px);
+  background: var(--fm-card-elevated);
+  color: var(--fm-text-1);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 0.22s cubic-bezier(0.22, 1.35, 0.36, 1),
+    background 0.18s ease,
+    box-shadow 0.2s ease;
+}
+
+.nfw-scene-tile:hover {
+  transform: translateY(-1px);
+  background: var(--fm-card-hover);
+}
+
+.nfw-scene-bar {
+  width: 18px;
+  height: 5px;
+  border-radius: 999px;
+  margin-bottom: 2px;
+}
+
+.nfw-scene-name {
+  font-size: var(--bm-fs-caption, 12.5px);
+  font-weight: 800;
+  color: var(--fm-text-1);
+}
+
+.nfw-scene-tag {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--fm-text-3);
+  white-space: nowrap;
+}
+
+.nfw-motion-grid-2col {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.nfw-motion-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 9px 11px;
+  border-radius: var(--bm-r-md, 14px);
+  background: var(--fm-card-elevated);
+  color: var(--fm-text-1);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 0.22s cubic-bezier(0.22, 1.35, 0.36, 1),
+    background 0.18s ease,
+    box-shadow 0.2s ease;
+}
+
+.nfw-motion-tile:hover {
+  transform: translateY(-1px);
+  background: var(--fm-card-hover);
+}
+
+.nfw-mt-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nfw-mt-title {
+  font-size: var(--bm-fs-caption, 12.5px);
+  font-weight: 800;
+  color: var(--fm-text-1);
+}
+
+.nfw-mt-badge {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 1px 6px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: var(--fm-primary-soft);
+  color: var(--np-primary, var(--fm-primary));
+}
+
+.nfw-mt-desc {
+  font-size: var(--bm-fs-micro, 11px);
+  color: var(--fm-text-3);
+  line-height: 1.35;
+}
+
+.nfw-sliders-3col {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.nfw-slider-stack-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px 10px 10px;
+  border-radius: var(--bm-r-md, 13px);
+  background: var(--fm-card-elevated);
+  min-width: 0;
+  transition: opacity 0.2s ease;
+}
+
+.nfw-slider-stack-card.is-disabled {
+  opacity: 0.42;
+}
+
+.nfw-slider-stack-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.nfw-slider-stack-label {
+  font-size: var(--bm-fs-caption, 12px);
+  font-weight: 700;
+  color: var(--fm-text-2);
+  white-space: nowrap;
+}
+
+.nfw-slider-stack-card .nfw-range {
+  width: 100%;
+  min-width: 0;
+  flex: none;
+}
+
+.nfw-switch-matrix-3col {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.nfw-inline-toggle-chip {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--bm-r-pill, 999px);
+  background: var(--fm-card-elevated);
+  color: var(--fm-text-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.nfw-inline-toggle-chip.active {
+  background: var(--fm-primary-soft);
+  color: var(--fm-text-1);
+}
+
+.nfw-mini-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fm-text-3);
+  opacity: 0.45;
+  transition: background 0.16s ease, opacity 0.16s ease;
+}
+
+.nfw-mini-dot.on {
+  background: var(--np-primary, var(--fm-primary));
+  opacity: 1;
+}
+
+@media (max-width: 680px) {
+  .nfw-scene-grid-5 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .nfw-motion-grid-2col,
+  .nfw-sliders-3col,
+  .nfw-switch-matrix-3col {
+    grid-template-columns: 1fr;
+  }
 }
 
 .nfw-section-block {
@@ -3543,7 +4244,7 @@ function handleJumpToTuner() {
   height: 11px;
   border-radius: 50%;
   flex-shrink: 0;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.28);
 }
 
 .nfw-swatch-name {
@@ -3715,6 +4416,7 @@ function handleJumpToTuner() {
 
 .nfw-range {
   flex: 1;
+  min-width: 0;
   -webkit-appearance: none;
   appearance: none;
   height: 5px;

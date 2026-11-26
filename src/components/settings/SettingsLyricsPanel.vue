@@ -7,7 +7,15 @@ import type {
   LyricAlignment,
   LyricFontFamily,
   LyricFontWeightLevel,
+  LyricScenePresetId,
 } from "../../types";
+import {
+  LYRIC_FONT_FAMILY_OPTIONS,
+  LYRIC_FONT_WEIGHT_OPTIONS,
+  LYRIC_MOTION_STYLE_OPTIONS,
+  LYRIC_SCENE_PRESETS,
+  LYRIC_SCROLL_CASCADE_OPTIONS,
+} from "../../utils/lyricTypography";
 import PlumpIcon from "../PlumpIcon.vue";
 import SettingsCard from "./SettingsCard.vue";
 import SettingsRow from "./SettingsRow.vue";
@@ -46,6 +54,14 @@ function selectStageLyricWeight(w: LyricFontWeightLevel) {
   }
 }
 
+function handleApplyScenePreset(presetId: Exclude<LyricScenePresetId, "custom">) {
+  store.applyLyricScenePreset(presetId);
+  const found = LYRIC_SCENE_PRESETS.find((p) => p.id === presetId);
+  if (found) {
+    store.notify(`已应用「${found.label}」歌词场景预设`);
+  }
+}
+
 const dlLayoutOptions: ReadonlyArray<{ id: DesktopLyricLayoutMode; label: string }> = [
   { id: "center", label: "双行居中" },
   { id: "ktv", label: "KTV 交替" },
@@ -60,19 +76,11 @@ const dlStrokeOptions: ReadonlyArray<{ id: DesktopLyricStrokeWidth; label: strin
   { id: "bold", label: "醒目" },
 ];
 
-const fontFamilyOptions: ReadonlyArray<{ id: LyricFontFamily; label: string }> = [
-  { id: "sans", label: "现代黑体" },
-  { id: "rounded", label: "软润圆体" },
-  { id: "serif", label: "人文宋体" },
-  { id: "editorial", label: "杂志衬线" },
-];
-
-const fontWeightOptions: ReadonlyArray<{ id: LyricFontWeightLevel; label: string }> = [
-  { id: 500, label: "常规" },
-  { id: 650, label: "中粗" },
-  { id: 760, label: "饱满" },
-  { id: 880, label: "厚重" },
-];
+const fontFamilyOptions = LYRIC_FONT_FAMILY_OPTIONS;
+const fontWeightOptions = LYRIC_FONT_WEIGHT_OPTIONS;
+const motionStyleOptions = LYRIC_MOTION_STYLE_OPTIONS;
+const scrollCascadeOptions = LYRIC_SCROLL_CASCADE_OPTIONS;
+const scenePresetOptions = LYRIC_SCENE_PRESETS;
 
 const alignmentOptions: ReadonlyArray<{ id: LyricAlignment; label: string }> = [
   { id: "left", label: "居左" },
@@ -91,6 +99,14 @@ const lyricOffsetText = computed(() => {
   if (ms === 0) return "0.0s 准时";
   const sec = (ms / 1000).toFixed(1);
   return ms > 0 ? `+${sec}s (提前)` : `${sec}s (延后)`;
+});
+
+const activeScenePresetBadge = computed(() => {
+  if (store.activeLyricScenePreset === "custom") return "自定义微调";
+  const found = LYRIC_SCENE_PRESETS.find(
+    (p) => p.id === store.activeLyricScenePreset
+  );
+  return found ? `当前：${found.label}` : "自定义微调";
 });
 
 function handleSyncFromNowPlaying() {
@@ -367,12 +383,12 @@ function handleResetStageLyric() {
       </div>
     </SettingsCard>
 
-    <!-- 2. 沉浸播放页歌词默认偏好 -->
+    <!-- 2. 沉浸播放页歌词默认偏好（与播放页歌词设置工作台 100% 同源同步） -->
     <SettingsCard
       v-else
       key="stage"
-      title="沉浸播放页歌词偏好"
-      subtitle="与全屏播放页内部歌词设置弹窗完全同步，支持实时预览与随时微调"
+      title="沉浸播放页歌词引擎与偏好"
+      subtitle="与全屏播放页歌词设置工作台 100% 双向实时同步，覆盖场景预设、四套动效引擎与排版校准"
       icon="lyric-sliders"
       icon-color="var(--primary)"
       setting-id="lyrics-stage-prefs"
@@ -385,17 +401,110 @@ function handleResetStageLyric() {
       </template>
 
       <SettingsRow
-        title="字形风格与字重"
+        title="一键高定场景预设"
+        description="快速切换整套动效风格、对齐、字重、辉光与景深黄金配比（不影响自定义主题色与时间偏移）"
+        icon="sparkles"
+        icon-color="var(--primary)"
+        :badge="activeScenePresetBadge"
+        :badge-tone="store.activeLyricScenePreset === 'custom' ? 'muted' : 'primary'"
+        :highlighted="highlightedId === 'lyrics-stage-prefs'"
+        vertical
+      >
+        <div class="bms-scene-preset-grid" role="radiogroup" aria-label="播放页歌词场景预设">
+          <button
+            v-for="preset in scenePresetOptions"
+            :key="preset.id"
+            type="button"
+            role="radio"
+            class="bms-scene-preset-tile"
+            :class="{ active: store.activeLyricScenePreset === preset.id }"
+            :aria-checked="store.activeLyricScenePreset === preset.id"
+            @click="handleApplyScenePreset(preset.id)"
+          >
+            <span
+              class="bms-scene-dot"
+              :style="{ background: preset.accentSwatch }"
+              aria-hidden="true"
+            ></span>
+            <span class="bms-scene-name">{{ preset.label }}</span>
+            <span class="bms-scene-tag">{{ preset.tagline }}</span>
+          </button>
+        </div>
+      </SettingsRow>
+
+      <SettingsRow
+        title="逐字动效引擎与滚屏质感"
+        description="四套纯 GPU 合成逐字演绎引擎搭配三档零抖动滚屏策略，全面适配 60Hz–240Hz 显示器"
+        icon="wave"
+        icon-color="var(--cyan)"
+        vertical
+      >
+        <div class="bms-motion-engine-grid" role="radiogroup" aria-label="逐字动效引擎">
+          <button
+            v-for="ms in motionStyleOptions"
+            :key="ms.id"
+            type="button"
+            role="radio"
+            class="bms-motion-engine-card"
+            :class="{ active: store.lyricMotionStyle === ms.id }"
+            :aria-checked="store.lyricMotionStyle === ms.id"
+            @click="store.lyricMotionStyle = ms.id"
+          >
+            <div class="bms-me-top">
+              <span class="bms-me-title">{{ ms.label }}</span>
+              <span v-if="ms.badge" class="bms-me-badge">{{ ms.badge }}</span>
+            </div>
+            <span class="bms-me-desc">{{ ms.desc }}</span>
+          </button>
+        </div>
+
+        <div class="bms-inline-groups">
+          <div class="bms-pill-group" role="radiogroup" aria-label="歌词滚屏质感">
+            <span class="bms-group-hint">滚屏质感：</span>
+            <button
+              v-for="sc in scrollCascadeOptions"
+              :key="sc.id"
+              type="button"
+              role="radio"
+              class="bms-pill-opt"
+              :class="{ active: store.lyricScrollCascadeMode === sc.id }"
+              :aria-checked="store.lyricScrollCascadeMode === sc.id"
+              :title="sc.desc"
+              @click="store.lyricScrollCascadeMode = sc.id"
+            >
+              {{ sc.label }}
+            </button>
+          </div>
+
+          <div class="bms-pill-group" role="radiogroup" aria-label="手动滚动歌词后自动回位延时">
+            <span class="bms-group-hint">自动回位：</span>
+            <button
+              v-for="sec in autoReturnOptions"
+              :key="sec"
+              type="button"
+              role="radio"
+              class="bms-pill-opt"
+              :class="{ active: store.lyricAutoReturnSec === sec }"
+              :aria-checked="store.lyricAutoReturnSec === sec"
+              @click="store.lyricAutoReturnSec = sec"
+            >
+              {{ sec }} 秒
+            </button>
+          </div>
+        </div>
+      </SettingsRow>
+
+      <SettingsRow
+        title="字形风格与四档字重"
         :description="
           store.stageLyricFontOverride.familyStack
             ? `当前已由「字体与排版」自定义覆写：${store.stageLyricFontOverride.label}`
-            : '选择播放页主歌词字体族与笔画粗细（亦可在「字体与排版」指定本机或导入字体）'
+            : '与播放页歌词工作台共用四款内置字形与四档真实字重阶梯（亦可在「字体与排版」导入本机字体）'
         "
         icon="font-plus"
         icon-color="var(--primary)"
         :badge="store.stageLyricFontOverride.familyStack ? '已自定义字体' : ''"
         badge-tone="primary"
-        :highlighted="highlightedId === 'lyrics-stage-prefs'"
         vertical
       >
         <div class="bms-inline-groups">
@@ -437,12 +546,26 @@ function handleResetStageLyric() {
               {{ w.label }}
             </button>
           </div>
+          <div class="bms-pill-group" role="radiogroup" aria-label="歌词对齐方式">
+            <button
+              v-for="al in alignmentOptions"
+              :key="al.id"
+              type="button"
+              role="radio"
+              class="bms-pill-opt"
+              :class="{ active: store.lyricAlignment === al.id }"
+              :aria-checked="store.lyricAlignment === al.id"
+              @click="store.lyricAlignment = al.id"
+            >
+              {{ al.label }}
+            </button>
+          </div>
         </div>
       </SettingsRow>
 
       <SettingsRow
-        title="字号、行距与对齐方式"
-        description="调节播放页右侧歌词舞台的文字呼吸尺度"
+        title="字号、行距与光学质感"
+        description="细腻调节主词尺码、行间呼吸距、焦点放大倍率与逐字辉光强度"
         icon="lyric-layout-left"
         icon-color="var(--cyan)"
         vertical
@@ -479,38 +602,38 @@ function handleResetStageLyric() {
               <span class="bms-range-val">{{ store.lyricLineSpacing }} px</span>
             </div>
           </div>
-        </div>
 
-        <div class="bms-inline-groups">
-          <div class="bms-pill-group" role="radiogroup" aria-label="歌词对齐方式">
-            <button
-              v-for="al in alignmentOptions"
-              :key="al.id"
-              type="button"
-              role="radio"
-              class="bms-pill-opt"
-              :class="{ active: store.lyricAlignment === al.id }"
-              :aria-checked="store.lyricAlignment === al.id"
-              @click="store.lyricAlignment = al.id"
-            >
-              {{ al.label }}
-            </button>
+          <div class="bms-slider-field">
+            <label for="bms-st-focus-ratio" class="bms-slider-label">焦点放大倍率</label>
+            <div class="bms-slider-wrap">
+              <input
+                id="bms-st-focus-ratio"
+                v-model.number="store.lyricFocusScaleRatio"
+                type="range"
+                min="1"
+                max="1.24"
+                step="0.02"
+                :disabled="!store.lyricFocusScaleEnabled"
+                class="bms-range"
+              />
+              <span class="bms-range-val">{{ Number(store.lyricFocusScaleRatio).toFixed(2) }}x</span>
+            </div>
           </div>
 
-          <div class="bms-pill-group" role="radiogroup" aria-label="手动滚动歌词后自动回位延时">
-            <span class="bms-group-hint">自动回位：</span>
-            <button
-              v-for="sec in autoReturnOptions"
-              :key="sec"
-              type="button"
-              role="radio"
-              class="bms-pill-opt"
-              :class="{ active: store.lyricAutoReturnSec === sec }"
-              :aria-checked="store.lyricAutoReturnSec === sec"
-              @click="store.lyricAutoReturnSec = sec"
-            >
-              {{ sec }} 秒
-            </button>
+          <div class="bms-slider-field">
+            <label for="bms-st-glow" class="bms-slider-label">逐字辉光强度</label>
+            <div class="bms-slider-wrap">
+              <input
+                id="bms-st-glow"
+                v-model.number="store.lyricGlowIntensity"
+                type="range"
+                min="0"
+                max="200"
+                step="5"
+                class="bms-range"
+              />
+              <span class="bms-range-val">{{ Math.round(store.lyricGlowIntensity) }}%</span>
+            </div>
           </div>
         </div>
       </SettingsRow>
@@ -539,12 +662,20 @@ function handleResetStageLyric() {
 
       <div class="bms-mini-toggle-grid">
         <label class="bms-mini-toggle-card" for="bms-sw-st-krc">
-          <span>KRC 逐字高亮</span>
+          <span>KRC 逐字演绎</span>
           <SettingsSwitch id="bms-sw-st-krc" v-model="store.lyricWordByWord" />
         </label>
         <label class="bms-mini-toggle-card" for="bms-sw-st-bounce">
-          <span>逐字弹性微弹跳</span>
-          <SettingsSwitch id="bms-sw-st-bounce" v-model="store.lyricWordBounceEnabled" />
+          <span>逐字微浮弹性</span>
+          <SettingsSwitch
+            id="bms-sw-st-bounce"
+            v-model="store.lyricWordBounceEnabled"
+            :disabled="!store.lyricWordByWord || store.lyricMotionStyle === 'apple_minimal'"
+          />
+        </label>
+        <label class="bms-mini-toggle-card" for="bms-sw-st-harmony">
+          <span>和声/伴唱轻量化排版</span>
+          <SettingsSwitch id="bms-sw-st-harmony" v-model="store.lyricHarmonyStyleEnabled" />
         </label>
         <label class="bms-mini-toggle-card" for="bms-sw-st-blur">
           <span>非焦点行景深模糊</span>
@@ -554,13 +685,21 @@ function handleResetStageLyric() {
           <span>当前焦点行微幅放大</span>
           <SettingsSwitch id="bms-sw-st-scale" v-model="store.lyricFocusScaleEnabled" />
         </label>
+        <label class="bms-mini-toggle-card" for="bms-sw-st-dots">
+          <span>液态光珠间奏倒计时</span>
+          <SettingsSwitch id="bms-sw-st-dots" v-model="store.lyricInterludeDotsEnabled" />
+        </label>
         <label class="bms-mini-toggle-card" for="bms-sw-st-seek">
           <span>点击任意歌词跳转进度</span>
           <SettingsSwitch id="bms-sw-st-seek" v-model="store.lyricClickSeekEnabled" />
         </label>
-        <label class="bms-mini-toggle-card" for="bms-sw-st-dots">
-          <span>间奏呼吸光点提示</span>
-          <SettingsSwitch id="bms-sw-st-dots" v-model="store.lyricInterludeDotsEnabled" />
+        <label class="bms-mini-toggle-card" for="bms-sw-st-trans">
+          <span>显示双语译文</span>
+          <SettingsSwitch id="bms-sw-st-trans" v-model="store.showTranslation" />
+        </label>
+        <label class="bms-mini-toggle-card" for="bms-sw-st-phonetic">
+          <span>显示罗马音 / 音译</span>
+          <SettingsSwitch id="bms-sw-st-phonetic" v-model="store.showPhonetic" />
         </label>
       </div>
     </SettingsCard>
@@ -574,6 +713,137 @@ function handleResetStageLyric() {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.bms-scene-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 9px;
+  width: 100%;
+}
+
+@media (max-width: 1120px) {
+  .bms-scene-preset-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .bms-scene-preset-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.bms-scene-preset-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 11px 12px;
+  border-radius: 14px;
+  background: var(--bms-surface-tile);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.18s ease,
+    transform 0.2s cubic-bezier(0.22, 1.35, 0.36, 1),
+    box-shadow 0.2s ease;
+}
+
+.bms-scene-preset-tile:hover {
+  background: var(--bms-surface-tile-hover);
+  transform: translateY(-1px);
+}
+
+.bms-scene-preset-tile.active {
+  background: color-mix(in oklab, var(--primary) 16%, var(--bms-surface-tile));
+  box-shadow: 0 6px 18px color-mix(in oklab, var(--primary) 16%, transparent);
+}
+
+.bms-scene-dot {
+  width: 18px;
+  height: 6px;
+  border-radius: 999px;
+  margin-bottom: 2px;
+}
+
+.bms-scene-name {
+  font-size: var(--bm-fs-caption, 12.5px);
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.bms-scene-tag {
+  font-size: var(--bm-fs-micro, 11px);
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.bms-motion-engine-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+@media (max-width: 720px) {
+  .bms-motion-engine-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.bms-motion-engine-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 11px 14px;
+  border-radius: 14px;
+  background: var(--bms-surface-tile);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.18s ease,
+    transform 0.2s cubic-bezier(0.22, 1.35, 0.36, 1),
+    box-shadow 0.2s ease;
+}
+
+.bms-motion-engine-card:hover {
+  background: var(--bms-surface-tile-hover);
+  transform: translateY(-1px);
+}
+
+.bms-motion-engine-card.active {
+  background: color-mix(in oklab, var(--primary) 16%, var(--bms-surface-tile));
+  box-shadow: 0 6px 18px color-mix(in oklab, var(--primary) 14%, transparent);
+}
+
+.bms-me-top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.bms-me-title {
+  font-size: var(--bm-fs-caption, 12.5px);
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.bms-me-badge {
+  font-size: 10.5px;
+  font-weight: 800;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--primary) 20%, transparent);
+  color: var(--primary-text, var(--primary));
+}
+
+.bms-me-desc {
+  font-size: var(--bm-fs-micro, 11px);
+  color: var(--text-muted);
+  line-height: 1.4;
 }
 
 .bms-dual-sliders {

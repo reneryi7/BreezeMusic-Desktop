@@ -50,6 +50,9 @@ import type {
   LyricFontFamily,
   LyricFontWeightLevel,
   LyricHighlightThemeId,
+  LyricMotionStyle,
+  LyricScenePresetId,
+  LyricScrollCascadeMode,
   LyricSungColorMode,
   LyricThemeId,
   LyricUnsungPresetId,
@@ -130,6 +133,10 @@ import {
   isBrowserDevPreviewEnv,
 } from "../utils/devPreviewShowcase";
 import {
+  LYRIC_SCENE_PRESETS,
+  matchActiveLyricScenePreset,
+  normalizeLyricMotionStyle,
+  normalizeLyricScrollCascadeMode,
   normalizeLyricThemeId,
   normalizeUnsungPresetId,
 } from "../utils/lyricTypography";
@@ -1235,6 +1242,17 @@ export const useAppStore = defineStore("breezeApp", () => {
   const lyricWordBounceEnabled = ref<boolean>(
     localStorage.getItem("bm_lyric_word_bounce") !== "false"
   );
+  const lyricMotionStyle = ref<LyricMotionStyle>(
+    normalizeLyricMotionStyle(localStorage.getItem("bm_lyric_motion_style_v1"))
+  );
+  const lyricScrollCascadeMode = ref<LyricScrollCascadeMode>(
+    normalizeLyricScrollCascadeMode(
+      localStorage.getItem("bm_lyric_scroll_cascade_v1")
+    )
+  );
+  const lyricHarmonyStyleEnabled = ref<boolean>(
+    localStorage.getItem("bm_lyric_harmony_style_v1") !== "false"
+  );
   const lyricFocusScaleEnabled = ref<boolean>(
     localStorage.getItem("bm_lyric_focus_scale") !== "false"
   );
@@ -1264,7 +1282,8 @@ export const useAppStore = defineStore("breezeApp", () => {
   const lyricFontFamily = ref<LyricFontFamily>(
     ((localStorage.getItem("bm_lyric_font_family") as LyricFontFamily) || "sans")
   );
-  const rawSavedGlow = Number(localStorage.getItem("bm_lyric_glow_int"));
+  const rawSavedGlowStr = localStorage.getItem("bm_lyric_glow_int");
+  const rawSavedGlow = rawSavedGlowStr !== null ? Number(rawSavedGlowStr) : NaN;
   const lyricGlowIntensity = ref<number>(
     Number.isFinite(rawSavedGlow) && rawSavedGlow >= 0 && rawSavedGlow <= 200
       ? Math.round(rawSavedGlow)
@@ -1276,6 +1295,51 @@ export const useAppStore = defineStore("breezeApp", () => {
       ? Number(rawSavedInactiveOp.toFixed(2))
       : 0.36
   );
+
+  const activeLyricScenePreset = computed<LyricScenePresetId>(() =>
+    matchActiveLyricScenePreset({
+      motionStyle: lyricMotionStyle.value,
+      scrollCascadeMode: lyricScrollCascadeMode.value,
+      sungMode: lyricSungMode.value,
+      fontFamily: lyricFontFamily.value,
+      fontWeight: lyricFontWeight.value,
+      fontSize: lyricFontSize.value,
+      lineSpacing: lyricLineSpacing.value,
+      alignment: lyricAlignment.value,
+      focusScaleEnabled: lyricFocusScaleEnabled.value,
+      focusScaleRatio: lyricFocusScaleRatio.value,
+      blurEnabled: lyricBlurEnabled.value,
+      blurIntensity: lyricBlurIntensity.value,
+      glowIntensity: lyricGlowIntensity.value,
+      wordByWord: lyricWordByWord.value,
+      wordBounceEnabled: lyricWordBounceEnabled.value,
+      harmonyStyleEnabled: lyricHarmonyStyleEnabled.value,
+    })
+  );
+
+  function applyLyricScenePreset(
+    presetId: Exclude<LyricScenePresetId, "custom">
+  ) {
+    const found = LYRIC_SCENE_PRESETS.find((p) => p.id === presetId);
+    if (!found) return;
+    const c = found.config;
+    lyricMotionStyle.value = c.motionStyle;
+    lyricScrollCascadeMode.value = c.scrollCascadeMode;
+    lyricSungMode.value = c.sungMode;
+    lyricFontFamily.value = c.fontFamily;
+    lyricFontWeight.value = c.fontWeight;
+    lyricFontSize.value = c.fontSize;
+    lyricLineSpacing.value = c.lineSpacing;
+    lyricAlignment.value = c.alignment;
+    lyricFocusScaleEnabled.value = c.focusScaleEnabled;
+    lyricFocusScaleRatio.value = c.focusScaleRatio;
+    lyricBlurEnabled.value = c.blurEnabled;
+    lyricBlurIntensity.value = c.blurIntensity;
+    lyricGlowIntensity.value = c.glowIntensity;
+    lyricWordByWord.value = c.wordByWord;
+    lyricWordBounceEnabled.value = c.wordBounceEnabled;
+    lyricHarmonyStyleEnabled.value = c.harmonyStyleEnabled;
+  }
 
   function resetLyricSettingsToDefault() {
     lyricTheme.value = "dynamic_cover";
@@ -1299,6 +1363,9 @@ export const useAppStore = defineStore("breezeApp", () => {
     lyricInactiveOpacity.value = 0.36;
     lyricWordByWord.value = true;
     lyricWordBounceEnabled.value = true;
+    lyricMotionStyle.value = "silk_flow";
+    lyricScrollCascadeMode.value = "wave";
+    lyricHarmonyStyleEnabled.value = true;
     lyricFocusScaleEnabled.value = true;
     lyricTranslationTintEnabled.value = true;
     lyricInterludeDotsEnabled.value = true;
@@ -1836,6 +1903,15 @@ export const useAppStore = defineStore("breezeApp", () => {
   });
   watch(lyricWordBounceEnabled, (v) =>
     localStorage.setItem("bm_lyric_word_bounce", String(v))
+  );
+  watch(lyricMotionStyle, (v) =>
+    localStorage.setItem("bm_lyric_motion_style_v1", v)
+  );
+  watch(lyricScrollCascadeMode, (v) =>
+    localStorage.setItem("bm_lyric_scroll_cascade_v1", v)
+  );
+  watch(lyricHarmonyStyleEnabled, (v) =>
+    localStorage.setItem("bm_lyric_harmony_style_v1", String(v))
   );
   watch(lyricFocusScaleEnabled, (v) =>
     localStorage.setItem("bm_lyric_focus_scale", String(v))
@@ -7882,6 +7958,11 @@ export const useAppStore = defineStore("breezeApp", () => {
     lyricBackgroundDim,
     lyricWordByWord,
     lyricWordBounceEnabled,
+    lyricMotionStyle,
+    lyricScrollCascadeMode,
+    lyricHarmonyStyleEnabled,
+    activeLyricScenePreset,
+    applyLyricScenePreset,
     lyricFocusScaleEnabled,
     lyricTranslationTintEnabled,
     lyricInterludeDotsEnabled,

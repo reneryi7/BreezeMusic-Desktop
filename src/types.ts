@@ -251,6 +251,25 @@ export interface CoverColorRoles {
 
 export type LyricAlignment = "left" | "center" | "right";
 
+/** 播放页歌词逐字动效风格（丝绸羽化扫光 / 光晕浸润浮升 / 跃动脉冲 / 静谧直觉） */
+export type LyricMotionStyle =
+  | "silk_flow"
+  | "luminous_bloom"
+  | "kinetic_pop"
+  | "apple_minimal";
+
+/** 播放页歌词行级滚屏质感（弹性波浪错峰 / 柔顺平推 / 极速直达） */
+export type LyricScrollCascadeMode = "wave" | "smooth" | "instant";
+
+/** 播放页歌词一键高定场景预设 */
+export type LyricScenePresetId =
+  | "aurora_silk"
+  | "apple_minimal"
+  | "neon_stage"
+  | "ink_poetry"
+  | "large_comfort"
+  | "custom";
+
 export type PlayMode =
   | "repeat_all"
   | "repeat_one"

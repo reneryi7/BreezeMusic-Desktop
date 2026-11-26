@@ -9,9 +9,13 @@
 import type {
   DesktopLyricStrokeColorMode,
   DesktopLyricStrokeWidth,
+  LyricAlignment,
   LyricFontFamily,
   LyricFontWeightLevel,
   LyricHighlightThemeId,
+  LyricMotionStyle,
+  LyricScenePresetId,
+  LyricScrollCascadeMode,
   LyricSungColorMode,
   LyricUnsungPresetId,
 } from "../types";
@@ -469,4 +473,250 @@ export function resolveDesktopStrokeStyle(params: {
   }
 
   return { strokePx, strokeColor, textShadow };
+}
+
+// ============================================================================
+// 5. 播放页歌词动效引擎风格、滚屏质感与 5 套高定场景预设（全端单一事实源）
+// ============================================================================
+
+export interface LyricMotionStyleOption {
+  id: LyricMotionStyle;
+  label: string;
+  desc: string;
+  badge?: string;
+}
+
+export const LYRIC_MOTION_STYLE_OPTIONS: ReadonlyArray<LyricMotionStyleOption> = [
+  {
+    id: "silk_flow",
+    label: "丝绸羽化扫光",
+    desc: "宽柔羽化遮罩逐字流动 · 克制微浮与长音柔光呼吸",
+    badge: "推荐",
+  },
+  {
+    id: "luminous_bloom",
+    label: "光晕浸润浮升",
+    desc: "整字广域柔光漫染点亮 · 温柔阻尼托举与退场余韵",
+  },
+  {
+    id: "kinetic_pop",
+    label: "跃动脉冲",
+    desc: "快节奏羽化扫光叠加灵动弹性微跃与连音字浪",
+  },
+  {
+    id: "apple_minimal",
+    label: "静谧直觉",
+    desc: "零单字跳动，纯以柔光扫过与景深聚焦呈现极致阅读",
+  },
+];
+
+export const LYRIC_SCROLL_CASCADE_OPTIONS: ReadonlyArray<{
+  id: LyricScrollCascadeMode;
+  label: string;
+  desc: string;
+}> = [
+  { id: "wave", label: "波浪错峰", desc: "邻行依次弹性追随" },
+  { id: "smooth", label: "柔顺平推", desc: "整列平滑同步推进" },
+  { id: "instant", label: "极速直达", desc: "零延迟干脆到位" },
+];
+
+export function normalizeLyricMotionStyle(raw?: string | null): LyricMotionStyle {
+  if (
+    raw === "silk_flow" ||
+    raw === "luminous_bloom" ||
+    raw === "kinetic_pop" ||
+    raw === "apple_minimal"
+  ) {
+    return raw;
+  }
+  return "silk_flow";
+}
+
+export function normalizeLyricScrollCascadeMode(
+  raw?: string | null
+): LyricScrollCascadeMode {
+  if (raw === "wave" || raw === "smooth" || raw === "instant") {
+    return raw;
+  }
+  return "wave";
+}
+
+export interface LyricScenePresetConfig {
+  motionStyle: LyricMotionStyle;
+  scrollCascadeMode: LyricScrollCascadeMode;
+  sungMode: LyricSungColorMode;
+  fontFamily: LyricFontFamily;
+  fontWeight: LyricFontWeightLevel;
+  fontSize: number;
+  lineSpacing: number;
+  alignment: LyricAlignment;
+  focusScaleEnabled: boolean;
+  focusScaleRatio: number;
+  blurEnabled: boolean;
+  blurIntensity: number;
+  glowIntensity: number;
+  wordByWord: boolean;
+  wordBounceEnabled: boolean;
+  harmonyStyleEnabled: boolean;
+}
+
+export interface LyricScenePresetOption {
+  id: Exclude<LyricScenePresetId, "custom">;
+  label: string;
+  tagline: string;
+  accentSwatch: string;
+  config: LyricScenePresetConfig;
+}
+
+export const LYRIC_SCENE_PRESETS: ReadonlyArray<LyricScenePresetOption> = [
+  {
+    id: "aurora_silk",
+    label: "极光丝绸",
+    tagline: "羽化流光 · 柔波",
+    accentSwatch: "linear-gradient(135deg, #6366F1 0%, #38BDF8 100%)",
+    config: {
+      motionStyle: "silk_flow",
+      scrollCascadeMode: "wave",
+      sungMode: "gradient",
+      fontFamily: "sans",
+      fontWeight: 760,
+      fontSize: 28,
+      lineSpacing: 16,
+      alignment: "left",
+      focusScaleEnabled: true,
+      focusScaleRatio: 1.08,
+      blurEnabled: true,
+      blurIntensity: 1.0,
+      glowIntensity: 100,
+      wordByWord: true,
+      wordBounceEnabled: true,
+      harmonyStyleEnabled: true,
+    },
+  },
+  {
+    id: "apple_minimal",
+    label: "苹果静谧",
+    tagline: "纯净聚焦 · 零跳",
+    accentSwatch: "linear-gradient(135deg, #E2E8F0 0%, #94A3B8 100%)",
+    config: {
+      motionStyle: "apple_minimal",
+      scrollCascadeMode: "wave",
+      sungMode: "solid",
+      fontFamily: "sans",
+      fontWeight: 760,
+      fontSize: 30,
+      lineSpacing: 18,
+      alignment: "left",
+      focusScaleEnabled: true,
+      focusScaleRatio: 1.06,
+      blurEnabled: true,
+      blurIntensity: 1.15,
+      glowIntensity: 35,
+      wordByWord: true,
+      wordBounceEnabled: false,
+      harmonyStyleEnabled: true,
+    },
+  },
+  {
+    id: "neon_stage",
+    label: "霓虹舞台",
+    tagline: "跃动脉冲 · 居中",
+    accentSwatch: "linear-gradient(135deg, #FB7185 0%, #FBBF24 100%)",
+    config: {
+      motionStyle: "kinetic_pop",
+      scrollCascadeMode: "wave",
+      sungMode: "gradient",
+      fontFamily: "editorial",
+      fontWeight: 880,
+      fontSize: 31,
+      lineSpacing: 18,
+      alignment: "center",
+      focusScaleEnabled: true,
+      focusScaleRatio: 1.12,
+      blurEnabled: true,
+      blurIntensity: 0.9,
+      glowIntensity: 145,
+      wordByWord: true,
+      wordBounceEnabled: true,
+      harmonyStyleEnabled: true,
+    },
+  },
+  {
+    id: "ink_poetry",
+    label: "纸墨诗笺",
+    tagline: "宋韵光晕 · 雅致",
+    accentSwatch: "linear-gradient(135deg, #34D399 0%, #0D9488 100%)",
+    config: {
+      motionStyle: "luminous_bloom",
+      scrollCascadeMode: "smooth",
+      sungMode: "solid",
+      fontFamily: "serif",
+      fontWeight: 650,
+      fontSize: 27,
+      lineSpacing: 20,
+      alignment: "center",
+      focusScaleEnabled: true,
+      focusScaleRatio: 1.05,
+      blurEnabled: false,
+      blurIntensity: 0.8,
+      glowIntensity: 60,
+      wordByWord: true,
+      wordBounceEnabled: true,
+      harmonyStyleEnabled: true,
+    },
+  },
+  {
+    id: "large_comfort",
+    label: "大字护眼",
+    tagline: "清晰锐利 · 舒展",
+    accentSwatch: "linear-gradient(135deg, #38BDF8 0%, #34D399 100%)",
+    config: {
+      motionStyle: "silk_flow",
+      scrollCascadeMode: "smooth",
+      sungMode: "solid",
+      fontFamily: "rounded",
+      fontWeight: 760,
+      fontSize: 36,
+      lineSpacing: 22,
+      alignment: "left",
+      focusScaleEnabled: false,
+      focusScaleRatio: 1.0,
+      blurEnabled: false,
+      blurIntensity: 0.6,
+      glowIntensity: 45,
+      wordByWord: true,
+      wordBounceEnabled: false,
+      harmonyStyleEnabled: true,
+    },
+  },
+];
+
+export function matchActiveLyricScenePreset(
+  current: LyricScenePresetConfig
+): LyricScenePresetId {
+  for (const preset of LYRIC_SCENE_PRESETS) {
+    const c = preset.config;
+    if (
+      current.motionStyle === c.motionStyle &&
+      current.scrollCascadeMode === c.scrollCascadeMode &&
+      current.sungMode === c.sungMode &&
+      current.fontFamily === c.fontFamily &&
+      current.fontWeight === c.fontWeight &&
+      Math.round(current.fontSize) === c.fontSize &&
+      Math.round(current.lineSpacing) === c.lineSpacing &&
+      current.alignment === c.alignment &&
+      current.focusScaleEnabled === c.focusScaleEnabled &&
+      (!c.focusScaleEnabled ||
+        Math.abs(current.focusScaleRatio - c.focusScaleRatio) < 0.015) &&
+      current.blurEnabled === c.blurEnabled &&
+      (!c.blurEnabled || Math.abs(current.blurIntensity - c.blurIntensity) < 0.06) &&
+      Math.abs(current.glowIntensity - c.glowIntensity) <= 6 &&
+      current.wordByWord === c.wordByWord &&
+      current.wordBounceEnabled === c.wordBounceEnabled &&
+      current.harmonyStyleEnabled === c.harmonyStyleEnabled
+    ) {
+      return preset.id;
+    }
+  }
+  return "custom";
 }
