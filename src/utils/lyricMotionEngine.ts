@@ -42,6 +42,8 @@ export interface WordPhysicsOptions {
   glowRatio: number;
   /** 是否处于浅色舞台（浅色舞台克制柔和，深色暗室饱满通透） */
   isLightStage: boolean;
+  /** 可选微浮缩放倍率（播放页默认 1.0，桌面悬浮歌词默认 0.72 以收敛余光干扰） */
+  liftScale?: number;
 }
 
 export interface WordVisualTarget {
@@ -343,12 +345,17 @@ export function computeWordOpticalTarget(
   const isBloom = style === "luminous_bloom";
   const useFeatherSweep = !isBloom;
 
+  const liftMul =
+    typeof opts.liftScale === "number" && Number.isFinite(opts.liftScale)
+      ? clamp(opts.liftScale, 0, 1.5)
+      : 1.0;
+
   const bounceAmp =
-    isMinimal || !opts.bounceEnabled || opts.motionLevel === "none"
+    (isMinimal || !opts.bounceEnabled || opts.motionLevel === "none"
       ? 0
       : opts.motionLevel === "standard"
       ? 0.62
-      : 1.0;
+      : 1.0) * liftMul;
 
   // 1. 未唱到：仅 kinetic_pop / luminous_bloom / silk_flow 在开唱后提供轻柔磁吸预热
   if (posMs < wStart) {

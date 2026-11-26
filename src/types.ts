@@ -115,6 +115,15 @@ export type DesktopLyricStrokeWidth = "none" | "thin" | "medium" | "bold";
 
 export type DesktopLyricStrokeColorMode = "auto" | "black" | "white" | "custom";
 
+/** 桌面悬浮歌词五套高定场景预设 */
+export type DesktopLyricScenePresetId =
+  | "apple_clear"
+  | "aurora_silk"
+  | "cinema_contrast"
+  | "neon_pulse"
+  | "ink_poetry"
+  | "custom";
+
 /** @deprecated 保留兼容旧缓存字段，新架构改用 DesktopLyricStrokeWidth + DesktopLyricStrokeColorMode */
 export type DesktopLyricClarityMode = "soft" | "crisp" | "bold" | "ink_light";
 

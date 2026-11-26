@@ -7,6 +7,7 @@
  */
 
 import type {
+  DesktopLyricScenePresetId,
   DesktopLyricStrokeColorMode,
   DesktopLyricStrokeWidth,
   LyricAlignment,
@@ -408,18 +409,19 @@ export function resolveLyricTypographyStyle(params: {
 }
 
 // ============================================================================
-// 4. 桌面歌词：真光学双层描边解析器（底层矢量描边 + 顶层纯净渐变，零吃字零重影）
+// 4. 桌面歌词：无尖刺圆角外扩轮廓 + 多层紧致光学空气柔影解析器
 // ============================================================================
 
 export const DESKTOP_STROKE_WIDTH_OPTIONS: Array<{
   id: DesktopLyricStrokeWidth;
   label: string;
   px: number;
+  dilatePx: number;
 }> = [
-  { id: "none", label: "无", px: 0 },
-  { id: "thin", label: "纤细", px: 1.6 },
-  { id: "medium", label: "标准", px: 3.0 },
-  { id: "bold", label: "醒目", px: 4.6 },
+  { id: "none", label: "无", px: 0, dilatePx: 0 },
+  { id: "thin", label: "纤细", px: 1.4, dilatePx: 0.9 },
+  { id: "medium", label: "标准", px: 2.6, dilatePx: 1.55 },
+  { id: "bold", label: "醒目", px: 3.8, dilatePx: 2.25 },
 ];
 
 export const DESKTOP_STROKE_COLOR_OPTIONS: Array<{
@@ -441,38 +443,77 @@ export function resolveDesktopStrokeStyle(params: {
   fontSizePx: number;
 }): {
   strokePx: number;
+  svgDilateRadius: number;
+  svgBlurStdDev: number;
   strokeColor: string;
+  strokeSolidHex: string;
+  strokeAlpha: number;
   textShadow: string;
+  airTextShadow: string;
 } {
   const opt =
     DESKTOP_STROKE_WIDTH_OPTIONS.find((o) => o.id === params.widthMode) ||
-    DESKTOP_STROKE_WIDTH_OPTIONS[2];
+    DESKTOP_STROKE_WIDTH_OPTIONS[0];
   // 描边粗细随字号温和自适应，小字不糊、大字有分量
-  const sizeScale = Math.max(0.75, Math.min(1.45, params.fontSizePx / 30));
+  const sizeScale = Math.max(0.76, Math.min(1.4, params.fontSizePx / 32));
   const strokePx = opt.px > 0 ? Number((opt.px * sizeScale).toFixed(2)) : 0;
+  const svgDilateRadius =
+    opt.dilatePx > 0 ? Number((opt.dilatePx * sizeScale).toFixed(2)) : 0;
+  // 微量高斯羽化配合 feComponentTransfer 陡化，形成真正圆润抗锯齿的圆角外扩轮廓（零汉字折角尖刺）
+  const svgBlurStdDev =
+    svgDilateRadius > 0
+      ? Number(Math.max(0.36, Math.min(0.85, svgDilateRadius * 0.42)).toFixed(2))
+      : 0;
 
-  let strokeColor: string;
+  let strokeSolidHex: string;
+  let strokeAlpha: number;
   if (params.colorMode === "black") {
-    strokeColor = "rgba(6, 10, 18, 0.94)";
+    strokeSolidHex = "#060A12";
+    strokeAlpha = 0.92;
   } else if (params.colorMode === "white") {
-    strokeColor = "rgba(255, 255, 255, 0.96)";
+    strokeSolidHex = "#FFFFFF";
+    strokeAlpha = 0.95;
   } else if (params.colorMode === "custom") {
-    strokeColor = hexWithAlpha(params.customHex || "#090D16", 0.94);
+    strokeSolidHex = params.customHex || "#090D16";
+    strokeAlpha = 0.92;
   } else {
-    // auto：亮色字体配深墨黑描边，深色字体配纯净白描边
-    strokeColor = params.isLightText
-      ? "rgba(6, 10, 18, 0.92)"
-      : "rgba(255, 255, 255, 0.96)";
+    // auto：亮色字体配深墨黑轮廓，深色字体配纯净白轮廓
+    strokeSolidHex = params.isLightText ? "#060A12" : "#FFFFFF";
+    strokeAlpha = params.isLightText ? 0.9 : 0.95;
   }
+  const strokeColor = hexWithAlpha(strokeSolidHex, strokeAlpha);
 
+  // 多层紧致光学空气柔影：无硬描边时三层叠影同时兼顾纯白网页清晰度与花哨壁纸分离度
+  let airTextShadow = "none";
   let textShadow = "none";
   if (params.shadowEnabled) {
-    textShadow = params.isLightText
-      ? "0 2px 10px rgba(0, 0, 0, 0.56), 0 1px 3px rgba(0, 0, 0, 0.42)"
-      : "0 2px 10px rgba(255, 255, 255, 0.68), 0 1px 3px rgba(255, 255, 255, 0.5)";
+    if (params.isLightText) {
+      airTextShadow =
+        "0 1px 2px rgba(4, 7, 14, 0.78), 0 2px 9px rgba(4, 7, 14, 0.58), 0 4px 18px rgba(4, 7, 14, 0.34)";
+      textShadow =
+        strokePx > 0
+          ? "0 2px 8px rgba(4, 7, 14, 0.56), 0 4px 16px rgba(4, 7, 14, 0.3)"
+          : airTextShadow;
+    } else {
+      airTextShadow =
+        "0 1px 2px rgba(255, 255, 255, 0.92), 0 2px 9px rgba(255, 255, 255, 0.72), 0 4px 18px rgba(255, 255, 255, 0.46)";
+      textShadow =
+        strokePx > 0
+          ? "0 2px 8px rgba(255, 255, 255, 0.72), 0 4px 16px rgba(255, 255, 255, 0.42)"
+          : airTextShadow;
+    }
   }
 
-  return { strokePx, strokeColor, textShadow };
+  return {
+    strokePx,
+    svgDilateRadius,
+    svgBlurStdDev,
+    strokeColor,
+    strokeSolidHex,
+    strokeAlpha,
+    textShadow,
+    airTextShadow,
+  };
 }
 
 // ============================================================================
@@ -713,6 +754,157 @@ export function matchActiveLyricScenePreset(
       Math.abs(current.glowIntensity - c.glowIntensity) <= 6 &&
       current.wordByWord === c.wordByWord &&
       current.wordBounceEnabled === c.wordBounceEnabled &&
+      current.harmonyStyleEnabled === c.harmonyStyleEnabled
+    ) {
+      return preset.id;
+    }
+  }
+  return "custom";
+}
+
+// ============================================================================
+// 6. 桌面悬浮歌词：5 套高定场景预设（全端单一事实源 · 100% 纯净无底浮空特化）
+// ============================================================================
+
+export interface DesktopLyricScenePresetConfig {
+  motionStyle: LyricMotionStyle;
+  sungMode: LyricSungColorMode;
+  strokeWidth: DesktopLyricStrokeWidth;
+  shadowEnabled: boolean;
+  fontFamily: LyricFontFamily;
+  fontWeight: LyricFontWeightLevel;
+  fontSize: number;
+  glowIntensity: number;
+  wordByWord: boolean;
+  wordBounceEnabled: boolean;
+  harmonyStyleEnabled: boolean;
+}
+
+export interface DesktopLyricScenePresetOption {
+  id: Exclude<DesktopLyricScenePresetId, "custom">;
+  label: string;
+  tagline: string;
+  accentSwatch: string;
+  badge?: string;
+  config: DesktopLyricScenePresetConfig;
+}
+
+export const DESKTOP_LYRIC_SCENE_PRESETS: ReadonlyArray<DesktopLyricScenePresetOption> = [
+  {
+    id: "apple_clear",
+    label: "苹果清透",
+    tagline: "零描边 · 空气柔影",
+    accentSwatch: "linear-gradient(135deg, #F1F5F9 0%, #94A3B8 100%)",
+    badge: "默认",
+    config: {
+      motionStyle: "apple_minimal",
+      sungMode: "solid",
+      strokeWidth: "none",
+      shadowEnabled: true,
+      fontFamily: "sans",
+      fontWeight: 760,
+      fontSize: 32,
+      glowIntensity: 35,
+      wordByWord: true,
+      wordBounceEnabled: false,
+      harmonyStyleEnabled: true,
+    },
+  },
+  {
+    id: "aurora_silk",
+    label: "极光丝绸",
+    tagline: "羽化流光 · 纤边",
+    accentSwatch: "linear-gradient(135deg, #6366F1 0%, #38BDF8 100%)",
+    config: {
+      motionStyle: "silk_flow",
+      sungMode: "gradient",
+      strokeWidth: "thin",
+      shadowEnabled: true,
+      fontFamily: "sans",
+      fontWeight: 760,
+      fontSize: 32,
+      glowIntensity: 85,
+      wordByWord: true,
+      wordBounceEnabled: true,
+      harmonyStyleEnabled: true,
+    },
+  },
+  {
+    id: "cinema_contrast",
+    label: "影院高反差",
+    tagline: "白底/游戏极清",
+    accentSwatch: "linear-gradient(135deg, #38BDF8 0%, #2DD4BF 100%)",
+    config: {
+      motionStyle: "silk_flow",
+      sungMode: "gradient",
+      strokeWidth: "medium",
+      shadowEnabled: true,
+      fontFamily: "sans",
+      fontWeight: 760,
+      fontSize: 36,
+      glowIntensity: 65,
+      wordByWord: true,
+      wordBounceEnabled: true,
+      harmonyStyleEnabled: true,
+    },
+  },
+  {
+    id: "neon_pulse",
+    label: "霓虹律动",
+    tagline: "跃动脉冲 · 舞台",
+    accentSwatch: "linear-gradient(135deg, #FB7185 0%, #FBBF24 100%)",
+    config: {
+      motionStyle: "kinetic_pop",
+      sungMode: "gradient",
+      strokeWidth: "thin",
+      shadowEnabled: true,
+      fontFamily: "editorial",
+      fontWeight: 880,
+      fontSize: 34,
+      glowIntensity: 135,
+      wordByWord: true,
+      wordBounceEnabled: true,
+      harmonyStyleEnabled: true,
+    },
+  },
+  {
+    id: "ink_poetry",
+    label: "纸墨诗笺",
+    tagline: "宋韵光晕 · 雅致",
+    accentSwatch: "linear-gradient(135deg, #34D399 0%, #0D9488 100%)",
+    config: {
+      motionStyle: "luminous_bloom",
+      sungMode: "solid",
+      strokeWidth: "thin",
+      shadowEnabled: true,
+      fontFamily: "serif",
+      fontWeight: 650,
+      fontSize: 31,
+      glowIntensity: 60,
+      wordByWord: true,
+      wordBounceEnabled: true,
+      harmonyStyleEnabled: true,
+    },
+  },
+];
+
+export function matchActiveDesktopLyricPreset(
+  current: DesktopLyricScenePresetConfig
+): DesktopLyricScenePresetId {
+  for (const preset of DESKTOP_LYRIC_SCENE_PRESETS) {
+    const c = preset.config;
+    if (
+      current.motionStyle === c.motionStyle &&
+      current.sungMode === c.sungMode &&
+      current.strokeWidth === c.strokeWidth &&
+      current.shadowEnabled === c.shadowEnabled &&
+      current.fontFamily === c.fontFamily &&
+      current.fontWeight === c.fontWeight &&
+      Math.round(current.fontSize) === c.fontSize &&
+      Math.abs(current.glowIntensity - c.glowIntensity) <= 6 &&
+      current.wordByWord === c.wordByWord &&
+      (c.motionStyle === "apple_minimal" ||
+        current.wordBounceEnabled === c.wordBounceEnabled) &&
       current.harmonyStyleEnabled === c.harmonyStyleEnabled
     ) {
       return preset.id;

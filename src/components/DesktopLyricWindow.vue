@@ -13,21 +13,27 @@ import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import PlumpIcon from "./PlumpIcon.vue";
 import type {
   DesktopLyricLayoutMode,
+  DesktopLyricScenePresetId,
   DesktopLyricStrokeColorMode,
   DesktopLyricStrokeWidth,
   LyricFontFamily,
   LyricFontWeightLevel,
   LyricHighlightThemeId,
+  LyricMotionStyle,
   LyricSungColorMode,
   LyricUnsungPresetId,
 } from "../types";
 import {
+  DESKTOP_LYRIC_SCENE_PRESETS,
   DESKTOP_STROKE_COLOR_OPTIONS,
   DESKTOP_STROKE_WIDTH_OPTIONS,
   LYRIC_FONT_FAMILY_OPTIONS,
   LYRIC_FONT_WEIGHT_OPTIONS,
+  LYRIC_MOTION_STYLE_OPTIONS,
   LYRIC_SUNG_PRESETS,
   LYRIC_UNSUNG_PRESETS,
+  matchActiveDesktopLyricPreset,
+  normalizeLyricMotionStyle,
   normalizeLyricThemeId,
   normalizeUnsungPresetId,
   resolveDesktopStrokeStyle,
@@ -35,6 +41,15 @@ import {
   resolveSungLyricPalette,
   resolveUnsungLyricHex,
 } from "../utils/lyricTypography";
+import {
+  WordPhysicsBank,
+  normalizeLyricLinePresentation,
+  sweepToMaskPositionPct,
+  type NormalizedLyricLinePresentation,
+  type NormalizedLyricWord,
+  type WordPhysicsOptions,
+} from "../utils/lyricMotionEngine";
+import { lerpOklabHex } from "../utils/coverPalette";
 import {
   createBrowserDevShowcase,
   isBrowserDevPreviewEnv,
@@ -65,19 +80,27 @@ interface LyricLineItem {
 
 interface DisplayRow {
   key: string;
+  lineIndex: number;
   text: string;
   words: LyricWordItem[];
+  presentation: NormalizedLyricLinePresentation | null;
   lineStartMs: number;
   lineDurationMs: number;
   isActiveKaraoke: boolean;
+  isLeavingKaraoke: boolean;
   isSecondary: boolean;
+  isKtvPeer: boolean;
   isPreviewNext?: boolean;
+  isHarmonyLine: boolean;
   verticalPct: number;
-  alignOverride?: "left" | "center";
+  alignOverride: "left" | "center" | "right";
   fitScale: number;
+  overflowPx: number;
+  rawWidthPx: number;
+  maxWidthPx: number;
 }
 
-type SettingsPodTab = "color" | "typography" | "layout";
+type SettingsPodTab = "preset" | "style" | "layout";
 
 const CHANNEL_NAME = "bm_desktop_lyric_channel";
 const SNAPSHOT_STORAGE_KEY = "bm_desktop_lyric_snapshot_v2";
@@ -88,6 +111,7 @@ const PROGRESS_HEIGHT_PX = 4;
 const SHELL_VPAD_PX = 28;
 const MIN_WIDTH_PX = 440;
 const MAX_WIDTH_PX = 1280;
+const MIN_ADAPTIVE_SCALE = 0.84;
 
 // 立即声明透明窗体根标记，杜绝首帧出现 tokens-base.css 默认深色底色
 if (typeof document !== "undefined") {
@@ -119,7 +143,18 @@ function readStoredNumber(
 
 function readStoredString(key: string, fallback: string): string {
   try {
-    return localStorage.getItem(key) || fallback;
+    const val = localStorage.getItem(key);
+    return val !== null && val !== "" ? val : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function readStoredBool(key: string, fallback: boolean): boolean {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return fallback;
+    return raw === "true";
   } catch {
     return fallback;
   }
@@ -172,13 +207,9 @@ function pickContrastInk(hex: string): string {
   return luma > 0.66 ? "#181C24" : "#FFFFFF";
 }
 
-// ==================== 独立持久化状态（严格隔离于播放页歌词） ====================
-const isWindowVisible = ref<boolean>(
-  readStoredString("bm_desktop_lyric", "false") === "true"
-);
-const isLocked = ref<boolean>(
-  readStoredString("bm_desktop_lyric_locked", "false") === "true"
-);
+// ==================== 独立持久化状态（出厂默认：苹果清透，完全隔离于播放页） ====================
+const isWindowVisible = ref<boolean>(readStoredBool("bm_desktop_lyric", false));
+const isLocked = ref<boolean>(readStoredBool("bm_desktop_lyric_locked", false));
 
 // 已唱双通道独立状态
 const colorSchemeId = ref<LyricHighlightThemeId>(
@@ -187,9 +218,9 @@ const colorSchemeId = ref<LyricHighlightThemeId>(
   )
 );
 const sungMode = ref<LyricSungColorMode>(
-  readStoredString("bm_dl_sung_mode_v2", "gradient") === "solid"
-    ? "solid"
-    : "gradient"
+  readStoredString("bm_dl_sung_mode_v2", "solid") === "gradient"
+    ? "gradient"
+    : "solid"
 );
 const customPrimaryHex = ref<string>(
   readStoredString(
@@ -224,15 +255,15 @@ const unsungOpacity = ref<number>(
   readStoredNumber("bm_dl_unsung_opacity_v2", 0.78, 0.35, 0.98)
 );
 
-// 真光学矢量描边 & 立体柔影状态
-const rawStoredStrokeW = readStoredString("bm_dl_stroke_width_v2", "medium");
+// 无尖刺圆角轮廓 & 多层光学空气柔影状态（出厂默认：无硬描边 + 空气柔影）
+const rawStoredStrokeW = readStoredString("bm_dl_stroke_width_v2", "none");
 const strokeWidth = ref<DesktopLyricStrokeWidth>(
   rawStoredStrokeW === "none" ||
     rawStoredStrokeW === "thin" ||
     rawStoredStrokeW === "medium" ||
     rawStoredStrokeW === "bold"
     ? rawStoredStrokeW
-    : "medium"
+    : "none"
 );
 const rawStoredStrokeC = readStoredString("bm_dl_stroke_color_mode_v2", "auto");
 const strokeColorMode = ref<DesktopLyricStrokeColorMode>(
@@ -247,8 +278,25 @@ const strokeCustomHex = ref<string>(
   readStoredString("bm_dl_stroke_custom_v2", "#090D16")
 );
 const shadowEnabled = ref<boolean>(
-  readStoredString("bm_dl_shadow_enabled_v2", "true") !== "false"
+  readStoredBool("bm_dl_shadow_enabled_v2", true)
 );
+
+// 同源 4 套 GPU 动效引擎与交互偏好
+const motionStyle = ref<LyricMotionStyle>(
+  normalizeLyricMotionStyle(
+    readStoredString("bm_dl_motion_style_v1", "apple_minimal")
+  )
+);
+const wordBounceEnabled = ref<boolean>(
+  readStoredBool("bm_dl_word_bounce_v1", false)
+);
+const harmonyStyleEnabled = ref<boolean>(
+  readStoredBool("bm_dl_harmony_style_v1", true)
+);
+const hoverDodgeEnabled = ref<boolean>(
+  readStoredBool("bm_dl_hover_dodge_v1", true)
+);
+const globalMotionLevel = ref<"best" | "standard" | "none">("best");
 
 // 字形、尺寸与排版状态
 const fontSize = ref<number>(
@@ -258,10 +306,10 @@ const widthPx = ref<number>(
   readStoredNumber("bm_desktop_lyric_width_v2", 820, MIN_WIDTH_PX, MAX_WIDTH_PX)
 );
 const showTranslation = ref<boolean>(
-  readStoredString("bm_desktop_lyric_trans", "true") !== "false"
+  readStoredBool("bm_desktop_lyric_trans", true)
 );
 const wordByWordEnabled = ref<boolean>(
-  readStoredString("bm_desktop_lyric_krc", "true") !== "false"
+  readStoredBool("bm_desktop_lyric_krc", true)
 );
 const layoutMode = ref<DesktopLyricLayoutMode>(
   (["center", "left", "ktv", "single"].includes(
@@ -274,7 +322,7 @@ const lastDoubleLayout = ref<"center" | "ktv" | "left">(
   layoutMode.value === "single" ? "center" : layoutMode.value
 );
 const glowIntensity = ref<number>(
-  readStoredNumber("bm_desktop_lyric_glow_v2", 80, 0, 150)
+  readStoredNumber("bm_desktop_lyric_glow_v2", 35, 0, 150)
 );
 const lyricOpacity = ref<number>(
   readStoredNumber("bm_desktop_lyric_opacity", 1.0, 0.35, 1.0)
@@ -283,13 +331,11 @@ const lineSpacing = ref<number>(
   readStoredNumber("bm_desktop_lyric_line_spacing", 6, 0, 16)
 );
 const idleFade = ref<boolean>(
-  readStoredString("bm_desktop_lyric_idle_fade", "false") === "true"
+  readStoredBool("bm_desktop_lyric_idle_fade", false)
 );
-const showIntro = ref<boolean>(
-  readStoredString("bm_desktop_lyric_intro", "true") !== "false"
-);
+const showIntro = ref<boolean>(readStoredBool("bm_desktop_lyric_intro", true));
 const showPhonetic = ref<boolean>(
-  readStoredString("bm_desktop_lyric_phonetic", "false") === "true"
+  readStoredBool("bm_desktop_lyric_phonetic", false)
 );
 const fontFamily = ref<LyricFontFamily>(
   (["sans", "serif", "rounded", "editorial"].includes(
@@ -317,9 +363,8 @@ const darkThemeVariant = ref<string>(
 const introVisible = ref<boolean>(false);
 let introHideTimer: ReturnType<typeof setTimeout> | null = null;
 
-// ==================== 播放与同步状态 ====================
+// ==================== 播放与非响应式高精度时钟状态 ====================
 const isPlaying = ref<boolean>(false);
-const livePosMs = ref<number>(0);
 const songDurationMs = ref<number>(0);
 const playbackRate = ref<number>(1);
 const lyricOffsetMs = ref<number>(
@@ -337,6 +382,32 @@ const currentSong = ref<{
 const lyricLines = ref<LyricLineItem[]>([]);
 const isKrc = ref<boolean>(false);
 
+// 非响应式高精度时钟（零 60fps Vue VDOM 重算！）
+let clockPosMs = 0;
+let syncAnchorPosMs = 0;
+let syncAnchorPerfMs =
+  typeof performance !== "undefined" ? performance.now() : 0;
+let lastRafPerfMs = 0;
+
+// 仅在真正切行/间奏显隐变更时触发 Vue 响应式更新
+const activeLineIndex = ref<number>(-1);
+const leavingLineIndex = ref<number>(-1);
+const isInterludeVisible = ref<boolean>(false);
+const interludeAlign = ref<"left" | "center" | "right">("center");
+
+// 纯 GPU 物理引擎池与 DOM 直写缓存
+const activeWordBanks = new Map<string, WordPhysicsBank>();
+const leavingWordBank = new WordPhysicsBank();
+let cachedRowWordEls = new Map<string, HTMLElement[]>();
+let cachedPlainLitEls = new Map<string, HTMLElement>();
+let cachedPanTrackEls = new Map<string, HTMLElement>();
+let cachedLeavingWordEls: HTMLElement[] = [];
+const rowPanCurrentX = new Map<string, number>();
+let leavingActive = false;
+let physicsSettled = true;
+let forceDomFlushNextFrame = true;
+let breathingPhase = 0;
+
 let lastSyncedFontSize: number | null = null;
 let lastSyncedWidth: number | null = null;
 let lastSyncedTrans: boolean | null = null;
@@ -351,18 +422,25 @@ const isHovering = ref<boolean>(false);
 const isPointerInside = ref<boolean>(false);
 const lockedHoverWindow = ref<boolean>(false);
 const lockedHoverUnlock = ref<boolean>(false);
+const lockedHoverDwell = ref<boolean>(false);
+let lockedDwellTimer: ReturnType<typeof setTimeout> | null = null;
+
 const isSettingsOpen = ref<boolean>(false);
-const settingsTab = ref<SettingsPodTab>("color");
+const settingsTab = ref<SettingsPodTab>("preset");
 const isResizingEdge = ref<boolean>(false);
 const isAdjustingWidth = ref<boolean>(false);
 let isDraggingOsWindow = false;
 const hoverTip = ref<string>("");
 const hoverTipAlign = ref<"left" | "center" | "right">("center");
+
 const viewportRef = ref<HTMLElement | null>(null);
 const settingsInnerRef = ref<HTMLElement | null>(null);
+const progressFillRef = ref<HTMLElement | null>(null);
+const interludeBeadRefs = ref<HTMLElement[]>([]);
 const measuredViewportWidth = ref<number>(770);
 
 let hoverLeaveTimer: ReturnType<typeof setTimeout> | null = null;
+let hoverTipAutoClearTimer: ReturnType<typeof setTimeout> | null = null;
 let shrinkWindowTimer: ReturnType<typeof setTimeout> | null = null;
 let widthCmdDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let widthResizeRafPending = false;
@@ -376,9 +454,44 @@ let viewportResizeObserver: ResizeObserver | null = null;
 let settingsResizeObserver: ResizeObserver | null = null;
 let rafId: number | null = null;
 
-let syncAnchorPosMs = 0;
-let syncAnchorPerfMs =
-  typeof performance !== "undefined" ? performance.now() : 0;
+// ==================== 预设匹配与动效派生状态 ====================
+const activeScenePreset = computed<DesktopLyricScenePresetId>(() =>
+  matchActiveDesktopLyricPreset({
+    motionStyle: motionStyle.value,
+    sungMode: sungMode.value,
+    strokeWidth: strokeWidth.value,
+    shadowEnabled: shadowEnabled.value,
+    fontFamily: fontFamily.value,
+    fontWeight: fontWeight.value,
+    fontSize: fontSize.value,
+    glowIntensity: glowIntensity.value,
+    wordByWord: wordByWordEnabled.value,
+    wordBounceEnabled: wordBounceEnabled.value,
+    harmonyStyleEnabled: harmonyStyleEnabled.value,
+  })
+);
+
+const activeScenePresetLabel = computed(() => {
+  if (activeScenePreset.value === "custom") return "自定义";
+  const hit = DESKTOP_LYRIC_SCENE_PRESETS.find(
+    (p) => p.id === activeScenePreset.value
+  );
+  return hit ? hit.label : "自定义";
+});
+
+const isMaskSweepMotionStyle = computed(
+  () => motionStyle.value !== "luminous_bloom"
+);
+
+const effectiveMotionLevel = computed<"best" | "standard" | "none">(() => {
+  if (
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+  ) {
+    return "none";
+  }
+  return globalMotionLevel.value;
+});
 
 // ==================== 四主题悬停控制台特化（零越界方影 · 100% 无框） ====================
 const isLightShell = computed(
@@ -391,7 +504,6 @@ const isVelvetShell = computed(
   () => !isLightShell.value && darkThemeVariant.value === "velvet_nebula"
 );
 
-// 严格约束 hoverShadow 扩散半径 ≤ 10px（远小于壳体 14px/16px 内边距），彻底杜绝窗口边缘裁切方影
 const shellUiTheme = computed(() => {
   if (isOatShell.value) {
     return {
@@ -408,6 +520,7 @@ const shellUiTheme = computed(() => {
       hoverBlur: "none",
       hoverShadow: "0 4px 10px rgba(42, 33, 22, 0.14)",
       cardBg: "rgba(232, 224, 208, 0.72)",
+      tileBg: "rgba(250, 246, 238, 0.76)",
       chipBg: "rgba(35, 29, 22, 0.075)",
       chipHover: "rgba(35, 29, 22, 0.13)",
       divider: "rgba(35, 29, 22, 0.10)",
@@ -436,6 +549,7 @@ const shellUiTheme = computed(() => {
       hoverBlur: "blur(24px) saturate(170%)",
       hoverShadow: "0 4px 10px rgba(30, 41, 59, 0.12)",
       cardBg: "rgba(255, 255, 255, 0.68)",
+      tileBg: "rgba(255, 255, 255, 0.78)",
       chipBg: "rgba(30, 41, 59, 0.068)",
       chipHover: "rgba(30, 41, 59, 0.125)",
       divider: "rgba(30, 41, 59, 0.085)",
@@ -461,6 +575,7 @@ const shellUiTheme = computed(() => {
       hoverBlur: "none",
       hoverShadow: "0 4px 10px rgba(0, 0, 0, 0.30)",
       cardBg: "rgba(56, 35, 47, 0.74)",
+      tileBg: "rgba(68, 43, 57, 0.72)",
       chipBg: "rgba(249, 239, 230, 0.085)",
       chipHover: "rgba(249, 239, 230, 0.15)",
       divider: "rgba(249, 239, 230, 0.10)",
@@ -488,6 +603,7 @@ const shellUiTheme = computed(() => {
     hoverBlur: "blur(24px) saturate(170%)",
     hoverShadow: "0 4px 10px rgba(0, 0, 0, 0.28)",
     cardBg: "rgba(255, 255, 255, 0.068)",
+    tileBg: "rgba(255, 255, 255, 0.075)",
     chipBg: "rgba(255, 255, 255, 0.09)",
     chipHover: "rgba(255, 255, 255, 0.16)",
     divider: "rgba(255, 255, 255, 0.10)",
@@ -509,7 +625,23 @@ const glassVisible = computed(() => {
   );
 });
 
-// ==================== 共享双通道配色、真 4 档字重与光学矢量描边解析 ====================
+const showLockedUnlockCapsule = computed(() => {
+  return (
+    isLocked.value &&
+    (lockedHoverUnlock.value || lockedHoverDwell.value)
+  );
+});
+
+const isLockedDodged = computed(() => {
+  return (
+    isLocked.value &&
+    hoverDodgeEnabled.value &&
+    lockedHoverWindow.value &&
+    !lockedHoverUnlock.value
+  );
+});
+
+// ==================== 共享双通道配色、真 4 档字重与圆角无尖刺轮廓解析 ====================
 const themeAccentPair = computed(() => {
   if (isOatShell.value) return { start: "#14B8A6", end: "#F59E0B" };
   if (isLightShell.value) return { start: "#6366F1", end: "#38BDF8" };
@@ -597,7 +729,6 @@ const customFontWeightOverride = ref<number | null>(
 );
 let typoSyncChannel: BroadcastChannel | null = null;
 
-// 真 4 档字重（与播放页完全同步，支持「字体与排版」自定义/导入字体覆盖）
 const activeTypography = computed(() =>
   resolveLyricTypographyStyle({
     family: fontFamily.value,
@@ -615,12 +746,12 @@ const activeUnsungTypography = computed(() =>
     weight: fontWeight.value,
     customFontFamily: customFontFamilyStack.value || null,
     customFontWeight: customFontWeightOverride.value,
-    isGradientText: true,
+    isGradientText: false,
     strokeTintHex: activeUnsungHex.value,
   })
 );
 
-// 真双层光学矢量描边（独立分别判断已唱 / 未唱亮度，auto 模式下智能配对黑/白外轮廓）
+// 圆角外扩轮廓（SVG feMorphology + 柔角陡化）+ 三层光学空气柔影
 const sungStrokeSpec = computed(() =>
   resolveDesktopStrokeStyle({
     widthMode: strokeWidth.value,
@@ -650,9 +781,24 @@ const subStrokeSpec = computed(() =>
     customHex: strokeCustomHex.value,
     shadowEnabled: shadowEnabled.value,
     isLightText: isBrightHex(activeUnsungHex.value),
-    fontSizePx: Math.max(14, Math.round(fontSize.value * 0.62)),
+    fontSizePx: Math.max(14, Math.round(fontSize.value * 0.64)),
   })
 );
+
+const hasSvgOutline = computed(() => strokeWidth.value !== "none");
+
+const glowTokens = computed(() => {
+  const ratio = clamp(glowIntensity.value / 100, 0, 1.5);
+  const c1 = activeSungPalette.value.primary;
+  const c2 = activeSungPalette.value.secondary;
+  return {
+    ratio,
+    r1: `${Math.round(8 + 6 * ratio)}px`,
+    r2: `${Math.round(18 + 12 * ratio)}px`,
+    c1: hexToRgba(c1, clamp(0.42 * Math.min(1.2, ratio + 0.15), 0, 0.72)),
+    c2: hexToRgba(c2, clamp(0.24 * Math.min(1.2, ratio + 0.1), 0, 0.48)),
+  };
+});
 
 const playModeMeta = computed(() => {
   if (playMode.value === "shuffle") {
@@ -667,11 +813,6 @@ const playModeMeta = computed(() => {
 const playBtnInkColor = computed(() =>
   pickContrastInk(shellUiTheme.value.primary)
 );
-
-const progressPct = computed(() => {
-  if (!songDurationMs.value || songDurationMs.value <= 0) return 0;
-  return clamp((livePosMs.value / songDurationMs.value) * 100, 0, 100);
-});
 
 const widthRangePct = computed(
   () =>
@@ -696,16 +837,22 @@ const lineSpacingRangePct = computed(
 // ==================== 视口与 OS 窗口尺寸联动 ====================
 const lyricViewportHeightPx = computed(() => {
   if (layoutMode.value === "single") {
-    return Math.max(60, Math.round(fontSize.value * 1.92 + 16));
+    return Math.max(66, Math.round(fontSize.value * 2.02 + 18));
+  }
+  if (layoutMode.value === "ktv") {
+    return Math.max(
+      114,
+      Math.round(fontSize.value * 3.42 + lineSpacing.value * 1.7 + 18)
+    );
   }
   return Math.max(
-    102,
-    Math.round(fontSize.value * 3.18 + lineSpacing.value * 1.55 + 16)
+    106,
+    Math.round(fontSize.value * 3.24 + lineSpacing.value * 1.6 + 18)
   );
 });
 
 const baseWindowHeightPx = computed(() => {
-  const minBase = layoutMode.value === "single" ? 122 : 162;
+  const minBase = layoutMode.value === "single" ? 128 : 168;
   return Math.max(
     minBase,
     SHELL_VPAD_PX +
@@ -714,13 +861,6 @@ const baseWindowHeightPx = computed(() => {
       PROGRESS_HEIGHT_PX +
       lyricViewportHeightPx.value +
       8
-  );
-});
-
-const showLockedUnlockCapsule = computed(() => {
-  return (
-    isLocked.value &&
-    (lockedHoverWindow.value || lockedHoverUnlock.value || isHovering.value)
   );
 });
 
@@ -753,572 +893,67 @@ function measureTextWidthPx(
   return ctx.measureText(text).width;
 }
 
-// ==================== 60fps 零冻结高精度时钟插值（隐身/暂停立即停帧；纯 LRC 行式节流、KRC 逐字理性 60fps 封顶） ====================
-const hasAnyKrcWords = computed(() =>
-  lyricLines.value.some((l) => Boolean(l.words?.length))
-);
-let lastLrcStepPerfMs = 0;
-let lastKrcStepPerfMs = 0;
-
-function startClockLoop() {
-  if (
-    rafId !== null ||
-    !isPlaying.value ||
-    !isWindowVisible.value ||
-    (typeof document !== "undefined" && document.hidden)
-  ) {
-    return;
-  }
-  lastLrcStepPerfMs = 0;
-  lastKrcStepPerfMs = 0;
-  const tick = (nowPerf: number) => {
-    if (
-      !isPlaying.value ||
-      !isWindowVisible.value ||
-      (typeof document !== "undefined" && document.hidden)
-    ) {
-      rafId = null;
-      return;
-    }
-    const rawElapsed = Math.max(0, nowPerf - syncAnchorPerfMs);
-    const elapsed =
-      Math.min(rawElapsed, 2500) * Math.max(0.25, playbackRate.value || 1);
-    const nextRaw = syncAnchorPosMs + elapsed;
-    const clampedPos =
-      songDurationMs.value > 0
-        ? Math.min(songDurationMs.value, nextRaw)
-        : nextRaw;
-
-    const lines = lyricLines.value;
-    const curIdx = activeLineIndex.value;
-    const activeHasKrcWords =
-      wordByWordEnabled.value &&
-      ((curIdx >= 0 && Boolean(lines[curIdx]?.words?.length)) ||
-        hasAnyKrcWords.value);
-
-    if (activeHasKrcWords) {
-      // 封顶 60fps（16ms），防止 144Hz/240Hz 显示器在悬浮歌词独立窗口上无意义高倍重渲染
-      if (lastKrcStepPerfMs === 0 || nowPerf - lastKrcStepPerfMs >= 16) {
-        lastKrcStepPerfMs = nowPerf;
-        livePosMs.value = clampedPos;
-      }
-    } else {
-      const nextLine = curIdx + 1 < lines.length ? lines[curIdx + 1] : null;
-      const effNext = clampedPos + lyricOffsetMs.value - bluetoothDelayMs.value;
-      const crossedLine = Boolean(nextLine && effNext >= nextLine.startTimeMs);
-      if (crossedLine || lastLrcStepPerfMs === 0 || nowPerf - lastLrcStepPerfMs >= 95) {
-        lastLrcStepPerfMs = nowPerf;
-        livePosMs.value = clampedPos;
-      }
-    }
-    rafId = requestAnimationFrame(tick);
-  };
-  rafId = requestAnimationFrame(tick);
-}
-
-function stopClockLoop() {
-  if (rafId !== null) {
-    cancelAnimationFrame(rafId);
-    rafId = null;
-  }
-}
-
-function handleDesktopLyricVisibilityChange() {
-  if (typeof document === "undefined") return;
-  if (document.hidden) {
-    stopClockLoop();
-  } else if (isWindowVisible.value && isPlaying.value) {
-    startClockLoop();
-  }
-}
-
-function applySyncedPosition(
-  posMs: number,
-  playing: boolean,
-  sentAtMs?: number,
-  rate?: number
-) {
-  if (
-    rate !== undefined &&
-    Number.isFinite(Number(rate)) &&
-    Number(rate) > 0
-  ) {
-    playbackRate.value = Number(rate);
-  }
-  let safePos = Math.max(0, Number(posMs) || 0);
-  if (playing && sentAtMs && Number.isFinite(sentAtMs)) {
-    const transitMs = clamp(Date.now() - Number(sentAtMs), 0, 180);
-    safePos += transitMs * Math.max(0.25, playbackRate.value || 1);
-  }
-  const delta = safePos - livePosMs.value;
-  if (!playing || Math.abs(delta) > 320 || safePos === 0) {
-    livePosMs.value = safePos;
-    syncAnchorPosMs = safePos;
-  } else {
-    const smoothAnchor =
-      delta >= -32 && delta <= 0 ? livePosMs.value : safePos;
-    syncAnchorPosMs = smoothAnchor;
-    if (delta > 0) livePosMs.value = smoothAnchor;
-  }
-  syncAnchorPerfMs = performance.now();
-  isPlaying.value = playing;
-  if (
-    playing &&
-    isWindowVisible.value &&
-    (typeof document === "undefined" || !document.hidden)
-  ) {
-    startClockLoop();
-  } else {
-    stopClockLoop();
-  }
-}
-
-// ==================== 歌词数据结构标准化与跨窗口快照恢复 ====================
-function normalizeLyricLines(rawLines: any[]): LyricLineItem[] {
-  if (!Array.isArray(rawLines) || rawLines.length === 0) return [];
-  const normalized: LyricLineItem[] = [];
-  for (let i = 0; i < rawLines.length; i++) {
-    const item = rawLines[i];
-    if (!item || typeof item !== "object") continue;
-    const startTimeMs = Math.max(
-      0,
-      Number(item.startTimeMs ?? item.timeMs ?? item.startMs ?? 0) || 0
-    );
-    const nextItem = rawLines[i + 1];
-    const nextStartMs = nextItem
-      ? Math.max(
-          0,
-          Number(
-            nextItem.startTimeMs ?? nextItem.timeMs ?? nextItem.startMs ?? 0
-          ) || 0
-        )
-      : 0;
-    const rawDur = Number(item.durationMs) || 0;
-    const durationMs =
-      rawDur > 0
-        ? rawDur
-        : nextStartMs > startTimeMs
-        ? Math.min(12000, nextStartMs - startTimeMs)
-        : 3200;
-    const words: LyricWordItem[] = Array.isArray(item.words)
-      ? item.words
-          .filter((w: any) => w && typeof w === "object")
-          .map((w: any) => ({
-            text: String(w.text ?? ""),
-            startTimeMs: Math.max(
-              0,
-              Number(w.startTimeMs ?? w.startMs ?? w.timeMs ?? 0) || 0
-            ),
-            durationMs: Math.max(40, Number(w.durationMs) || 120),
-          }))
-      : [];
-    normalized.push({
-      startTimeMs,
-      durationMs,
-      text: String(item.text ?? ""),
-      translation: item.translation ? String(item.translation) : undefined,
-      phonetic: item.phonetic ? String(item.phonetic) : undefined,
-      words,
-    });
-  }
-  return normalized;
-}
-
-function applyIncomingSyncPayload(
-  msg: any,
-  options?: { fromStorage?: boolean }
-) {
-  if (!msg || typeof msg !== "object") return;
-  const fromStorage = Boolean(options?.fromStorage);
-
-  if (msg.type === "POSITION_SYNC") {
-    const incomingHash = msg.songHash ? String(msg.songHash) : "";
-    const activeHash = currentSong.value?.hash
-      ? String(currentSong.value.hash)
-      : "";
-    if (incomingHash && activeHash && incomingHash !== activeHash) {
-      const nowMs = performance.now();
-      if (!fromStorage && nowMs - lastHandshakeTriggerAt > 420) {
-        lastHandshakeTriggerAt = nowMs;
-        sendCmd("CMD_REQUEST_SYNC");
-      }
-      return;
-    }
-    if (msg.lyricOffsetMs !== undefined)
-      lyricOffsetMs.value = Number(msg.lyricOffsetMs || 0);
-    if (msg.bluetoothDelayMs !== undefined)
-      bluetoothDelayMs.value = Number(msg.bluetoothDelayMs || 0);
-    if (msg.durationMs !== undefined && Number(msg.durationMs) > 0) {
-      songDurationMs.value = Number(msg.durationMs);
-    }
-    applySyncedPosition(
-      Number(msg.positionMs || 0),
-      Boolean(msg.isPlaying),
-      msg.sentAtMs,
-      msg.playbackRate
-    );
-    return;
-  }
-
-  if (msg.type !== "STATE_SYNC") return;
-
-  const incomingSeq = Number(msg.stateSeq) || 0;
-  const incomingSentAt = Number(msg.sentAtMs) || 0;
-  if (
-    fromStorage &&
-    hasReceivedLiveState &&
-    incomingSentAt < lastAppliedStateSentAtMs
-  ) {
-    return;
-  }
-  if (
-    !fromStorage &&
-    incomingSeq > 0 &&
-    lastAppliedStateSeq > 0 &&
-    incomingSeq < lastAppliedStateSeq
-  ) {
-    return;
-  }
-  if (!fromStorage) {
-    hasReceivedLiveState = true;
-  }
-  if (incomingSeq > lastAppliedStateSeq) {
-    lastAppliedStateSeq = incomingSeq;
-  }
-  if (incomingSentAt > lastAppliedStateSentAtMs) {
-    lastAppliedStateSentAtMs = incomingSentAt;
-  }
-
-  if (msg.enabled !== undefined) {
-    isWindowVisible.value = Boolean(msg.enabled);
-  }
-
-  const recentlyMutatedLocally =
-    performance.now() - lastLocalControlMutateAt < 380;
-
-  if (msg.locked !== undefined && !recentlyMutatedLocally) {
-    const nextLocked = Boolean(msg.locked);
-    if (nextLocked && !isLocked.value) {
-      isSettingsOpen.value = false;
-      isHovering.value = false;
-    }
-    isLocked.value = nextLocked;
-  }
-
-  if (msg.dynamicPrimary) dynamicPrimaryHex.value = String(msg.dynamicPrimary);
-  if (msg.dynamicSecondary)
-    dynamicSecondaryHex.value = String(msg.dynamicSecondary);
-  if (msg.dynamicCoverAccentEnabled !== undefined) {
-    dynamicCoverAccentEnabled.value = Boolean(msg.dynamicCoverAccentEnabled);
-  }
-  if (msg.durationMs !== undefined && Number(msg.durationMs) > 0) {
-    songDurationMs.value = Number(msg.durationMs);
-  }
-
-  if (!recentlyMutatedLocally) {
-    if (msg.colorSchemeId) {
-      const normalized = normalizeLyricThemeId(String(msg.colorSchemeId));
-      colorSchemeId.value = normalized;
-      localStorage.setItem("bm_desktop_lyric_scheme", normalized);
-    }
-    if (msg.sungMode === "gradient" || msg.sungMode === "solid") {
-      sungMode.value = msg.sungMode;
-      localStorage.setItem("bm_dl_sung_mode_v2", msg.sungMode);
-    }
-    if (msg.customPrimary) {
-      customPrimaryHex.value = String(msg.customPrimary);
-      localStorage.setItem("bm_dl_custom_primary_v2", customPrimaryHex.value);
-    }
-    if (msg.customSecondary) {
-      customSecondaryHex.value = String(msg.customSecondary);
-      localStorage.setItem(
-        "bm_dl_custom_secondary_v2",
-        customSecondaryHex.value
-      );
-    }
-    if (msg.unsungPreset) {
-      unsungPreset.value = normalizeUnsungPresetId(String(msg.unsungPreset));
-      localStorage.setItem("bm_dl_unsung_preset_v2", unsungPreset.value);
-    }
-    if (msg.unsungCustomHex) {
-      unsungCustomHex.value = String(msg.unsungCustomHex);
-      localStorage.setItem("bm_dl_unsung_custom_v2", unsungCustomHex.value);
-    }
-    if (msg.unsungOpacity !== undefined) {
-      unsungOpacity.value = Number(
-        clamp(Number(msg.unsungOpacity), 0.35, 0.98).toFixed(2)
-      );
-      localStorage.setItem(
-        "bm_dl_unsung_opacity_v2",
-        String(unsungOpacity.value)
-      );
-    }
-    if (
-      msg.strokeWidth === "none" ||
-      msg.strokeWidth === "thin" ||
-      msg.strokeWidth === "medium" ||
-      msg.strokeWidth === "bold"
-    ) {
-      strokeWidth.value = msg.strokeWidth;
-      localStorage.setItem("bm_dl_stroke_width_v2", msg.strokeWidth);
-    }
-    if (
-      msg.strokeColorMode === "auto" ||
-      msg.strokeColorMode === "black" ||
-      msg.strokeColorMode === "white" ||
-      msg.strokeColorMode === "custom"
-    ) {
-      strokeColorMode.value = msg.strokeColorMode;
-      localStorage.setItem("bm_dl_stroke_color_mode_v2", msg.strokeColorMode);
-    }
-    if (msg.strokeCustomHex) {
-      strokeCustomHex.value = String(msg.strokeCustomHex);
-      localStorage.setItem("bm_dl_stroke_custom_v2", strokeCustomHex.value);
-    }
-    if (msg.shadowEnabled !== undefined) {
-      shadowEnabled.value = Boolean(msg.shadowEnabled);
-      localStorage.setItem(
-        "bm_dl_shadow_enabled_v2",
-        String(shadowEnabled.value)
-      );
-    }
-    if (msg.fontSize !== undefined) {
-      const incomingFs = clamp(Number(msg.fontSize), 18, 56);
-      if (lastSyncedFontSize === null || incomingFs !== lastSyncedFontSize) {
-        lastSyncedFontSize = incomingFs;
-        fontSize.value = incomingFs;
-      }
-    }
-    if (
-      msg.width !== undefined &&
-      !isResizingEdge.value &&
-      !isAdjustingWidth.value
-    ) {
-      const incomingW = clamp(Number(msg.width), MIN_WIDTH_PX, MAX_WIDTH_PX);
-      if (lastSyncedWidth === null || incomingW !== lastSyncedWidth) {
-        lastSyncedWidth = incomingW;
-        widthPx.value = incomingW;
-        syncOsWindowWithState();
-      }
-    }
-    if (msg.showTranslation !== undefined) {
-      const incomingTrans = Boolean(msg.showTranslation);
-      if (lastSyncedTrans === null || incomingTrans !== lastSyncedTrans) {
-        lastSyncedTrans = incomingTrans;
-        showTranslation.value = incomingTrans;
-      }
-    }
-    if (
-      msg.layoutMode === "center" ||
-      msg.layoutMode === "ktv" ||
-      msg.layoutMode === "single" ||
-      msg.layoutMode === "left"
-    ) {
-      layoutMode.value = msg.layoutMode;
-      if (msg.layoutMode !== "single") lastDoubleLayout.value = msg.layoutMode;
-    } else if (msg.lineMode === "single") {
-      layoutMode.value = "single";
-    }
-    if (msg.opacity !== undefined) {
-      lyricOpacity.value = clamp(Number(msg.opacity), 0.35, 1.0);
-    }
-    if (msg.lineSpacing !== undefined) {
-      lineSpacing.value = clamp(Math.round(Number(msg.lineSpacing)), 0, 16);
-    }
-    if (msg.glowIntensity !== undefined) {
-      glowIntensity.value = clamp(Math.round(Number(msg.glowIntensity)), 0, 150);
-    }
-    if (msg.idleFade !== undefined) {
-      idleFade.value = Boolean(msg.idleFade);
-    }
-    if (msg.showIntro !== undefined) {
-      showIntro.value = Boolean(msg.showIntro);
-    }
-    if (msg.showPhonetic !== undefined) {
-      showPhonetic.value = Boolean(msg.showPhonetic);
-    }
-    if (msg.wordByWord !== undefined) {
-      wordByWordEnabled.value = Boolean(msg.wordByWord);
-    }
-    if (
-      msg.fontFamily === "sans" ||
-      msg.fontFamily === "serif" ||
-      msg.fontFamily === "rounded" ||
-      msg.fontFamily === "editorial"
-    ) {
-      fontFamily.value = msg.fontFamily;
-    }
-    if (msg.fontWeight !== undefined) {
-      const fw = Number(msg.fontWeight);
-      if (fw === 500 || fw === 650 || fw === 760 || fw === 880) {
-        fontWeight.value = fw;
-      }
-    }
-    if (msg.customFontFamilyStack !== undefined) {
-      customFontFamilyStack.value = String(msg.customFontFamilyStack || "");
-    }
-    if (msg.customFontId !== undefined) {
-      const nextId = String(msg.customFontId || "");
-      customFontId.value = nextId;
-      if (nextId) {
-        ensureCustomFontLoaded(nextId).catch(() => {});
-      }
-    }
-    if (msg.customFontWeight !== undefined) {
-      const cw = Number(msg.customFontWeight);
-      customFontWeightOverride.value =
-        msg.customFontWeight !== null && Number.isFinite(cw) && cw >= 100
-          ? cw
-          : null;
-    }
-  }
-
-  if (msg.lyricOffsetMs !== undefined)
-    lyricOffsetMs.value = Number(msg.lyricOffsetMs || 0);
-  if (msg.bluetoothDelayMs !== undefined)
-    bluetoothDelayMs.value = Number(msg.bluetoothDelayMs || 0);
-  if (msg.playMode) playMode.value = String(msg.playMode);
-  const incomingSchemeMode = msg.colorScheme || msg.globalColorScheme;
-  if (incomingSchemeMode) {
-    themeColorScheme.value = String(incomingSchemeMode);
-  }
-  if (msg.lightThemeVariant)
-    lightThemeVariant.value = String(msg.lightThemeVariant);
-  if (msg.darkThemeVariant)
-    darkThemeVariant.value = String(msg.darkThemeVariant);
-
-  const prevSongHash = currentSong.value?.hash || "";
-  if (msg.song && typeof msg.song === "object") {
-    currentSong.value = {
-      hash: String(msg.song.hash || ""),
-      title: String(msg.song.title || ""),
-      artist: String(msg.song.artist || ""),
-      coverUrl: String(msg.song.coverUrl || ""),
+// ==================== 工具函数：整行连贯 OKLab 双色流光 + 时间查询 ====================
+function getWordLitStyle(w: NormalizedLyricWord): Record<string, string> {
+  const { primary, secondary } = activeSungPalette.value;
+  if (sungMode.value === "solid" || primary === secondary) {
+    return {
+      backgroundImage: `linear-gradient(90deg, ${primary} 0%, ${primary} 100%)`,
     };
-  } else if (msg.song === null) {
-    currentSong.value = null;
   }
-  const songChanged = (currentSong.value?.hash || "") !== prevSongHash;
-
-  if (
-    songChanged &&
-    currentSong.value?.title &&
-    showIntro.value &&
-    !fromStorage
-  ) {
-    introVisible.value = true;
-    if (introHideTimer) clearTimeout(introHideTimer);
-    introHideTimer = setTimeout(() => {
-      introVisible.value = false;
-      introHideTimer = null;
-    }, 2200);
-  }
-
-  if (
-    msg.lyric &&
-    typeof msg.lyric === "object" &&
-    Array.isArray(msg.lyric.lines)
-  ) {
-    const normalized = normalizeLyricLines(msg.lyric.lines);
-    lyricLines.value = normalized;
-    isKrc.value =
-      Boolean(msg.lyric.isKrc) ||
-      normalized.some((l) => (l.words?.length || 0) > 0);
-  } else if (msg.lyric === null || songChanged) {
-    isKrc.value = false;
-    lyricLines.value = [];
-  }
-
-  if (songChanged) {
-    livePosMs.value = Math.max(0, Number(msg.positionMs || 0));
-  }
-  applySyncedPosition(
-    Number(msg.positionMs || 0),
-    Boolean(msg.isPlaying),
-    msg.sentAtMs,
-    msg.playbackRate
-  );
+  const c0 = lerpOklabHex(primary, secondary, w.lineStartFrac);
+  const c1 = lerpOklabHex(primary, secondary, w.lineEndFrac);
+  return {
+    backgroundImage: `linear-gradient(108deg, ${c0} 0%, ${c1} 100%)`,
+  };
 }
 
-function hydrateFromStorageSnapshots() {
-  let stateSnapSentAt = 0;
-  let stateSnapSongHash = "";
-  try {
-    const rawState = localStorage.getItem(SNAPSHOT_STORAGE_KEY);
-    if (rawState) {
-      const parsedState = JSON.parse(rawState);
-      if (parsedState && typeof parsedState === "object") {
-        stateSnapSentAt = Number(parsedState.sentAtMs || 0);
-        stateSnapSongHash = String(parsedState.song?.hash || "");
-        applyIncomingSyncPayload(parsedState, { fromStorage: true });
-      }
+function getPlainLitStyle(): Record<string, string> {
+  const { primary, secondary } = activeSungPalette.value;
+  if (sungMode.value === "solid" || primary === secondary) {
+    return {
+      backgroundImage: `linear-gradient(90deg, ${primary} 0%, ${primary} 100%)`,
+    };
+  }
+  return {
+    backgroundImage: `linear-gradient(108deg, ${primary} 0%, ${secondary} 100%)`,
+  };
+}
+
+function resolveLineEndMs(line: LyricLineItem): number {
+  const words = line.words || [];
+  if (words.length > 0) {
+    let maxEnd = line.startTimeMs + 120;
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i];
+      const absStart =
+        w.startTimeMs >= line.startTimeMs
+          ? w.startTimeMs
+          : line.startTimeMs + w.startTimeMs;
+      const end = absStart + Math.max(80, w.durationMs || 140);
+      if (end > maxEnd) maxEnd = end;
     }
-  } catch {
-    // ignore corrupted snapshot
+    return maxEnd;
   }
-  try {
-    const rawPos = localStorage.getItem(POS_STORAGE_KEY);
-    if (rawPos) {
-      const parsedPos = JSON.parse(rawPos);
-      if (parsedPos && typeof parsedPos === "object") {
-        const posSentAt = Number(parsedPos.sentAtMs || 0);
-        const posHash = String(parsedPos.songHash || "");
-        const expectedHash = currentSong.value?.hash || stateSnapSongHash;
-        const hashMatches = !posHash || !expectedHash || posHash === expectedHash;
-        const newerThanState =
-          posSentAt >= Math.max(stateSnapSentAt, lastAppliedStateSentAtMs);
-        if (hashMatches && newerThanState) {
-          applyIncomingSyncPayload(parsedPos, { fromStorage: true });
-        }
-      }
-    }
-  } catch {
-    // ignore corrupted pos
-  }
+  return line.startTimeMs + Math.max(1200, line.durationMs || 2600);
 }
 
-hydrateFromStorageSnapshots();
-
-if (
-  isBrowserDevPreviewEnv() &&
-  !currentSong.value &&
-  lyricLines.value.length === 0
-) {
-  const showcase = createBrowserDevShowcase();
-  const demoSong = showcase.songs[0];
-  if (demoSong) {
-    applyIncomingSyncPayload(
-      {
-        type: "STATE_SYNC",
-        song: demoSong,
-        lyric: showcase.lyric,
-        positionMs: 11200,
-        durationMs: demoSong.durationMs || 218000,
-        isPlaying: false,
-        playbackRate: 1,
-        sentAtMs: Date.now(),
-      },
-      { fromStorage: true }
-    );
-  }
+function computeCalibratedPosMs(rawPosMs: number): number {
+  return rawPosMs + lyricOffsetMs.value - bluetoothDelayMs.value;
 }
 
-// ==================== 语义折行与自适应行距排版规划 ====================
-const calibratedPosMs = computed(() => {
-  return livePosMs.value + lyricOffsetMs.value - bluetoothDelayMs.value;
-});
-
-const activeLineIndex = computed(() => {
-  const lines = lyricLines.value;
+function findLineIndexAtPos(
+  lines: readonly LyricLineItem[],
+  calibratedPos: number
+): number {
   if (!lines.length) return -1;
-  const pos = calibratedPosMs.value;
-  if (pos < lines[0].startTimeMs) return -1;
+  if (calibratedPos < lines[0].startTimeMs) return -1;
   let lo = 0;
   let hi = lines.length - 1;
   let ans = 0;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (lines[mid].startTimeMs <= pos) {
+    if (lines[mid].startTimeMs <= calibratedPos) {
       ans = mid;
       lo = mid + 1;
     } else {
@@ -1326,42 +961,56 @@ const activeLineIndex = computed(() => {
     }
   }
   return ans;
-});
+}
 
-const interludeProgress = computed(() => {
-  const lines = lyricLines.value;
-  if (!lines.length) return -1;
-  const pos = calibratedPosMs.value;
-  const idx = activeLineIndex.value;
-
+function computeInterludeState(
+  lines: readonly LyricLineItem[],
+  idx: number,
+  calibratedPos: number
+): { visible: boolean; progress: number; remainingMs: number } {
+  if (!lines.length) {
+    return { visible: false, progress: 0, remainingMs: 0 };
+  }
   if (idx < 0) {
     const firstStart = lines[0].startTimeMs;
-    if (firstStart < 2500) return -1;
-    return clamp(pos / Math.max(1, firstStart), 0, 1);
+    if (firstStart < 2600 || calibratedPos >= firstStart) {
+      return { visible: false, progress: 0, remainingMs: 0 };
+    }
+    return {
+      visible: true,
+      progress: clamp(calibratedPos / Math.max(1, firstStart), 0, 1),
+      remainingMs: Math.max(0, firstStart - calibratedPos),
+    };
   }
-
   const cur = lines[idx];
   const next = lines[idx + 1];
-  if (!next) return -1;
-  const curWords = cur.words || [];
-  const lastWordEnd =
-    curWords.length > 0
-      ? Math.max(
-          ...curWords.map(
-            (w) =>
-              (w.startTimeMs >= cur.startTimeMs
-                ? w.startTimeMs
-                : cur.startTimeMs + w.startTimeMs) + Math.max(80, w.durationMs)
-          )
-        )
-      : cur.startTimeMs + Math.max(1200, cur.durationMs || 2600);
-  const gap = next.startTimeMs - lastWordEnd;
-  if (gap >= 4500 && pos > lastWordEnd + 350 && pos < next.startTimeMs) {
-    return clamp((pos - lastWordEnd) / gap, 0, 1);
+  if (!next) return { visible: false, progress: 0, remainingMs: 0 };
+  const lastEnd = resolveLineEndMs(cur);
+  const gap = next.startTimeMs - lastEnd;
+  if (gap >= 4000 && calibratedPos > lastEnd + 280 && calibratedPos < next.startTimeMs) {
+    return {
+      visible: true,
+      progress: clamp((calibratedPos - lastEnd) / gap, 0, 1),
+      remainingMs: Math.max(0, next.startTimeMs - calibratedPos),
+    };
   }
-  return -1;
-});
+  return { visible: false, progress: 0, remainingMs: 0 };
+}
 
+function getWordPhysicsOpts(): WordPhysicsOptions {
+  return {
+    wordByWord: wordByWordEnabled.value,
+    bounceEnabled: wordBounceEnabled.value,
+    motionStyle: motionStyle.value,
+    motionLevel: effectiveMotionLevel.value,
+    glowRatio: glowTokens.value.ratio,
+    isLightStage: false,
+    // 桌面场景收敛微浮幅度，保持高级弹性且不扰乱办公/浏览余光
+    liftScale: 0.72,
+  };
+}
+
+// ==================== 语义折行与自适应缩放 + 超长句随唱平推规划 ====================
 const SPLIT_PUNCTUATION = new Set([
   " ",
   ",",
@@ -1537,34 +1186,107 @@ function splitLongLineSemantically(
   ];
 }
 
-function computeRowFitScale(
+function measureRowFitMetrics(
   text: string,
   sizePx: number,
   weight: number,
-  maxWidthPx: number
-): number {
+  maxWidthPx: number,
+  allowPan: boolean
+): { fitScale: number; overflowPx: number; rawWidthPx: number } {
   const measured = measureTextWidthPx(text, sizePx, weight);
-  if (measured <= maxWidthPx || measured <= 0) return 1;
-  return clamp((maxWidthPx - 6) / measured, 0.56, 1);
+  if (measured <= maxWidthPx || measured <= 0) {
+    return { fitScale: 1, overflowPx: 0, rawWidthPx: measured };
+  }
+  const minScale = allowPan ? MIN_ADAPTIVE_SCALE : 0.74;
+  const rawFit = (maxWidthPx - 6) / measured;
+  const fitScale = clamp(rawFit, minScale, 1);
+  const scaledW = measured * fitScale;
+  const overflowPx = allowPan ? Math.max(0, Math.ceil(scaledW - maxWidthPx + 14)) : 0;
+  return { fitScale, overflowPx, rawWidthPx: measured };
+}
+
+function buildDisplayRow(params: {
+  key: string;
+  lineIndex: number;
+  text: string;
+  words: LyricWordItem[];
+  lineStartMs: number;
+  lineDurationMs: number;
+  isActiveKaraoke: boolean;
+  isLeavingKaraoke?: boolean;
+  isSecondary: boolean;
+  isKtvPeer?: boolean;
+  isPreviewNext?: boolean;
+  verticalPct: number;
+  alignOverride: "left" | "center" | "right";
+  sizePx: number;
+  weight: number;
+  maxWidthPx: number;
+  allowPan: boolean;
+}): DisplayRow {
+  const presentation =
+    params.words.length > 0
+      ? normalizeLyricLinePresentation(params.words, params.text)
+      : null;
+  const isHarmonyLine =
+    harmonyStyleEnabled.value &&
+    Boolean(
+      presentation
+        ? presentation.isHarmonyLine
+        : /^(\(|（|【).+(\)|）|】)$/.test(params.text.trim())
+    );
+  const effSizePx = isHarmonyLine
+    ? Math.max(15, Math.round(params.sizePx * 0.84))
+    : params.sizePx;
+  const metrics = measureRowFitMetrics(
+    params.text,
+    effSizePx,
+    params.weight,
+    params.maxWidthPx,
+    params.allowPan
+  );
+  return {
+    key: params.key,
+    lineIndex: params.lineIndex,
+    text: params.text,
+    words: params.words,
+    presentation,
+    lineStartMs: params.lineStartMs,
+    lineDurationMs: params.lineDurationMs,
+    isActiveKaraoke: params.isActiveKaraoke,
+    isLeavingKaraoke: Boolean(params.isLeavingKaraoke),
+    isSecondary: params.isSecondary,
+    isKtvPeer: Boolean(params.isKtvPeer),
+    isPreviewNext: params.isPreviewNext,
+    isHarmonyLine,
+    verticalPct: params.verticalPct,
+    alignOverride: params.alignOverride,
+    fitScale: metrics.fitScale,
+    overflowPx: metrics.overflowPx,
+    rawWidthPx: metrics.rawWidthPx,
+    maxWidthPx: params.maxWidthPx,
+  };
 }
 
 const dualRowVerticalPct = computed(() => {
-  const spread = clamp(20 + lineSpacing.value * 0.45, 20, 27);
+  const spread = clamp(21 + lineSpacing.value * 0.48, 21, 28);
   return { top: 50 - spread, bottom: 50 + spread };
 });
 
 const displayPlan = computed<{ rows: DisplayRow[]; isThreeRow: boolean }>(() => {
   const lines = lyricLines.value;
-  const maxWidth = Math.max(280, measuredViewportWidth.value - 28);
+  const maxWidth = Math.max(280, measuredViewportWidth.value - 32);
   const mainPx = fontSize.value;
-  const subPx = Math.max(14, Math.round(mainPx * 0.62));
+  const subPx = Math.max(14, Math.round(mainPx * 0.64));
+  const ktvPeerPx = Math.max(16, Math.round(mainPx * 0.9));
   const weight = activeTypography.value.fontWeight;
   const align: "left" | "center" =
     layoutMode.value === "left" ? "left" : "center";
   const { top: topPct, bottom: bottomPct } = dualRowVerticalPct.value;
+  const idx = activeLineIndex.value;
 
-  if (!lines.length || activeLineIndex.value < 0) {
-    const isPrelude = lines.length > 0 && activeLineIndex.value < 0;
+  if (!lines.length || idx < 0) {
+    const isPrelude = lines.length > 0 && idx < 0;
     const titleText = currentSong.value?.title
       ? `${currentSong.value.title}${
           currentSong.value.artist ? ` · ${currentSong.value.artist}` : ""
@@ -1579,12 +1301,14 @@ const displayPlan = computed<{ rows: DisplayRow[]; isThreeRow: boolean }>(() => 
       : "播放任意曲目即可毫秒级实时同步逐字歌词";
 
     if (layoutMode.value === "single") {
+      const text = isPrelude && lines[0]?.text ? lines[0].text : titleText;
       return {
         isThreeRow: false,
         rows: [
-          {
-            key: `idle-single-${titleText}`,
-            text: isPrelude && lines[0]?.text ? lines[0].text : titleText,
+          buildDisplayRow({
+            key: `idle-single-${text}`,
+            lineIndex: -1,
+            text,
             words: [],
             lineStartMs: 0,
             lineDurationMs: 0,
@@ -1592,8 +1316,11 @@ const displayPlan = computed<{ rows: DisplayRow[]; isThreeRow: boolean }>(() => 
             isSecondary: false,
             verticalPct: 50,
             alignOverride: align,
-            fitScale: computeRowFitScale(titleText, mainPx, weight, maxWidth),
-          },
+            sizePx: mainPx,
+            weight,
+            maxWidthPx: maxWidth,
+            allowPan: false,
+          }),
         ],
       };
     }
@@ -1601,8 +1328,9 @@ const displayPlan = computed<{ rows: DisplayRow[]; isThreeRow: boolean }>(() => 
     return {
       isThreeRow: false,
       rows: [
-        {
+        buildDisplayRow({
           key: `idle-main-${titleText}`,
+          lineIndex: -1,
           text: titleText,
           words: [],
           lineStartMs: 0,
@@ -1611,10 +1339,14 @@ const displayPlan = computed<{ rows: DisplayRow[]; isThreeRow: boolean }>(() => 
           isSecondary: false,
           verticalPct: topPct,
           alignOverride: align,
-          fitScale: computeRowFitScale(titleText, mainPx, weight, maxWidth),
-        },
-        {
+          sizePx: mainPx,
+          weight,
+          maxWidthPx: maxWidth,
+          allowPan: false,
+        }),
+        buildDisplayRow({
           key: `idle-sub-${subText}`,
+          lineIndex: -1,
           text: subText,
           words: [],
           lineStartMs: 0,
@@ -1623,13 +1355,15 @@ const displayPlan = computed<{ rows: DisplayRow[]; isThreeRow: boolean }>(() => 
           isSecondary: true,
           verticalPct: bottomPct,
           alignOverride: align,
-          fitScale: computeRowFitScale(subText, subPx, 600, maxWidth),
-        },
+          sizePx: subPx,
+          weight: 600,
+          maxWidthPx: maxWidth,
+          allowPan: false,
+        }),
       ],
     };
   }
 
-  const idx = activeLineIndex.value;
   const active = lines[idx];
   const next = lines[idx + 1] || null;
   const mainText = (active.text || "").trim() || "♪";
@@ -1649,12 +1383,14 @@ const displayPlan = computed<{ rows: DisplayRow[]; isThreeRow: boolean }>(() => 
 
   const useWords = wordByWordEnabled.value ? active.words || [] : [];
 
+  // 1. 极简单行：绝不强拆双行，超长句启用随唱平滑横推 + 柔光边缘羽化
   if (isSingleLineOnly) {
     return {
       isThreeRow: false,
       rows: [
-        {
+        buildDisplayRow({
           key: `l-${idx}-single`,
+          lineIndex: idx,
           text: mainText,
           words: useWords,
           lineStartMs: active.startTimeMs,
@@ -1663,65 +1399,91 @@ const displayPlan = computed<{ rows: DisplayRow[]; isThreeRow: boolean }>(() => 
           isSecondary: false,
           verticalPct: 50,
           alignOverride: "center",
-          fitScale: computeRowFitScale(mainText, mainPx, weight, maxWidth),
-        },
+          sizePx: mainPx,
+          weight,
+          maxWidthPx: maxWidth,
+          allowPan: true,
+        }),
       ],
     };
   }
 
+  // 2. 经典 KTV 交替：偶数行恒定「上行居左」、奇数行恒定「下行居右」，双行近似同级（0.90x）原地升温点亮
   if (layoutMode.value === "ktv") {
     const activeOnTop = idx % 2 === 0;
     const rows: DisplayRow[] = [];
-    rows.push({
-      key: `ktv-line-${idx}`,
-      text: mainText,
-      words: useWords,
-      lineStartMs: active.startTimeMs,
-      lineDurationMs: active.durationMs,
-      isActiveKaraoke: true,
-      isSecondary: false,
-      verticalPct: activeOnTop ? topPct : bottomPct,
-      alignOverride: activeOnTop ? "left" : "center",
-      fitScale: computeRowFitScale(mainText, mainPx, weight, maxWidth),
-    });
+    rows.push(
+      buildDisplayRow({
+        key: `ktv-line-${idx}`,
+        lineIndex: idx,
+        text: mainText,
+        words: useWords,
+        lineStartMs: active.startTimeMs,
+        lineDurationMs: active.durationMs,
+        isActiveKaraoke: true,
+        isSecondary: false,
+        isKtvPeer: false,
+        verticalPct: activeOnTop ? topPct : bottomPct,
+        alignOverride: activeOnTop ? "left" : "right",
+        sizePx: mainPx,
+        weight,
+        maxWidthPx: maxWidth,
+        allowPan: true,
+      })
+    );
 
     if (nextText) {
-      rows.push({
-        key: `ktv-line-${idx + 1}`,
-        text: nextText,
-        words: wordByWordEnabled.value ? next?.words || [] : [],
-        lineStartMs: next?.startTimeMs || 0,
-        lineDurationMs: next?.durationMs || 0,
-        isActiveKaraoke: false,
-        isSecondary: true,
-        isPreviewNext: true,
-        verticalPct: activeOnTop ? bottomPct : topPct,
-        alignOverride: activeOnTop ? "center" : "left",
-        fitScale: computeRowFitScale(nextText, subPx, 600, maxWidth),
-      });
+      const nextIsLeaving = leavingLineIndex.value === idx + 1;
+      rows.push(
+        buildDisplayRow({
+          key: `ktv-line-${idx + 1}`,
+          lineIndex: idx + 1,
+          text: nextText,
+          words: wordByWordEnabled.value ? next?.words || [] : [],
+          lineStartMs: next?.startTimeMs || 0,
+          lineDurationMs: next?.durationMs || 0,
+          isActiveKaraoke: false,
+          isLeavingKaraoke: nextIsLeaving,
+          isSecondary: false,
+          isKtvPeer: true,
+          isPreviewNext: true,
+          verticalPct: activeOnTop ? bottomPct : topPct,
+          alignOverride: activeOnTop ? "right" : "left",
+          sizePx: ktvPeerPx,
+          weight,
+          maxWidthPx: maxWidth,
+          allowPan: false,
+        })
+      );
     }
     rows.sort((a, b) => a.verticalPct - b.verticalPct);
     return { isThreeRow: false, rows };
   }
 
+  // 3. 双语 + 注音三行态：超长主行改用随唱横推，避免挤成四行
   if (hasBothSubLines) {
     return {
       isThreeRow: true,
       rows: [
-        {
+        buildDisplayRow({
           key: `l-${idx}-main`,
+          lineIndex: idx,
           text: mainText,
           words: useWords,
           lineStartMs: active.startTimeMs,
           lineDurationMs: active.durationMs,
           isActiveKaraoke: true,
           isSecondary: false,
-          verticalPct: 22,
+          verticalPct: 21,
           alignOverride: align,
-          fitScale: computeRowFitScale(mainText, mainPx, weight, maxWidth),
-        },
-        {
+          sizePx: mainPx,
+          weight,
+          maxWidthPx: maxWidth,
+          allowPan: true,
+        }),
+        buildDisplayRow({
           key: `l-${idx}-phonetic`,
+          lineIndex: idx,
           text: phoneticText,
           words: [],
           lineStartMs: 0,
@@ -1729,12 +1491,16 @@ const displayPlan = computed<{ rows: DisplayRow[]; isThreeRow: boolean }>(() => 
           isActiveKaraoke: false,
           isSecondary: true,
           isPreviewNext: true,
-          verticalPct: 58,
+          verticalPct: 57,
           alignOverride: align,
-          fitScale: computeRowFitScale(phoneticText, subPx, 600, maxWidth),
-        },
-        {
+          sizePx: subPx,
+          weight: 600,
+          maxWidthPx: maxWidth,
+          allowPan: false,
+        }),
+        buildDisplayRow({
           key: `l-${idx}-trans`,
+          lineIndex: idx,
           text: transText,
           words: [],
           lineStartMs: 0,
@@ -1744,101 +1510,70 @@ const displayPlan = computed<{ rows: DisplayRow[]; isThreeRow: boolean }>(() => 
           isPreviewNext: false,
           verticalPct: 84,
           alignOverride: align,
-          fitScale: computeRowFitScale(transText, subPx, 600, maxWidth),
-        },
+          sizePx: subPx,
+          weight: 600,
+          maxWidthPx: maxWidth,
+          allowPan: false,
+        }),
       ],
     };
   }
 
+  // 4. 双行居中 / 双行居左：仅在无副行且明显超宽(>1.18x)时自然语义拆行，其余保持稳定字号 + 超长随唱横推
   const mainWidth = measureTextWidthPx(mainText, mainPx, weight);
-  const isLongMain = mainWidth > maxWidth * 0.98 && mainText.length >= 8;
+  const shouldSplitSolo =
+    !secondaryText && mainWidth > maxWidth * 1.18 && mainText.length >= 10;
 
-  if (isLongMain) {
+  if (shouldSplitSolo) {
     const [p1, p2] = splitLongLineSemantically(
       { ...active, words: useWords },
       maxWidth,
       mainPx,
       weight
     );
-    if (!secondaryText) {
-      return {
-        isThreeRow: false,
-        rows: [
-          {
-            key: `l-${idx}-p1`,
-            text: p1.text,
-            words: p1.words,
-            lineStartMs: p1.startTimeMs,
-            lineDurationMs: p1.durationMs,
-            isActiveKaraoke: true,
-            isSecondary: false,
-            verticalPct: topPct,
-            alignOverride: align,
-            fitScale: computeRowFitScale(p1.text, mainPx, weight, maxWidth),
-          },
-          {
-            key: `l-${idx}-p2`,
-            text: p2.text,
-            words: p2.words,
-            lineStartMs: p2.startTimeMs,
-            lineDurationMs: p2.durationMs,
-            isActiveKaraoke: true,
-            isSecondary: false,
-            verticalPct: bottomPct,
-            alignOverride: align,
-            fitScale: computeRowFitScale(p2.text, mainPx, weight, maxWidth),
-          },
-        ],
-      };
-    }
-
     return {
-      isThreeRow: true,
+      isThreeRow: false,
       rows: [
-        {
+        buildDisplayRow({
           key: `l-${idx}-p1`,
+          lineIndex: idx,
           text: p1.text,
           words: p1.words,
           lineStartMs: p1.startTimeMs,
           lineDurationMs: p1.durationMs,
           isActiveKaraoke: true,
           isSecondary: false,
-          verticalPct: 18,
+          verticalPct: topPct,
           alignOverride: align,
-          fitScale: computeRowFitScale(p1.text, mainPx, weight, maxWidth),
-        },
-        {
+          sizePx: mainPx,
+          weight,
+          maxWidthPx: maxWidth,
+          allowPan: true,
+        }),
+        buildDisplayRow({
           key: `l-${idx}-p2`,
+          lineIndex: idx,
           text: p2.text,
           words: p2.words,
           lineStartMs: p2.startTimeMs,
           lineDurationMs: p2.durationMs,
           isActiveKaraoke: true,
           isSecondary: false,
-          verticalPct: 50,
+          verticalPct: bottomPct,
           alignOverride: align,
-          fitScale: computeRowFitScale(p2.text, mainPx, weight, maxWidth),
-        },
-        {
-          key: `l-${idx}-sub`,
-          text: secondaryText,
-          words: [],
-          lineStartMs: 0,
-          lineDurationMs: 0,
-          isActiveKaraoke: false,
-          isSecondary: true,
-          isPreviewNext: !transText && !phoneticText && Boolean(nextText),
-          verticalPct: 82,
-          alignOverride: align,
-          fitScale: computeRowFitScale(secondaryText, subPx, 600, maxWidth),
-        },
+          sizePx: mainPx,
+          weight,
+          maxWidthPx: maxWidth,
+          allowPan: true,
+        }),
       ],
     };
   }
 
   const rows: DisplayRow[] = [
-    {
+    buildDisplayRow({
       key: `l-${idx}-main`,
+      lineIndex: idx,
       text: mainText,
       words: useWords,
       lineStartMs: active.startTimeMs,
@@ -1847,310 +1582,1041 @@ const displayPlan = computed<{ rows: DisplayRow[]; isThreeRow: boolean }>(() => 
       isSecondary: false,
       verticalPct: secondaryText ? topPct : 50,
       alignOverride: align,
-      fitScale: computeRowFitScale(mainText, mainPx, weight, maxWidth),
-    },
+      sizePx: mainPx,
+      weight,
+      maxWidthPx: maxWidth,
+      allowPan: true,
+    }),
   ];
 
   if (secondaryText) {
-    rows.push({
-      key: `l-${idx}-sub-${transText ? "t" : phoneticText ? "p" : "n"}`,
-      text: secondaryText,
-      words: [],
-      lineStartMs: 0,
-      lineDurationMs: 0,
-      isActiveKaraoke: false,
-      isSecondary: true,
-      isPreviewNext: !transText && !phoneticText && Boolean(nextText),
-      verticalPct: bottomPct,
-      alignOverride: align,
-      fitScale: computeRowFitScale(secondaryText, subPx, 600, maxWidth),
-    });
+    rows.push(
+      buildDisplayRow({
+        key: `l-${idx}-sub-${transText ? "t" : phoneticText ? "p" : "n"}`,
+        lineIndex: idx,
+        text: secondaryText,
+        words: [],
+        lineStartMs: 0,
+        lineDurationMs: 0,
+        isActiveKaraoke: false,
+        isSecondary: true,
+        isPreviewNext: !transText && !phoneticText && Boolean(nextText),
+        verticalPct: bottomPct,
+        alignOverride: align,
+        sizePx: subPx,
+        weight: 600,
+        maxWidthPx: maxWidth,
+        allowPan: false,
+      })
+    );
   }
 
   return { isThreeRow: false, rows };
 });
 
-// ==================== 真光学双层矢量描边 + 无极卡拉OK渲染引擎 ====================
-function smootherstep(x: number): number {
-  const t = clamp(x, 0, 1);
-  return t * t * t * (t * (t * 6 - 15) + 10);
+// ==================== 纯 GPU 差量 DOM 直写引擎（零每帧 VDOM 重算 · 暂停自动休眠） ====================
+function refreshRowDomCaches() {
+  cachedRowWordEls.clear();
+  cachedPlainLitEls.clear();
+  cachedPanTrackEls.clear();
+  cachedLeavingWordEls = [];
+
+  const vp = viewportRef.value;
+  if (!vp) return;
+
+  const rowEls = vp.querySelectorAll<HTMLElement>("[data-row-key]");
+  for (let i = 0; i < rowEls.length; i++) {
+    const rowEl = rowEls[i];
+    const key = rowEl.dataset.rowKey;
+    if (!key) continue;
+
+    const words = Array.from(rowEl.querySelectorAll<HTMLElement>(".dl-kw-span"));
+    if (words.length > 0) {
+      cachedRowWordEls.set(key, words);
+      if (rowEl.dataset.leavingRow === "1") {
+        cachedLeavingWordEls = words;
+      }
+    }
+
+    const plainLit = rowEl.querySelector<HTMLElement>(".dl-plain-lit");
+    if (plainLit) {
+      cachedPlainLitEls.set(key, plainLit);
+    }
+
+    const panTrack = rowEl.querySelector<HTMLElement>(".dl-row-pan-track");
+    if (panTrack) {
+      cachedPanTrackEls.set(key, panTrack);
+    }
+  }
+
+  // 清理已离场行的物理池与横推缓存
+  const validKeys = new Set(displayPlan.value.rows.map((r) => r.key));
+  for (const k of Array.from(activeWordBanks.keys())) {
+    if (!validKeys.has(k)) activeWordBanks.delete(k);
+  }
+  for (const k of Array.from(rowPanCurrentX.keys())) {
+    if (!validKeys.has(k)) rowPanCurrentX.delete(k);
+  }
+  for (const bank of activeWordBanks.values()) {
+    bank.invalidateDomCache();
+  }
+  leavingWordBank.invalidateDomCache();
+  forceDomFlushNextFrame = true;
 }
 
-interface DualLayerRenderBundle {
-  wrapStyle: Record<string, string>;
-  strokeStyle: Record<string, string> | null;
-  fillStyle: Record<string, string>;
+function flushWordBankToDom(
+  bank: WordPhysicsBank,
+  els: HTMLElement[],
+  forceAll = false
+) {
+  const n = Math.min(bank.count, els.length);
+  const useSweepMask = isMaskSweepMotionStyle.value;
+  for (let i = 0; i < n; i++) {
+    const el = els[i];
+    if (!el) continue;
+
+    const y = bank.y[i];
+    if (
+      forceAll ||
+      Number.isNaN(bank.writtenY[i]) ||
+      Math.abs(y - bank.writtenY[i]) >= 0.025
+    ) {
+      bank.writtenY[i] = y;
+      el.style.setProperty("--kw-y", `${y.toFixed(2)}px`);
+    }
+
+    const s = bank.scale[i];
+    if (
+      forceAll ||
+      Number.isNaN(bank.writtenScale[i]) ||
+      Math.abs(s - bank.writtenScale[i]) >= 0.0008
+    ) {
+      bank.writtenScale[i] = s;
+      el.style.setProperty("--kw-s", s.toFixed(4));
+    }
+
+    const lit = bank.lit[i];
+    const sweep = bank.sweep[i];
+    const litChanged =
+      forceAll ||
+      Number.isNaN(bank.writtenLit[i]) ||
+      Math.abs(lit - bank.writtenLit[i]) >= 0.004;
+    const sweepChanged =
+      forceAll ||
+      Number.isNaN(bank.writtenSweep[i]) ||
+      Math.abs(sweep - bank.writtenSweep[i]) >= 0.003;
+
+    if (litChanged) {
+      bank.writtenLit[i] = lit;
+      el.style.setProperty("--kw-lit", lit.toFixed(3));
+    }
+
+    if (sweepChanged) {
+      bank.writtenSweep[i] = sweep;
+      el.style.setProperty("--kw-mask-x", `${sweepToMaskPositionPct(sweep)}%`);
+    }
+
+    if (litChanged || sweepChanged) {
+      const sweepCover = !useSweepMask
+        ? 1
+        : sweep <= 0.84
+        ? 0
+        : Math.min(1, (sweep - 0.84) / 0.14);
+      const baseFade = lit * sweepCover * 0.94;
+      el.style.setProperty("--kw-base-fade", baseFade.toFixed(3));
+    }
+
+    const glow = bank.glow[i];
+    if (
+      forceAll ||
+      Number.isNaN(bank.writtenGlow[i]) ||
+      Math.abs(glow - bank.writtenGlow[i]) >= 0.004
+    ) {
+      bank.writtenGlow[i] = glow;
+      el.style.setProperty("--kw-glow", glow.toFixed(3));
+    }
+  }
 }
 
-function buildSoftShadowFilter(isBrightText: boolean): string {
-  if (!shadowEnabled.value) return "";
-  return isBrightText
-    ? "drop-shadow(0 2px 6px rgba(0, 0, 0, 0.56))"
-    : "drop-shadow(0 2px 6px rgba(255, 255, 255, 0.72))";
+function updateLiquidInterludeBeads(
+  state: { visible: boolean; progress: number; remainingMs: number },
+  dtSec: number
+) {
+  const targetVis = state.visible;
+  if (isInterludeVisible.value !== targetVis) {
+    isInterludeVisible.value = targetVis;
+    interludeAlign.value =
+      layoutMode.value === "left"
+        ? "left"
+        : layoutMode.value === "ktv"
+        ? activeLineIndex.value % 2 === 0
+          ? "right"
+          : "left"
+        : "center";
+  }
+  if (!targetVis) return;
+
+  const beads = interludeBeadRefs.value;
+  if (!beads || beads.length !== 3) return;
+  breathingPhase += dtSec * 3.4;
+
+  const { primary, secondary } = activeSungPalette.value;
+  const midColor = lerpOklabHex(primary, secondary, 0.5);
+  const colors = [primary, midColor, secondary];
+  const cueShrink =
+    state.remainingMs < 950 ? Math.max(0.18, state.remainingMs / 950) : 1;
+  const reduced = effectiveMotionLevel.value === "none";
+
+  for (let i = 0; i < 3; i++) {
+    const el = beads[i];
+    if (!el) continue;
+    const dotProg = clamp((state.progress - i / 3) * 3, 0, 1);
+    const wave = reduced
+      ? 0.45
+      : 0.5 + 0.5 * Math.sin(breathingPhase - i * 0.85);
+    const ty = reduced ? 0 : -1.8 * wave * (0.28 + 0.72 * dotProg) * cueShrink;
+    const sx =
+      (0.84 + 0.36 * dotProg + (reduced ? 0 : 0.14 * wave * dotProg)) *
+      (0.54 + 0.46 * cueShrink);
+    const sy =
+      (0.84 + 0.18 * dotProg + (reduced ? 0 : 0.12 * wave * dotProg)) *
+      (0.54 + 0.46 * cueShrink);
+    const alpha = clamp((0.26 + 0.74 * dotProg) * (0.45 + 0.55 * cueShrink), 0, 1);
+    el.style.background = dotProg > 0.04 ? colors[i] : "rgba(255, 255, 255, 0.36)";
+    el.style.opacity = alpha.toFixed(3);
+    el.style.transform = `translate3d(0, ${ty.toFixed(2)}px, 0) scale(${sx.toFixed(3)}, ${sy.toFixed(3)})`;
+    el.style.boxShadow =
+      dotProg > 0.15
+        ? `0 0 ${Math.round(8 * dotProg)}px ${hexToRgba(colors[i], 0.55 * dotProg)}`
+        : "none";
+  }
 }
 
-function getWordDualRender(
+function updateRowHorizontalPan(
   row: DisplayRow,
-  word: LyricWordItem
-): DualLayerRenderBundle {
-  const { primary: start, secondary: end } = activeSungPalette.value;
-  const unsungSolid = activeUnsungHex.value;
-  const uOp = unsungOpacity.value;
-  const glowRatio = clamp(glowIntensity.value / 100, 0, 1.5);
-  const sungStroke = sungStrokeSpec.value;
-  const unsungStroke = unsungStrokeSpec.value;
-  const heavySungStroke = activeTypography.value.opticalStrokeCss;
-  const heavyUnsungStroke = activeUnsungTypography.value.opticalStrokeCss;
-
-  const makeBackLayer = (
-    spec: { strokePx: number; strokeColor: string },
-    brightText: boolean
-  ): Record<string, string> | null => {
-    if (spec.strokePx <= 0) return null;
-    const shadowF = buildSoftShadowFilter(brightText);
-    return {
-      WebkitTextStroke: `${spec.strokePx}px ${spec.strokeColor}`,
-      color: "transparent",
-      WebkitTextFillColor: "transparent",
-      filter: shadowF || "none",
-    };
-  };
-
-  if (!row.isActiveKaraoke) {
-    const back = makeBackLayer(unsungStroke, isBrightHex(unsungSolid));
-    const directShadow =
-      !back && shadowEnabled.value
-        ? buildSoftShadowFilter(isBrightHex(unsungSolid))
-        : "none";
-    return {
-      wrapStyle: {
-        opacity: uOp.toFixed(2),
-        transform: "translate3d(0, 0px, 0) scale(1)",
-      },
-      strokeStyle: back,
-      fillStyle: {
-        backgroundImage: `linear-gradient(90deg, ${unsungSolid} 0%, ${unsungSolid} 100%)`,
-        WebkitTextStroke: heavyUnsungStroke,
-        filter: directShadow,
-      },
-    };
-  }
-
-  const pos = calibratedPosMs.value;
-  const absStart =
-    word.startTimeMs >= row.lineStartMs
-      ? word.startTimeMs
-      : row.lineStartMs + word.startTimeMs;
-  const dur = Math.max(55, word.durationMs || 140);
-  const rawP = clamp((pos - absStart) / dur, 0, 1);
-
-  if (rawP <= 0) {
-    const back = makeBackLayer(unsungStroke, isBrightHex(unsungSolid));
-    const directShadow =
-      !back && shadowEnabled.value
-        ? buildSoftShadowFilter(isBrightHex(unsungSolid))
-        : "none";
-    return {
-      wrapStyle: {
-        opacity: uOp.toFixed(2),
-        transform: "translate3d(0, 0px, 0) scale(1)",
-      },
-      strokeStyle: back,
-      fillStyle: {
-        backgroundImage: `linear-gradient(90deg, ${unsungSolid} 0%, ${unsungSolid} 100%)`,
-        WebkitTextStroke: heavyUnsungStroke,
-        filter: directShadow,
-      },
-    };
-  }
-
-  if (rawP >= 1) {
-    const back = makeBackLayer(sungStroke, isBrightHex(start));
-    const filters: string[] = [];
-    if (!back && shadowEnabled.value) {
-      filters.push(buildSoftShadowFilter(isBrightHex(start)));
+  calibratedPos: number,
+  dtSec: number,
+  snap: boolean
+): boolean {
+  const track = cachedPanTrackEls.get(row.key);
+  if (!track) return true;
+  if (row.overflowPx <= 1) {
+    if (rowPanCurrentX.get(row.key) !== 0) {
+      rowPanCurrentX.set(row.key, 0);
+      track.style.setProperty("--dl-pan-x", "0px");
     }
-    if (glowRatio > 0.05) {
-      const sungGlowRadius = Math.round(7 * glowRatio);
-      const sungGlowAlpha = clamp(0.34 * glowRatio, 0, 0.72);
-      filters.push(
-        `drop-shadow(0 0 ${sungGlowRadius}px ${hexToRgba(start, sungGlowAlpha)})`
-      );
+    return true;
+  }
+
+  let progressFrac = 0;
+  const words = row.presentation?.words || [];
+  if (words.length > 0 && row.isActiveKaraoke) {
+    let foundFrac = 0;
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i];
+      const wStart =
+        w.startTimeMs >= row.lineStartMs
+          ? w.startTimeMs
+          : row.lineStartMs + w.startTimeMs;
+      const wDur = Math.max(60, w.durationMs || 160);
+      if (calibratedPos < wStart) {
+        foundFrac = w.lineStartFrac;
+        break;
+      }
+      if (calibratedPos <= wStart + wDur) {
+        const p = clamp((calibratedPos - wStart) / wDur, 0, 1);
+        foundFrac = w.lineStartFrac + (w.lineEndFrac - w.lineStartFrac) * p;
+        break;
+      }
+      foundFrac = w.lineEndFrac;
     }
-    return {
-      wrapStyle: {
-        opacity: "1",
-        transform: "translate3d(0, -0.9px, 0) scale(1.008)",
-      },
-      strokeStyle: back,
-      fillStyle: {
-        backgroundImage: `linear-gradient(90deg, ${start} 0%, ${end} 100%)`,
-        WebkitTextStroke: heavySungStroke,
-        filter: filters.length ? filters.join(" ") : "none",
-      },
-    };
-  }
-
-  // 逐字扫光过渡态
-  const smoothP = smootherstep(rawP);
-  const bell = Math.sin(rawP * Math.PI);
-  const feather = dur >= 400 ? 18 : 13;
-  const center = -feather + smoothP * (100 + feather * 2);
-  const leftPct = clamp(center - feather, 0, 100);
-  const rightPct = clamp(center + feather, 0, 100);
-
-  const ty = -0.9 * smoothP - 2.1 * bell;
-  const scale = 1 + 0.008 * smoothP + 0.026 * bell;
-  const isLongNote = dur >= 580;
-  const back = makeBackLayer(sungStroke, isBrightHex(start));
-  const filters: string[] = [];
-  if (!back && shadowEnabled.value) {
-    filters.push(buildSoftShadowFilter(isBrightHex(start)));
-  }
-  if (glowRatio > 0.05) {
-    const activeGlowRadius = Math.round(
-      ((isLongNote ? 14 : 10) * bell + 5 * smoothP) * Math.max(0.2, glowRatio)
-    );
-    const activeGlowAlpha = clamp(
-      (0.34 + (isLongNote ? 0.38 : 0.24) * bell) * glowRatio,
+    progressFrac = clamp(foundFrac, 0, 1);
+  } else if (row.isActiveKaraoke && row.lineDurationMs > 0) {
+    progressFrac = clamp(
+      (calibratedPos - row.lineStartMs) / Math.max(400, row.lineDurationMs),
       0,
-      0.82
-    );
-    filters.push(
-      `drop-shadow(0 0 ${activeGlowRadius}px ${hexToRgba(end, activeGlowAlpha)})`
+      1
     );
   }
-  const unsungHalf = hexToRgba(unsungSolid, clamp(uOp, 0.45, 1));
 
-  return {
-    wrapStyle: {
-      opacity: "1",
-      transform: `translate3d(0, ${ty.toFixed(2)}px, 0) scale(${scale.toFixed(4)})`,
-    },
-    strokeStyle: back,
-    fillStyle: {
-      backgroundImage: `linear-gradient(90deg, ${start} 0%, ${end} ${leftPct.toFixed(
-        2
-      )}%, ${unsungHalf} ${rightPct.toFixed(2)}%, ${unsungHalf} 100%)`,
-      WebkitTextStroke: heavySungStroke,
-      filter: filters.length ? filters.join(" ") : "none",
-    },
-  };
+  const scaledTotalW = row.rawWidthPx * row.fitScale;
+  const activeCenterX = scaledTotalW * progressFrac;
+  const desiredShift = -clamp(
+    activeCenterX - row.maxWidthPx * 0.44,
+    0,
+    row.overflowPx
+  );
+  const prevX = rowPanCurrentX.get(row.key) ?? 0;
+  let nextX = desiredShift;
+  if (!snap && effectiveMotionLevel.value !== "none") {
+    const rate = 1 - Math.exp(-dtSec * 6.5);
+    const diff = desiredShift - prevX;
+    nextX = Math.abs(diff) < 0.35 ? desiredShift : prevX + diff * rate;
+  }
+  if (snap || Math.abs(nextX - prevX) >= 0.25) {
+    rowPanCurrentX.set(row.key, nextX);
+    track.style.setProperty("--dl-pan-x", `${nextX.toFixed(1)}px`);
+  }
+  return Math.abs(nextX - desiredShift) < 0.4;
 }
 
-function getPlainRowDualRender(row: DisplayRow): DualLayerRenderBundle {
-  const { primary: start, secondary: end } = activeSungPalette.value;
-  const unsungSolid = activeUnsungHex.value;
-  const uOp = row.isPreviewNext
-    ? clamp(unsungOpacity.value * 0.84, 0.3, 0.96)
-    : unsungOpacity.value;
-  const glowRatio = clamp(glowIntensity.value / 100, 0, 1.5);
-  const spec = row.isSecondary
-    ? subStrokeSpec.value
-    : row.isActiveKaraoke
-    ? sungStrokeSpec.value
-    : unsungStrokeSpec.value;
+function stepRealtimeLyricVisuals(
+  calibratedPos: number,
+  dtSec: number,
+  snap: boolean
+): boolean {
+  const plan = displayPlan.value;
+  const opts = getWordPhysicsOpts();
+  const force = snap || forceDomFlushNextFrame;
+  let allSettled = true;
 
-  const makeBackLayer = (brightText: boolean): Record<string, string> | null => {
-    if (spec.strokePx <= 0) return null;
-    const shadowF = buildSoftShadowFilter(brightText);
-    return {
-      WebkitTextStroke: `${spec.strokePx}px ${spec.strokeColor}`,
-      color: "transparent",
-      WebkitTextFillColor: "transparent",
-      filter: shadowF || "none",
-    };
-  };
+  for (let i = 0; i < plan.rows.length; i++) {
+    const row = plan.rows[i];
 
-  if (!row.isActiveKaraoke) {
-    const bright = isBrightHex(unsungSolid);
-    const back = makeBackLayer(bright);
-    return {
-      wrapStyle: { opacity: uOp.toFixed(2) },
-      strokeStyle: back,
-      fillStyle: {
-        backgroundImage: `linear-gradient(90deg, ${unsungSolid} 0%, ${unsungSolid} 100%)`,
-        WebkitTextStroke: row.isSecondary
-          ? "0px transparent"
-          : activeUnsungTypography.value.opticalStrokeCss,
-        filter:
-          !back && shadowEnabled.value ? buildSoftShadowFilter(bright) : "none",
-      },
-    };
+    // A. 逐字 KRC GPU 物理池
+    if (row.presentation && row.presentation.words.length > 0 && row.isActiveKaraoke) {
+      let bank = activeWordBanks.get(row.key);
+      if (!bank) {
+        bank = new WordPhysicsBank();
+        activeWordBanks.set(row.key, bank);
+      }
+      const words = row.presentation.words;
+      if (snap || bank.count !== words.length) {
+        bank.snapToTime(row.lineStartMs, words, calibratedPos, opts);
+      } else {
+        const settled = bank.stepActive(
+          row.lineStartMs,
+          words,
+          calibratedPos,
+          dtSec,
+          opts
+        );
+        if (!settled) allSettled = false;
+      }
+      const els = cachedRowWordEls.get(row.key);
+      if (els && els.length > 0) {
+        flushWordBankToDom(bank, els, force);
+      }
+    }
+
+    // B. 非 KRC 纯整行（LRC 宽羽化遮罩扫光）
+    const plainLitEl = cachedPlainLitEls.get(row.key);
+    if (plainLitEl && row.isActiveKaraoke) {
+      let sweep = 1;
+      if (
+        wordByWordEnabled.value &&
+        row.lineDurationMs > 0 &&
+        activeLineIndex.value >= 0
+      ) {
+        const rawP = clamp(
+          (calibratedPos - row.lineStartMs) / Math.max(400, row.lineDurationMs),
+          0,
+          1
+        );
+        sweep = rawP * 0.72 + rawP * rawP * (3 - 2 * rawP) * 0.28;
+        if (rawP > 0 && rawP < 1 && isPlaying.value) {
+          allSettled = false;
+        }
+      }
+      plainLitEl.style.setProperty(
+        "--dl-plain-mask-x",
+        `${sweepToMaskPositionPct(sweep)}%`
+      );
+      plainLitEl.style.setProperty(
+        "--dl-plain-lit",
+        isMaskSweepMotionStyle.value ? "1" : sweep.toFixed(3)
+      );
+      const plainStack = plainLitEl.parentElement;
+      if (plainStack) {
+        const plainFade =
+          !isMaskSweepMotionStyle.value
+            ? sweep * 0.94
+            : sweep >= 0.99
+            ? 0.94
+            : 0;
+        plainStack.style.setProperty("--kw-base-fade", plainFade.toFixed(3));
+      }
+    }
+
+    // C. 超长句随唱横向平滑推镜
+    if (row.overflowPx > 1) {
+      const panSettled = updateRowHorizontalPan(row, calibratedPos, dtSec, snap);
+      if (!panSettled) allSettled = false;
+    }
   }
 
-  const brightSung = isBrightHex(start);
-  const back = makeBackLayer(brightSung);
-
-  // 关闭逐字染色时整行纯净高亮
-  if (
-    !wordByWordEnabled.value ||
-    !row.lineDurationMs ||
-    row.lineDurationMs <= 0 ||
-    activeLineIndex.value < 0
-  ) {
-    const filters: string[] = [];
-    if (!back && shadowEnabled.value) {
-      filters.push(buildSoftShadowFilter(brightSung));
+  // D. 360ms 退场余韵平滑消融
+  if (leavingActive) {
+    const leaveSettled = leavingWordBank.stepLeaving(
+      dtSec,
+      effectiveMotionLevel.value
+    );
+    if (cachedLeavingWordEls.length > 0) {
+      flushWordBankToDom(leavingWordBank, cachedLeavingWordEls, force);
     }
-    if (glowRatio > 0.05) {
-      const glowR = Math.round(9 * glowRatio);
-      filters.push(
-        `drop-shadow(0 0 ${glowR}px ${hexToRgba(start, 0.34 * glowRatio)})`
+    if (leaveSettled) {
+      leavingActive = false;
+      leavingLineIndex.value = -1;
+    } else {
+      allSettled = false;
+    }
+  }
+
+  // E. 液态光珠间奏倒计时
+  const interlude = computeInterludeState(
+    lyricLines.value,
+    activeLineIndex.value,
+    calibratedPos
+  );
+  updateLiquidInterludeBeads(interlude, dtSec);
+  if (interlude.visible && isPlaying.value) {
+    allSettled = false;
+  }
+
+  // F. 悬停进度条仅在卡片可见时直写 GPU scaleX
+  if (progressFillRef.value && glassVisible.value) {
+    const frac =
+      songDurationMs.value > 0
+        ? clamp(clockPosMs / songDurationMs.value, 0, 1)
+        : 0;
+    progressFillRef.value.style.transform = `scaleX(${frac.toFixed(5)})`;
+  }
+
+  forceDomFlushNextFrame = false;
+  return allSettled;
+}
+
+function advanceClockAndLine(nowPerf: number, snap = false): number {
+  if (isPlaying.value) {
+    const rawElapsed = Math.max(0, nowPerf - syncAnchorPerfMs);
+    const elapsed =
+      Math.min(rawElapsed, 2500) * Math.max(0.25, playbackRate.value || 1);
+    const nextRaw = syncAnchorPosMs + elapsed;
+    clockPosMs =
+      songDurationMs.value > 0
+        ? Math.min(songDurationMs.value, nextRaw)
+        : nextRaw;
+  }
+
+  const calibrated = computeCalibratedPosMs(clockPosMs);
+  const nextIdx = findLineIndexAtPos(lyricLines.value, calibrated);
+  if (nextIdx !== activeLineIndex.value) {
+    const prevIdx = activeLineIndex.value;
+    if (
+      !snap &&
+      prevIdx >= 0 &&
+      Math.abs(nextIdx - prevIdx) === 1 &&
+      layoutMode.value === "ktv"
+    ) {
+      const prevBank = activeWordBanks.get(`ktv-line-${prevIdx}`);
+      if (prevBank && prevBank.count > 0) {
+        leavingWordBank.copyFrom(prevBank);
+        leavingLineIndex.value = prevIdx;
+        leavingActive = true;
+      }
+    } else {
+      leavingActive = false;
+      leavingLineIndex.value = -1;
+    }
+    activeLineIndex.value = nextIdx;
+    nextTick(() => {
+      refreshRowDomCaches();
+      stepRealtimeLyricVisuals(computeCalibratedPosMs(clockPosMs), 0.016, snap);
+    });
+  }
+  return calibrated;
+}
+
+function startRenderLoop() {
+  if (
+    rafId !== null ||
+    !isWindowVisible.value ||
+    (typeof document !== "undefined" && document.hidden)
+  ) {
+    return;
+  }
+  lastRafPerfMs = typeof performance !== "undefined" ? performance.now() : 0;
+  const tick = (nowPerf: number) => {
+    if (
+      !isWindowVisible.value ||
+      (typeof document !== "undefined" && document.hidden)
+    ) {
+      rafId = null;
+      return;
+    }
+    const dtSec = clamp((nowPerf - lastRafPerfMs) / 1000, 0.004, 0.05);
+    lastRafPerfMs = nowPerf;
+
+    const calibrated = advanceClockAndLine(nowPerf, false);
+    const settled = stepRealtimeLyricVisuals(calibrated, dtSec, false);
+    physicsSettled = settled;
+
+    // 暂停态且物理弹簧与余韵全部收敛后自动停帧休眠（0% 空转）
+    if (!isPlaying.value && settled) {
+      rafId = null;
+      return;
+    }
+    rafId = requestAnimationFrame(tick);
+  };
+  rafId = requestAnimationFrame(tick);
+}
+
+function stopRenderLoop() {
+  if (rafId !== null) {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+}
+
+function requestImmediateVisualSync(snap = false) {
+  forceDomFlushNextFrame = true;
+  physicsSettled = false;
+  nextTick(() => {
+    refreshRowDomCaches();
+    const calibrated = advanceClockAndLine(
+      typeof performance !== "undefined" ? performance.now() : 0,
+      snap
+    );
+    const settled = stepRealtimeLyricVisuals(calibrated, 0.016, snap);
+    physicsSettled = settled;
+    if (isPlaying.value || !settled) {
+      startRenderLoop();
+    }
+  });
+}
+
+function handleDesktopLyricVisibilityChange() {
+  if (typeof document === "undefined") return;
+  if (document.hidden) {
+    stopRenderLoop();
+  } else if (isWindowVisible.value) {
+    requestImmediateVisualSync(true);
+  }
+}
+
+function applySyncedPosition(
+  posMs: number,
+  playing: boolean,
+  sentAtMs?: number,
+  rate?: number
+) {
+  if (
+    rate !== undefined &&
+    Number.isFinite(Number(rate)) &&
+    Number(rate) > 0
+  ) {
+    playbackRate.value = Number(rate);
+  }
+  let safePos = Math.max(0, Number(posMs) || 0);
+  if (playing && sentAtMs && Number.isFinite(sentAtMs)) {
+    const transitMs = clamp(Date.now() - Number(sentAtMs), 0, 180);
+    safePos += transitMs * Math.max(0.25, playbackRate.value || 1);
+  }
+  const delta = safePos - clockPosMs;
+  const jumped = !playing || Math.abs(delta) > 320 || safePos === 0;
+  if (jumped) {
+    clockPosMs = safePos;
+    syncAnchorPosMs = safePos;
+  } else {
+    const smoothAnchor =
+      delta >= -32 && delta <= 0 ? clockPosMs : safePos;
+    syncAnchorPosMs = smoothAnchor;
+    if (delta > 0) clockPosMs = smoothAnchor;
+  }
+  syncAnchorPerfMs = performance.now();
+  isPlaying.value = playing;
+
+  if (
+    isWindowVisible.value &&
+    (typeof document === "undefined" || !document.hidden)
+  ) {
+    if (jumped) {
+      requestImmediateVisualSync(true);
+    } else if (playing || !physicsSettled) {
+      startRenderLoop();
+    } else {
+      stepRealtimeLyricVisuals(computeCalibratedPosMs(clockPosMs), 0.016, true);
+    }
+  } else {
+    stopRenderLoop();
+  }
+}
+
+// ==================== 歌词数据结构标准化与跨窗口快照恢复 ====================
+function normalizeLyricLines(rawLines: any[]): LyricLineItem[] {
+  if (!Array.isArray(rawLines) || rawLines.length === 0) return [];
+  const normalized: LyricLineItem[] = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    const item = rawLines[i];
+    if (!item || typeof item !== "object") continue;
+    const startTimeMs = Math.max(
+      0,
+      Number(item.startTimeMs ?? item.timeMs ?? item.startMs ?? 0) || 0
+    );
+    const nextItem = rawLines[i + 1];
+    const nextStartMs = nextItem
+      ? Math.max(
+          0,
+          Number(
+            nextItem.startTimeMs ?? nextItem.timeMs ?? nextItem.startMs ?? 0
+          ) || 0
+        )
+      : 0;
+    const rawDur = Number(item.durationMs) || 0;
+    const durationMs =
+      rawDur > 0
+        ? rawDur
+        : nextStartMs > startTimeMs
+        ? Math.min(12000, nextStartMs - startTimeMs)
+        : 3200;
+    const words: LyricWordItem[] = Array.isArray(item.words)
+      ? item.words
+          .filter((w: any) => w && typeof w === "object")
+          .map((w: any) => ({
+            text: String(w.text ?? ""),
+            startTimeMs: Math.max(
+              0,
+              Number(w.startTimeMs ?? w.startMs ?? w.timeMs ?? 0) || 0
+            ),
+            durationMs: Math.max(40, Number(w.durationMs) || 120),
+          }))
+      : [];
+    normalized.push({
+      startTimeMs,
+      durationMs,
+      text: String(item.text ?? ""),
+      translation: item.translation ? String(item.translation) : undefined,
+      phonetic: item.phonetic ? String(item.phonetic) : undefined,
+      words,
+    });
+  }
+  return normalized;
+}
+
+function applyIncomingSyncPayload(
+  msg: any,
+  options?: { fromStorage?: boolean }
+) {
+  if (!msg || typeof msg !== "object") return;
+  const fromStorage = Boolean(options?.fromStorage);
+
+  if (msg.type === "POSITION_SYNC") {
+    const incomingHash = msg.songHash ? String(msg.songHash) : "";
+    const activeHash = currentSong.value?.hash
+      ? String(currentSong.value.hash)
+      : "";
+    if (incomingHash && activeHash && incomingHash !== activeHash) {
+      const nowMs = performance.now();
+      if (!fromStorage && nowMs - lastHandshakeTriggerAt > 420) {
+        lastHandshakeTriggerAt = nowMs;
+        sendCmd("CMD_REQUEST_SYNC");
+      }
+      return;
+    }
+    if (msg.lyricOffsetMs !== undefined)
+      lyricOffsetMs.value = Number(msg.lyricOffsetMs || 0);
+    if (msg.bluetoothDelayMs !== undefined)
+      bluetoothDelayMs.value = Number(msg.bluetoothDelayMs || 0);
+    if (msg.durationMs !== undefined && Number(msg.durationMs) > 0) {
+      songDurationMs.value = Number(msg.durationMs);
+    }
+    applySyncedPosition(
+      Number(msg.positionMs || 0),
+      Boolean(msg.isPlaying),
+      msg.sentAtMs,
+      msg.playbackRate
+    );
+    return;
+  }
+
+  if (msg.type !== "STATE_SYNC") return;
+
+  const incomingSeq = Number(msg.stateSeq) || 0;
+  const incomingSentAt = Number(msg.sentAtMs) || 0;
+  if (
+    fromStorage &&
+    hasReceivedLiveState &&
+    incomingSentAt < lastAppliedStateSentAtMs
+  ) {
+    return;
+  }
+  if (
+    !fromStorage &&
+    incomingSeq > 0 &&
+    lastAppliedStateSeq > 0 &&
+    incomingSeq < lastAppliedStateSeq
+  ) {
+    return;
+  }
+  if (!fromStorage) {
+    hasReceivedLiveState = true;
+  }
+  if (incomingSeq > lastAppliedStateSeq) {
+    lastAppliedStateSeq = incomingSeq;
+  }
+  if (incomingSentAt > lastAppliedStateSentAtMs) {
+    lastAppliedStateSentAtMs = incomingSentAt;
+  }
+
+  if (msg.enabled !== undefined) {
+    isWindowVisible.value = Boolean(msg.enabled);
+  }
+
+  const recentlyMutatedLocally =
+    performance.now() - lastLocalControlMutateAt < 380;
+
+  if (msg.locked !== undefined && !recentlyMutatedLocally) {
+    const nextLocked = Boolean(msg.locked);
+    if (nextLocked && !isLocked.value) {
+      isSettingsOpen.value = false;
+      isHovering.value = false;
+    }
+    isLocked.value = nextLocked;
+  }
+
+  if (msg.dynamicPrimary) dynamicPrimaryHex.value = String(msg.dynamicPrimary);
+  if (msg.dynamicSecondary)
+    dynamicSecondaryHex.value = String(msg.dynamicSecondary);
+  if (msg.dynamicCoverAccentEnabled !== undefined) {
+    dynamicCoverAccentEnabled.value = Boolean(msg.dynamicCoverAccentEnabled);
+  }
+  if (msg.durationMs !== undefined && Number(msg.durationMs) > 0) {
+    songDurationMs.value = Number(msg.durationMs);
+  }
+  if (
+    msg.motionLevel === "best" ||
+    msg.motionLevel === "standard" ||
+    msg.motionLevel === "none"
+  ) {
+    globalMotionLevel.value = msg.motionLevel;
+  }
+
+  if (!recentlyMutatedLocally) {
+    if (msg.colorSchemeId) {
+      const normalized = normalizeLyricThemeId(String(msg.colorSchemeId));
+      colorSchemeId.value = normalized;
+      localStorage.setItem("bm_desktop_lyric_scheme", normalized);
+    }
+    if (msg.sungMode === "gradient" || msg.sungMode === "solid") {
+      sungMode.value = msg.sungMode;
+      localStorage.setItem("bm_dl_sung_mode_v2", msg.sungMode);
+    }
+    if (msg.customPrimary) {
+      customPrimaryHex.value = String(msg.customPrimary);
+      localStorage.setItem("bm_dl_custom_primary_v2", customPrimaryHex.value);
+    }
+    if (msg.customSecondary) {
+      customSecondaryHex.value = String(msg.customSecondary);
+      localStorage.setItem(
+        "bm_dl_custom_secondary_v2",
+        customSecondaryHex.value
       );
     }
-    return {
-      wrapStyle: { opacity: "1" },
-      strokeStyle: back,
-      fillStyle: {
-        backgroundImage: `linear-gradient(90deg, ${start} 0%, ${end} 100%)`,
-        WebkitTextStroke: activeTypography.value.opticalStrokeCss,
-        filter: filters.length ? filters.join(" ") : "none",
-      },
+    if (msg.unsungPreset) {
+      unsungPreset.value = normalizeUnsungPresetId(String(msg.unsungPreset));
+      localStorage.setItem("bm_dl_unsung_preset_v2", unsungPreset.value);
+    }
+    if (msg.unsungCustomHex) {
+      unsungCustomHex.value = String(msg.unsungCustomHex);
+      localStorage.setItem("bm_dl_unsung_custom_v2", unsungCustomHex.value);
+    }
+    if (msg.unsungOpacity !== undefined) {
+      unsungOpacity.value = Number(
+        clamp(Number(msg.unsungOpacity), 0.35, 0.98).toFixed(2)
+      );
+      localStorage.setItem(
+        "bm_dl_unsung_opacity_v2",
+        String(unsungOpacity.value)
+      );
+    }
+    if (
+      msg.strokeWidth === "none" ||
+      msg.strokeWidth === "thin" ||
+      msg.strokeWidth === "medium" ||
+      msg.strokeWidth === "bold"
+    ) {
+      strokeWidth.value = msg.strokeWidth;
+      localStorage.setItem("bm_dl_stroke_width_v2", msg.strokeWidth);
+    }
+    if (
+      msg.strokeColorMode === "auto" ||
+      msg.strokeColorMode === "black" ||
+      msg.strokeColorMode === "white" ||
+      msg.strokeColorMode === "custom"
+    ) {
+      strokeColorMode.value = msg.strokeColorMode;
+      localStorage.setItem("bm_dl_stroke_color_mode_v2", msg.strokeColorMode);
+    }
+    if (msg.strokeCustomHex) {
+      strokeCustomHex.value = String(msg.strokeCustomHex);
+      localStorage.setItem("bm_dl_stroke_custom_v2", strokeCustomHex.value);
+    }
+    if (msg.shadowEnabled !== undefined) {
+      shadowEnabled.value = Boolean(msg.shadowEnabled);
+      localStorage.setItem(
+        "bm_dl_shadow_enabled_v2",
+        String(shadowEnabled.value)
+      );
+    }
+    if (msg.motionStyle) {
+      motionStyle.value = normalizeLyricMotionStyle(String(msg.motionStyle));
+      localStorage.setItem("bm_dl_motion_style_v1", motionStyle.value);
+    }
+    if (msg.wordBounceEnabled !== undefined) {
+      wordBounceEnabled.value = Boolean(msg.wordBounceEnabled);
+      localStorage.setItem(
+        "bm_dl_word_bounce_v1",
+        String(wordBounceEnabled.value)
+      );
+    }
+    if (msg.harmonyStyleEnabled !== undefined) {
+      harmonyStyleEnabled.value = Boolean(msg.harmonyStyleEnabled);
+      localStorage.setItem(
+        "bm_dl_harmony_style_v1",
+        String(harmonyStyleEnabled.value)
+      );
+    }
+    if (msg.hoverDodge !== undefined) {
+      hoverDodgeEnabled.value = Boolean(msg.hoverDodge);
+      localStorage.setItem(
+        "bm_dl_hover_dodge_v1",
+        String(hoverDodgeEnabled.value)
+      );
+    }
+    if (msg.fontSize !== undefined) {
+      const incomingFs = clamp(Number(msg.fontSize), 18, 56);
+      if (lastSyncedFontSize === null || incomingFs !== lastSyncedFontSize) {
+        lastSyncedFontSize = incomingFs;
+        fontSize.value = incomingFs;
+      }
+    }
+    if (
+      msg.width !== undefined &&
+      !isResizingEdge.value &&
+      !isAdjustingWidth.value
+    ) {
+      const incomingW = clamp(Number(msg.width), MIN_WIDTH_PX, MAX_WIDTH_PX);
+      if (lastSyncedWidth === null || incomingW !== lastSyncedWidth) {
+        lastSyncedWidth = incomingW;
+        widthPx.value = incomingW;
+        syncOsWindowWithState();
+      }
+    }
+    if (msg.showTranslation !== undefined) {
+      const incomingTrans = Boolean(msg.showTranslation);
+      if (lastSyncedTrans === null || incomingTrans !== lastSyncedTrans) {
+        lastSyncedTrans = incomingTrans;
+        showTranslation.value = incomingTrans;
+      }
+    }
+    if (
+      msg.layoutMode === "center" ||
+      msg.layoutMode === "ktv" ||
+      msg.layoutMode === "single" ||
+      msg.layoutMode === "left"
+    ) {
+      layoutMode.value = msg.layoutMode;
+      if (msg.layoutMode !== "single") lastDoubleLayout.value = msg.layoutMode;
+    } else if (msg.lineMode === "single") {
+      layoutMode.value = "single";
+    }
+    if (msg.opacity !== undefined) {
+      lyricOpacity.value = clamp(Number(msg.opacity), 0.35, 1.0);
+    }
+    if (msg.lineSpacing !== undefined) {
+      lineSpacing.value = clamp(Math.round(Number(msg.lineSpacing)), 0, 16);
+    }
+    if (msg.glowIntensity !== undefined) {
+      glowIntensity.value = clamp(Math.round(Number(msg.glowIntensity)), 0, 150);
+    }
+    if (msg.idleFade !== undefined) {
+      idleFade.value = Boolean(msg.idleFade);
+    }
+    if (msg.showIntro !== undefined) {
+      showIntro.value = Boolean(msg.showIntro);
+    }
+    if (msg.showPhonetic !== undefined) {
+      showPhonetic.value = Boolean(msg.showPhonetic);
+    }
+    if (msg.wordByWord !== undefined) {
+      wordByWordEnabled.value = Boolean(msg.wordByWord);
+    }
+    if (
+      msg.fontFamily === "sans" ||
+      msg.fontFamily === "serif" ||
+      msg.fontFamily === "rounded" ||
+      msg.fontFamily === "editorial"
+    ) {
+      fontFamily.value = msg.fontFamily;
+    }
+    if (msg.fontWeight !== undefined) {
+      const fw = Number(msg.fontWeight);
+      if (fw === 500 || fw === 650 || fw === 760 || fw === 880) {
+        fontWeight.value = fw;
+      }
+    }
+    if (msg.customFontFamilyStack !== undefined) {
+      customFontFamilyStack.value = String(msg.customFontFamilyStack || "");
+    }
+    if (msg.customFontId !== undefined) {
+      const nextId = String(msg.customFontId || "");
+      customFontId.value = nextId;
+      if (nextId) {
+        ensureCustomFontLoaded(nextId).catch(() => {});
+      }
+    }
+    if (msg.customFontWeight !== undefined) {
+      const cw = Number(msg.customFontWeight);
+      customFontWeightOverride.value =
+        msg.customFontWeight !== null && Number.isFinite(cw) && cw >= 100
+          ? cw
+          : null;
+    }
+  }
+
+  if (msg.lyricOffsetMs !== undefined)
+    lyricOffsetMs.value = Number(msg.lyricOffsetMs || 0);
+  if (msg.bluetoothDelayMs !== undefined)
+    bluetoothDelayMs.value = Number(msg.bluetoothDelayMs || 0);
+  if (msg.playMode) playMode.value = String(msg.playMode);
+  const incomingSchemeMode = msg.colorScheme || msg.globalColorScheme;
+  if (incomingSchemeMode) {
+    themeColorScheme.value = String(incomingSchemeMode);
+  }
+  if (msg.lightThemeVariant)
+    lightThemeVariant.value = String(msg.lightThemeVariant);
+  if (msg.darkThemeVariant)
+    darkThemeVariant.value = String(msg.darkThemeVariant);
+
+  const prevSongHash = currentSong.value?.hash || "";
+  if (msg.song && typeof msg.song === "object") {
+    currentSong.value = {
+      hash: String(msg.song.hash || ""),
+      title: String(msg.song.title || ""),
+      artist: String(msg.song.artist || ""),
+      coverUrl: String(msg.song.coverUrl || ""),
     };
+  } else if (msg.song === null) {
+    currentSong.value = null;
+  }
+  const songChanged = (currentSong.value?.hash || "") !== prevSongHash;
+
+  if (
+    songChanged &&
+    currentSong.value?.title &&
+    showIntro.value &&
+    !fromStorage
+  ) {
+    introVisible.value = true;
+    if (introHideTimer) clearTimeout(introHideTimer);
+    introHideTimer = setTimeout(() => {
+      introVisible.value = false;
+      introHideTimer = null;
+    }, 2200);
   }
 
-  const pos = calibratedPosMs.value;
-  const rawP = clamp(
-    (pos - row.lineStartMs) / Math.max(400, row.lineDurationMs),
-    0,
-    1
+  if (
+    msg.lyric &&
+    typeof msg.lyric === "object" &&
+    Array.isArray(msg.lyric.lines)
+  ) {
+    const normalized = normalizeLyricLines(msg.lyric.lines);
+    lyricLines.value = normalized;
+    isKrc.value =
+      Boolean(msg.lyric.isKrc) ||
+      normalized.some((l) => (l.words?.length || 0) > 0);
+  } else if (msg.lyric === null || songChanged) {
+    isKrc.value = false;
+    lyricLines.value = [];
+  }
+
+  if (songChanged) {
+    clockPosMs = Math.max(0, Number(msg.positionMs || 0));
+    activeLineIndex.value = -1;
+    leavingLineIndex.value = -1;
+    leavingActive = false;
+    activeWordBanks.clear();
+    rowPanCurrentX.clear();
+  }
+  applySyncedPosition(
+    Number(msg.positionMs || 0),
+    Boolean(msg.isPlaying),
+    msg.sentAtMs,
+    msg.playbackRate
   );
-  const smoothP = smootherstep(rawP);
-  const feather = 10;
-  const center = -feather + smoothP * (100 + feather * 2);
-  const leftPct = clamp(center - feather, 0, 100);
-  const rightPct = clamp(center + feather, 0, 100);
-  const filters: string[] = [];
-  if (!back && shadowEnabled.value) {
-    filters.push(buildSoftShadowFilter(brightSung));
-  }
-  if (glowRatio > 0.05) {
-    const glowR = Math.round(10 * glowRatio);
-    filters.push(
-      `drop-shadow(0 0 ${glowR}px ${hexToRgba(start, 0.3 * glowRatio)})`
-    );
-  }
-  const unsungHalf = hexToRgba(unsungSolid, clamp(unsungOpacity.value, 0.45, 1));
-
-  return {
-    wrapStyle: { opacity: "1" },
-    strokeStyle: back,
-    fillStyle: {
-      backgroundImage: `linear-gradient(90deg, ${start} 0%, ${end} ${leftPct.toFixed(
-        2
-      )}%, ${unsungHalf} ${rightPct.toFixed(2)}%, ${unsungHalf} 100%)`,
-      WebkitTextStroke: activeTypography.value.opticalStrokeCss,
-      filter: filters.length ? filters.join(" ") : "none",
-    },
-  };
+  requestImmediateVisualSync(songChanged);
 }
 
-// ==================== Tauri 原生窗口尺寸（支持中心锚定平滑缩放）与拖拽管理 ====================
+function hydrateFromStorageSnapshots() {
+  let stateSnapSentAt = 0;
+  let stateSnapSongHash = "";
+  try {
+    const rawState = localStorage.getItem(SNAPSHOT_STORAGE_KEY);
+    if (rawState) {
+      const parsedState = JSON.parse(rawState);
+      if (parsedState && typeof parsedState === "object") {
+        stateSnapSentAt = Number(parsedState.sentAtMs || 0);
+        stateSnapSongHash = String(parsedState.song?.hash || "");
+        applyIncomingSyncPayload(parsedState, { fromStorage: true });
+      }
+    }
+  } catch {
+    // ignore corrupted snapshot
+  }
+  try {
+    const rawPos = localStorage.getItem(POS_STORAGE_KEY);
+    if (rawPos) {
+      const parsedPos = JSON.parse(rawPos);
+      if (parsedPos && typeof parsedPos === "object") {
+        const posSentAt = Number(parsedPos.sentAtMs || 0);
+        const posHash = String(parsedPos.songHash || "");
+        const expectedHash = currentSong.value?.hash || stateSnapSongHash;
+        const hashMatches = !posHash || !expectedHash || posHash === expectedHash;
+        const newerThanState =
+          posSentAt >= Math.max(stateSnapSentAt, lastAppliedStateSentAtMs);
+        if (hashMatches && newerThanState) {
+          applyIncomingSyncPayload(parsedPos, { fromStorage: true });
+        }
+      }
+    }
+  } catch {
+    // ignore corrupted pos
+  }
+}
+
+hydrateFromStorageSnapshots();
+
+if (
+  isBrowserDevPreviewEnv() &&
+  !currentSong.value &&
+  lyricLines.value.length === 0
+) {
+  const showcase = createBrowserDevShowcase();
+  const demoSong = showcase.songs[0];
+  if (demoSong) {
+    isWindowVisible.value = true;
+    applyIncomingSyncPayload(
+      {
+        type: "STATE_SYNC",
+        enabled: true,
+        song: demoSong,
+        lyric: showcase.lyric,
+        positionMs: 11200,
+        durationMs: demoSong.durationMs || 218000,
+        isPlaying: false,
+        playbackRate: 1,
+        sentAtMs: Date.now(),
+      },
+      { fromStorage: true }
+    );
+  }
+}
+
+// ==================== Tauri 原生窗口尺寸（中心锚定平滑缩放）与拖拽管理 ====================
 function getCurrentTargetWindowHeightPx(): number {
   const baseH = baseWindowHeightPx.value;
   if (isSettingsOpen.value && !isLocked.value) {
-    const drawerH = settingsInnerRef.value?.offsetHeight || 226;
+    const drawerH = settingsInnerRef.value?.offsetHeight || 256;
     return baseH + drawerH + 8;
   }
   return baseH;
@@ -2192,7 +2658,6 @@ async function syncOsWindowWithState(anchorCenter = false) {
   );
 }
 
-// 平滑宽幅滑块：中心锚定 + rAF 合并原生缩放 + 锁定悬停态不误关
 function handleWidthSliderDown() {
   isAdjustingWidth.value = true;
   if (hoverLeaveTimer) {
@@ -2286,11 +2751,11 @@ function handleViewportDoubleClick(e: MouseEvent) {
   if (target && target.closest("button, input, label, [data-no-drag]")) return;
   if (layoutMode.value === "single") {
     setLayoutModeVal(lastDoubleLayout.value || "center");
-    setHoverTip("已切换至双行歌词显示", "center");
+    setHoverTip("已切换至双行歌词显示", "center", 1600);
   } else {
     lastDoubleLayout.value = layoutMode.value;
     setLayoutModeVal("single");
-    setHoverTip("已切换至纯净单行模式（再次双击恢复）", "center");
+    setHoverTip("已切换至极简单行模式（再次双击恢复）", "center", 1600);
   }
 }
 
@@ -2299,7 +2764,7 @@ function handleWheelZoom(e: WheelEvent) {
   e.preventDefault();
   const step = e.deltaY < 0 ? 2 : -2;
   setFontSizeVal(fontSize.value + step);
-  setHoverTip(`桌面字号：${Math.round(fontSize.value)}px`, "center");
+  setHoverTip(`桌面字号：${Math.round(fontSize.value)}px`, "center", 1400);
 }
 
 function startEdgeResize(side: "left" | "right", e: MouseEvent) {
@@ -2369,6 +2834,13 @@ function handlePointerEnter() {
     hoverLeaveTimer = null;
   }
   isHovering.value = true;
+  if (progressFillRef.value) {
+    const frac =
+      songDurationMs.value > 0
+        ? clamp(clockPosMs / songDurationMs.value, 0, 1)
+        : 0;
+    progressFillRef.value.style.transform = `scaleX(${frac.toFixed(5)})`;
+  }
 }
 
 function handlePointerMove() {
@@ -2433,6 +2905,11 @@ function handleUnlockClick() {
   isLocked.value = false;
   lockedHoverWindow.value = false;
   lockedHoverUnlock.value = false;
+  lockedHoverDwell.value = false;
+  if (lockedDwellTimer) {
+    clearTimeout(lockedDwellTimer);
+    lockedDwellTimer = null;
+  }
   isHovering.value = true;
   localStorage.setItem("bm_desktop_lyric_locked", "false");
   hoverTip.value = "";
@@ -2440,12 +2917,32 @@ function handleUnlockClick() {
   resizeOsWindow(widthPx.value, baseWindowHeightPx.value, false);
 }
 
-function setHoverTip(text: string, align: "left" | "center" | "right") {
+function setHoverTip(
+  text: string,
+  align: "left" | "center" | "right",
+  autoClearMs = 0
+) {
+  if (hoverTipAutoClearTimer) {
+    clearTimeout(hoverTipAutoClearTimer);
+    hoverTipAutoClearTimer = null;
+  }
   hoverTip.value = text;
   hoverTipAlign.value = align;
+  if (autoClearMs > 0) {
+    hoverTipAutoClearTimer = setTimeout(() => {
+      hoverTipAutoClearTimer = null;
+      if (hoverTip.value === text) {
+        hoverTip.value = "";
+      }
+    }, autoClearMs);
+  }
 }
 
 function clearHoverTip() {
+  if (hoverTipAutoClearTimer) {
+    clearTimeout(hoverTipAutoClearTimer);
+    hoverTipAutoClearTimer = null;
+  }
   hoverTip.value = "";
 }
 
@@ -2457,6 +2954,84 @@ function toggleTranslation() {
   localStorage.setItem("bm_desktop_lyric_trans", String(next));
   sendCmd("CMD_SET_SHOW_TRANSLATION", { showTranslation: next });
   setHoverTip(next ? "双语译文：已开启" : "双语译文：已关闭", "left");
+}
+
+// 场景预设 & 动效引擎控制
+function applyScenePresetVal(
+  presetId: Exclude<DesktopLyricScenePresetId, "custom">
+) {
+  const preset = DESKTOP_LYRIC_SCENE_PRESETS.find((p) => p.id === presetId);
+  if (!preset) return;
+  lastLocalControlMutateAt = performance.now();
+  const c = preset.config;
+  motionStyle.value = c.motionStyle;
+  sungMode.value = c.sungMode;
+  strokeWidth.value = c.strokeWidth;
+  shadowEnabled.value = c.shadowEnabled;
+  fontFamily.value = c.fontFamily;
+  fontWeight.value = c.fontWeight;
+  fontSize.value = c.fontSize;
+  lastSyncedFontSize = c.fontSize;
+  glowIntensity.value = c.glowIntensity;
+  wordByWordEnabled.value = c.wordByWord;
+  wordBounceEnabled.value = c.wordBounceEnabled;
+  harmonyStyleEnabled.value = c.harmonyStyleEnabled;
+
+  localStorage.setItem("bm_dl_motion_style_v1", c.motionStyle);
+  localStorage.setItem("bm_dl_sung_mode_v2", c.sungMode);
+  localStorage.setItem("bm_dl_stroke_width_v2", c.strokeWidth);
+  localStorage.setItem("bm_dl_shadow_enabled_v2", String(c.shadowEnabled));
+  localStorage.setItem("bm_desktop_lyric_font_family", c.fontFamily);
+  localStorage.setItem("bm_desktop_lyric_font_weight", String(c.fontWeight));
+  localStorage.setItem("bm_desktop_lyric_size_v2", String(c.fontSize));
+  localStorage.setItem("bm_desktop_lyric_glow_v2", String(c.glowIntensity));
+  localStorage.setItem("bm_desktop_lyric_krc", String(c.wordByWord));
+  localStorage.setItem("bm_dl_word_bounce_v1", String(c.wordBounceEnabled));
+  localStorage.setItem("bm_dl_harmony_style_v1", String(c.harmonyStyleEnabled));
+
+  sendCmd("CMD_APPLY_SCENE_PRESET", { presetId });
+  requestImmediateVisualSync(true);
+  setHoverTip(`已应用「${preset.label}」桌面场景预设`, "center", 1600);
+}
+
+function setMotionStyleVal(style: LyricMotionStyle) {
+  lastLocalControlMutateAt = performance.now();
+  motionStyle.value = style;
+  localStorage.setItem("bm_dl_motion_style_v1", style);
+  sendCmd("CMD_SET_MOTION_STYLE", { motionStyle: style });
+  requestImmediateVisualSync(false);
+}
+
+function toggleWordBounce() {
+  lastLocalControlMutateAt = performance.now();
+  const next = !wordBounceEnabled.value;
+  wordBounceEnabled.value = next;
+  localStorage.setItem("bm_dl_word_bounce_v1", String(next));
+  sendCmd("CMD_SET_WORD_BOUNCE", { wordBounceEnabled: next });
+  requestImmediateVisualSync(false);
+}
+
+function toggleHarmonyStyle() {
+  lastLocalControlMutateAt = performance.now();
+  const next = !harmonyStyleEnabled.value;
+  harmonyStyleEnabled.value = next;
+  localStorage.setItem("bm_dl_harmony_style_v1", String(next));
+  sendCmd("CMD_SET_HARMONY_STYLE", { harmonyStyleEnabled: next });
+  requestImmediateVisualSync(true);
+}
+
+function toggleHoverDodge() {
+  lastLocalControlMutateAt = performance.now();
+  const next = !hoverDodgeEnabled.value;
+  hoverDodgeEnabled.value = next;
+  localStorage.setItem("bm_dl_hover_dodge_v1", String(next));
+  sendCmd("CMD_SET_HOVER_DODGE", { hoverDodge: next });
+}
+
+function handleSyncFromNowPlaying() {
+  lastLocalControlMutateAt = 0;
+  sendCmd("CMD_SYNC_FROM_NOW_PLAYING");
+  setHoverTip("已同步播放页配色、动效与字体风格", "center", 1600);
 }
 
 // 已唱双通道设置
@@ -2521,7 +3096,7 @@ function setUnsungOpacityVal(val: number) {
   sendCmd("CMD_SET_UNSUNG_COLOR", { unsungOpacity: clamped });
 }
 
-// 光学矢量描边与立体柔影设置
+// 轮廓与空气柔影设置
 function setStrokeWidthVal(w: DesktopLyricStrokeWidth) {
   lastLocalControlMutateAt = performance.now();
   strokeWidth.value = w;
@@ -2586,6 +3161,7 @@ function setGlowVal(val: number) {
   glowIntensity.value = clamped;
   localStorage.setItem("bm_desktop_lyric_glow_v2", String(clamped));
   sendCmd("CMD_SET_GLOW", { glowIntensity: clamped });
+  requestImmediateVisualSync(false);
 }
 
 // 排版、行距、透明度与开关
@@ -2599,6 +3175,7 @@ function setLayoutModeVal(mode: DesktopLyricLayoutMode) {
     mode === "single" ? "single" : "double"
   );
   sendCmd("CMD_SET_LAYOUT_MODE", { layoutMode: mode });
+  requestImmediateVisualSync(true);
 }
 
 function setLyricOpacityVal(val: number) {
@@ -2647,37 +3224,44 @@ function toggleWordByWord() {
   wordByWordEnabled.value = next;
   localStorage.setItem("bm_desktop_lyric_krc", String(next));
   sendCmd("CMD_SET_WORD_BY_WORD", { wordByWord: next });
+  requestImmediateVisualSync(true);
 }
 
 function adjustOffsetStep(deltaMs: number) {
   lyricOffsetMs.value = clamp(lyricOffsetMs.value + deltaMs, -15000, 15000);
   localStorage.setItem("bm_lyric_offset_ms", String(lyricOffsetMs.value));
   sendCmd("CMD_ADJUST_OFFSET", { deltaMs });
+  requestImmediateVisualSync(true);
 }
 
 function resetOffsetToZero() {
   lyricOffsetMs.value = 0;
   localStorage.setItem("bm_lyric_offset_ms", "0");
   sendCmd("CMD_RESET_OFFSET");
+  requestImmediateVisualSync(true);
 }
 
 function handleResetDefaults() {
   lastLocalControlMutateAt = performance.now();
   colorSchemeId.value = "dynamic_cover";
-  sungMode.value = "gradient";
+  sungMode.value = "solid";
   customPrimaryHex.value = "#5EEAD4";
   customSecondaryHex.value = "#60A5FA";
   unsungPreset.value = "auto";
   unsungCustomHex.value = "#E6ECF5";
   unsungOpacity.value = 0.78;
-  strokeWidth.value = "medium";
+  strokeWidth.value = "none";
   strokeColorMode.value = "auto";
   strokeCustomHex.value = "#090D16";
   shadowEnabled.value = true;
+  motionStyle.value = "apple_minimal";
+  wordBounceEnabled.value = false;
+  harmonyStyleEnabled.value = true;
+  hoverDodgeEnabled.value = true;
   fontFamily.value = "sans";
   fontWeight.value = 760;
   fontSize.value = 32;
-  glowIntensity.value = 80;
+  glowIntensity.value = 35;
   layoutMode.value = "center";
   lyricOpacity.value = 1.0;
   lineSpacing.value = 6;
@@ -2687,12 +3271,31 @@ function handleResetDefaults() {
   showPhonetic.value = false;
   wordByWordEnabled.value = true;
   sendCmd("CMD_RESET_DEFAULTS");
-  setHoverTip("已恢复桌面歌词默认样式", "right");
+  requestImmediateVisualSync(true);
+  setHoverTip("已恢复「苹果清透」默认风格", "right", 1600);
 }
 
 function focusMainWindow() {
   sendCmd("CMD_FOCUS_MAIN_WINDOW");
   invoke("focus_main_window_cmd").catch(() => {});
+}
+
+// Tablist 键盘方向键无障碍切换（符合 ARIA tabs 规范）
+const TAB_ORDER: SettingsPodTab[] = ["preset", "style", "layout"];
+function handlePodTabKeydown(e: KeyboardEvent, idx: number) {
+  let nextIdx = idx;
+  if (e.key === "ArrowRight") nextIdx = (idx + 1) % TAB_ORDER.length;
+  else if (e.key === "ArrowLeft")
+    nextIdx = (idx - 1 + TAB_ORDER.length) % TAB_ORDER.length;
+  else if (e.key === "Home") nextIdx = 0;
+  else if (e.key === "End") nextIdx = TAB_ORDER.length - 1;
+  else return;
+  e.preventDefault();
+  settingsTab.value = TAB_ORDER[nextIdx];
+  nextTick(() => {
+    const btn = document.getElementById(`dl-pod-tab-${TAB_ORDER[nextIdx]}`);
+    btn?.focus();
+  });
 }
 
 watch(baseWindowHeightPx, () => {
@@ -2706,6 +3309,20 @@ watch(settingsTab, () => {
     nextTick(() => syncOsWindowWithState(false));
   }
 });
+
+watch(
+  [
+    displayPlan,
+    motionStyle,
+    wordBounceEnabled,
+    wordByWordEnabled,
+    glowIntensity,
+    globalMotionLevel,
+  ],
+  () => {
+    requestImmediateVisualSync(false);
+  }
+);
 
 async function openSettingsPanel() {
   if (shrinkWindowTimer) {
@@ -2741,6 +3358,7 @@ async function handleCloseWindow() {
   await invoke("save_desktop_lyric_position_cmd").catch(() => {});
   closeSettingsPanel();
   isWindowVisible.value = false;
+  stopRenderLoop();
   sendCmd("CMD_CLOSE");
 }
 
@@ -2778,6 +3396,11 @@ async function requestFullHandshake() {
   }
 }
 
+function computeRowOffsetPx(verticalPct: number): string {
+  const h = lyricViewportHeightPx.value;
+  return `${Math.round((h * verticalPct) / 100)}px`;
+}
+
 // ==================== 生命周期与跨窗口通信 ====================
 onMounted(async () => {
   if (typeof document !== "undefined") {
@@ -2791,7 +3414,10 @@ onMounted(async () => {
   window.addEventListener("keydown", handleKeyDown);
   window.addEventListener("storage", handleStorageEvent);
   if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", handleDesktopLyricVisibilityChange);
+    document.addEventListener(
+      "visibilitychange",
+      handleDesktopLyricVisibilityChange
+    );
   }
 
   if (typeof ResizeObserver !== "undefined") {
@@ -2857,8 +3483,32 @@ onMounted(async () => {
       (event) => {
         const p = event.payload;
         if (!p || typeof p !== "object") return;
-        lockedHoverWindow.value = Boolean(p.hoveringWindow);
-        lockedHoverUnlock.value = Boolean(p.hoveringUnlock);
+        const inWin = Boolean(p.hoveringWindow);
+        const inUnlock = Boolean(p.hoveringUnlock);
+        lockedHoverWindow.value = inWin;
+        lockedHoverUnlock.value = inUnlock;
+
+        if (!inWin) {
+          lockedHoverDwell.value = false;
+          if (lockedDwellTimer) {
+            clearTimeout(lockedDwellTimer);
+            lockedDwellTimer = null;
+          }
+        } else if (inUnlock) {
+          lockedHoverDwell.value = true;
+          if (lockedDwellTimer) {
+            clearTimeout(lockedDwellTimer);
+            lockedDwellTimer = null;
+          }
+        } else if (!lockedHoverDwell.value && !lockedDwellTimer) {
+          // 鼠标日常划过不猛闪解锁药丸，停留 >=260ms 或移至顶部热区才轻柔浮现
+          lockedDwellTimer = setTimeout(() => {
+            lockedDwellTimer = null;
+            if (isLocked.value && lockedHoverWindow.value) {
+              lockedHoverDwell.value = true;
+            }
+          }, 260);
+        }
       }
     ),
     listen<{ locked?: boolean }>("bm-desktop-lyric-lock-sync", (event) => {
@@ -2872,6 +3522,11 @@ onMounted(async () => {
       } else {
         lockedHoverWindow.value = false;
         lockedHoverUnlock.value = false;
+        lockedHoverDwell.value = false;
+        if (lockedDwellTimer) {
+          clearTimeout(lockedDwellTimer);
+          lockedDwellTimer = null;
+        }
       }
     }),
     listen<{ visible?: boolean; locked?: boolean }>(
@@ -2891,16 +3546,15 @@ onMounted(async () => {
           } else {
             lockedHoverWindow.value = false;
             lockedHoverUnlock.value = false;
+            lockedHoverDwell.value = false;
           }
         }
         if (p.visible) {
           syncOsWindowWithState(false);
           requestFullHandshake();
-          if (isPlaying.value) {
-            startClockLoop();
-          }
+          requestImmediateVisualSync(true);
         } else if (p.visible === false) {
-          stopClockLoop();
+          stopRenderLoop();
         }
       }
     ),
@@ -2915,6 +3569,7 @@ onMounted(async () => {
   if (listenersReady[3]?.status === "fulfilled")
     unlistenVisibility = listenersReady[3].value;
 
+  requestImmediateVisualSync(true);
   await requestFullHandshake();
   handshakeTimers.push(
     setTimeout(() => {
@@ -2934,15 +3589,17 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
-  stopClockLoop();
+  stopRenderLoop();
   if (typoSyncChannel) {
     typoSyncChannel.close();
     typoSyncChannel = null;
   }
   if (hoverLeaveTimer) clearTimeout(hoverLeaveTimer);
+  if (hoverTipAutoClearTimer) clearTimeout(hoverTipAutoClearTimer);
   if (shrinkWindowTimer) clearTimeout(shrinkWindowTimer);
   if (widthCmdDebounceTimer) clearTimeout(widthCmdDebounceTimer);
   if (introHideTimer) clearTimeout(introHideTimer);
+  if (lockedDwellTimer) clearTimeout(lockedDwellTimer);
   for (const t of handshakeTimers) clearTimeout(t);
   handshakeTimers = [];
   if (viewportResizeObserver) {
@@ -2973,7 +3630,10 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleKeyDown);
   window.removeEventListener("storage", handleStorageEvent);
   if (typeof document !== "undefined") {
-    document.removeEventListener("visibilitychange", handleDesktopLyricVisibilityChange);
+    document.removeEventListener(
+      "visibilitychange",
+      handleDesktopLyricVisibilityChange
+    );
   }
   if (channel) {
     channel.close();
@@ -3012,6 +3672,20 @@ onBeforeUnmount(() => {
         activeSungPalette.primary,
         isLightShell ? 0.2 : 0.36
       ),
+      '--dl-unsung-color': activeUnsungHex,
+      '--dl-unsung-opacity': unsungOpacity.toFixed(2),
+      '--dl-sung-air-shadow': sungStrokeSpec.airTextShadow,
+      '--dl-unsung-air-shadow': unsungStrokeSpec.airTextShadow,
+      '--dl-sub-air-shadow': subStrokeSpec.airTextShadow,
+      '--dl-sung-stroke-shadow': sungStrokeSpec.textShadow,
+      '--dl-unsung-stroke-shadow': unsungStrokeSpec.textShadow,
+      '--dl-sub-stroke-shadow': subStrokeSpec.textShadow,
+      '--dl-kw-glow-r1': glowTokens.r1,
+      '--dl-kw-glow-r2': glowTokens.r2,
+      '--dl-kw-glow-c1': glowTokens.c1,
+      '--dl-kw-glow-c2': glowTokens.c2,
+      '--dl-heavy-sung-stroke': activeTypography.opticalStrokeCss,
+      '--dl-heavy-unsung-stroke': activeUnsungTypography.opticalStrokeCss,
       '--dl-ui-primary': shellUiTheme.primary,
       '--dl-ui-primary-text': shellUiTheme.primaryText,
       '--dl-ui-secondary': shellUiTheme.secondary,
@@ -3027,6 +3701,7 @@ onBeforeUnmount(() => {
       '--dl-ui-hover-blur': shellUiTheme.hoverBlur,
       '--dl-ui-hover-shadow': shellUiTheme.hoverShadow,
       '--dl-ui-card': shellUiTheme.cardBg,
+      '--dl-ui-tile': shellUiTheme.tileBg,
       '--dl-ui-chip': shellUiTheme.chipBg,
       '--dl-ui-chip-hover': shellUiTheme.chipHover,
       '--dl-ui-divider': shellUiTheme.divider,
@@ -3037,23 +3712,127 @@ onBeforeUnmount(() => {
       '--dl-resizer-color': shellUiTheme.resizerColor,
       '--dl-lyric-opacity': lyricOpacity.toFixed(2),
       '--dl-font-size': `${fontSize}px`,
-      '--dl-sub-font-size': `${Math.max(14, Math.round(fontSize * 0.62))}px`,
+      '--dl-sub-font-size': `${Math.max(14, Math.round(fontSize * 0.64))}px`,
+      '--dl-ktv-peer-size': `${Math.max(16, Math.round(fontSize * 0.9))}px`,
       '--dl-font-weight': String(activeTypography.fontWeight),
       '--dl-font-family': activeTypography.fontFamily,
       '--dl-viewport-h': `${lyricViewportHeightPx}px`,
       '--dl-target-w': `${widthPx}px`,
     }"
-    @pointerenter="handlePointerEnter"
-    @pointermove="handlePointerMove"
-    @pointerleave="handlePointerLeave"
-    @mouseenter="handlePointerEnter"
-    @mousemove="handlePointerMove"
-    @mouseleave="handlePointerLeave"
-    @mousedown="handleStartDrag"
-    @wheel="handleWheelZoom"
   >
-    <!-- 主无框悬停卡片：常态 100% 纯透明无阴影浮空文字，悬停丝滑浮现四主题毛玻璃框 -->
-    <div class="dl-glass-card">
+    <!-- SVG 圆角抗锯齿外扩轮廓滤镜（彻底消灭 Chromium HTML text-stroke 汉字折角尖刺与吃字） -->
+    <svg
+      v-if="hasSvgOutline"
+      class="dl-svg-defs"
+      width="0"
+      height="0"
+      aria-hidden="true"
+    >
+      <defs>
+        <filter
+          id="dl-outline-sung"
+          x="-20%"
+          y="-28%"
+          width="140%"
+          height="156%"
+          color-interpolation-filters="sRGB"
+        >
+          <feMorphology
+            in="SourceAlpha"
+            operator="dilate"
+            :radius="sungStrokeSpec.svgDilateRadius"
+            result="dilated"
+          />
+          <feGaussianBlur
+            in="dilated"
+            :stdDeviation="sungStrokeSpec.svgBlurStdDev"
+            result="rounded"
+          />
+          <feComponentTransfer in="rounded" result="cleanEdge">
+            <feFuncA type="linear" slope="2.2" intercept="-0.28" />
+          </feComponentTransfer>
+          <feFlood
+            :flood-color="sungStrokeSpec.strokeSolidHex"
+            :flood-opacity="sungStrokeSpec.strokeAlpha"
+            result="flood"
+          />
+          <feComposite in="flood" in2="cleanEdge" operator="in" />
+        </filter>
+
+        <filter
+          id="dl-outline-unsung"
+          x="-20%"
+          y="-28%"
+          width="140%"
+          height="156%"
+          color-interpolation-filters="sRGB"
+        >
+          <feMorphology
+            in="SourceAlpha"
+            operator="dilate"
+            :radius="unsungStrokeSpec.svgDilateRadius"
+            result="dilated"
+          />
+          <feGaussianBlur
+            in="dilated"
+            :stdDeviation="unsungStrokeSpec.svgBlurStdDev"
+            result="rounded"
+          />
+          <feComponentTransfer in="rounded" result="cleanEdge">
+            <feFuncA type="linear" slope="2.2" intercept="-0.28" />
+          </feComponentTransfer>
+          <feFlood
+            :flood-color="unsungStrokeSpec.strokeSolidHex"
+            :flood-opacity="unsungStrokeSpec.strokeAlpha"
+            result="flood"
+          />
+          <feComposite in="flood" in2="cleanEdge" operator="in" />
+        </filter>
+
+        <filter
+          id="dl-outline-sub"
+          x="-20%"
+          y="-28%"
+          width="140%"
+          height="156%"
+          color-interpolation-filters="sRGB"
+        >
+          <feMorphology
+            in="SourceAlpha"
+            operator="dilate"
+            :radius="subStrokeSpec.svgDilateRadius"
+            result="dilated"
+          />
+          <feGaussianBlur
+            in="dilated"
+            :stdDeviation="subStrokeSpec.svgBlurStdDev"
+            result="rounded"
+          />
+          <feComponentTransfer in="rounded" result="cleanEdge">
+            <feFuncA type="linear" slope="2.2" intercept="-0.28" />
+          </feComponentTransfer>
+          <feFlood
+            :flood-color="subStrokeSpec.strokeSolidHex"
+            :flood-opacity="subStrokeSpec.strokeAlpha"
+            result="flood"
+          />
+          <feComposite in="flood" in2="cleanEdge" operator="in" />
+        </filter>
+      </defs>
+    </svg>
+
+    <!-- 主无框悬停卡片：常态 100% 纯透明无阴影浮空文字，悬停丝滑浮现四主题柔和毛玻璃框 -->
+    <div
+      class="dl-glass-card"
+      @pointerenter="handlePointerEnter"
+      @pointermove="handlePointerMove"
+      @pointerleave="handlePointerLeave"
+      @mouseenter="handlePointerEnter"
+      @mousemove="handlePointerMove"
+      @mouseleave="handlePointerLeave"
+      @mousedown="handleStartDrag"
+      @wheel="handleWheelZoom"
+    >
       <!-- 左右边缘拖拽调宽热区（仅未锁定时激活） -->
       <div
         v-if="!isLocked"
@@ -3158,7 +3937,7 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="dl-icon-btn dl-play-btn"
-            aria-label="播放或暂停"
+            :aria-label="isPlaying ? '暂停播放' : '继续播放'"
             @mouseenter="
               setHoverTip(isPlaying ? '暂停播放' : '继续播放', 'center')
             "
@@ -3237,10 +4016,12 @@ onBeforeUnmount(() => {
             type="button"
             class="dl-icon-btn"
             :class="{ 'is-accented': isSettingsOpen }"
-            aria-label="桌面歌词设置"
+            aria-label="桌面歌词工作台"
             @mouseenter="
               setHoverTip(
-                isSettingsOpen ? '收起外观与排版设置' : '配色、字体、描边与排版设置',
+                isSettingsOpen
+                  ? '收起桌面歌词工作台'
+                  : `预设、动效与配色设置（${activeScenePresetLabel}）`,
                 'right'
               )
             "
@@ -3292,7 +4073,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <!-- 切歌迷你提示胶囊 -->
+      <!-- 切歌轻透提示（无实体方盒，贴合纯净浮空质感） -->
       <transition name="dl-tip-fade">
         <div
           v-if="
@@ -3302,13 +4083,13 @@ onBeforeUnmount(() => {
             showIntro &&
             currentSong?.title
           "
-          class="dl-intro-pill"
+          class="dl-intro-caption"
           aria-hidden="true"
         >
           <span class="dl-intro-dot"></span>
-          <span>
+          <span class="dl-intro-text">
             {{ currentSong.title
-            }}{{ currentSong.artist ? ` - ${currentSong.artist}` : "" }}
+            }}{{ currentSong.artist ? ` · ${currentSong.artist}` : "" }}
           </span>
         </div>
       </transition>
@@ -3327,7 +4108,7 @@ onBeforeUnmount(() => {
         </transition>
       </div>
 
-      <!-- 锁定状态下悬停解锁胶囊 -->
+      <!-- 锁定状态下悬停解锁胶囊（微延迟/顶部热区温和触发，拒绝扫过猛闪） -->
       <transition name="dl-tip-fade">
         <div
           v-if="showLockedUnlockCapsule"
@@ -3351,24 +4132,39 @@ onBeforeUnmount(() => {
         </div>
       </transition>
 
-      <!-- 歌词主舞台（双层真光学矢量描边 · 常态 100% 透明浮空 · 悬停 0px 位移） -->
+      <!-- 歌词主舞台（100% 纯净无底浮空 · 纯 GPU 差量引擎 · 锁态柔和避让） -->
       <div
         ref="viewportRef"
         class="dl-lyric-viewport"
-        :class="{ 'is-idle-faded': idleFade && !isPlaying && !glassVisible }"
+        :class="[
+          isMaskSweepMotionStyle ? 'dl-motion-sweep' : 'dl-motion-bloom',
+          {
+            'is-idle-faded': idleFade && !isPlaying && !glassVisible,
+            'is-locked-dodged': isLockedDodged,
+            'has-svg-outline': hasSvgOutline,
+            'has-air-shadow': shadowEnabled && !hasSvgOutline,
+            'has-stroke-shadow': shadowEnabled && hasSvgOutline,
+          },
+        ]"
         @dblclick="handleViewportDoubleClick"
       >
-        <transition name="dl-tip-fade">
+        <!-- 液态光珠间奏倒计时（入拍前 1s 自然聚能收拢） -->
+        <transition name="dl-fade-soft">
           <div
-            v-if="interludeProgress >= 0"
-            class="dl-interlude-dots"
+            v-show="isInterludeVisible"
+            class="dl-interlude-beads"
+            :class="`align-${interludeAlign}`"
             aria-hidden="true"
           >
             <span
               v-for="i in 3"
               :key="i"
-              class="dl-dot"
-              :class="{ 'is-lit': interludeProgress >= (i - 1) * 0.28 }"
+              :ref="
+                (el) => {
+                  if (el) interludeBeadRefs[i - 1] = el as HTMLElement;
+                }
+              "
+              class="dl-interlude-bead"
             ></span>
           </div>
         </transition>
@@ -3377,92 +4173,133 @@ onBeforeUnmount(() => {
           <div
             v-for="row in displayPlan.rows"
             :key="row.key"
+            :data-row-key="row.key"
+            :data-leaving-row="row.isLeavingKaraoke ? '1' : undefined"
             class="dl-row-slot"
             :class="[
-              `align-${row.alignOverride || 'center'}`,
+              `align-${row.alignOverride}`,
               {
                 'is-secondary': row.isSecondary,
+                'is-ktv-peer': row.isKtvPeer,
                 'is-preview-next': row.isPreviewNext,
                 'is-active': row.isActiveKaraoke,
+                'is-leaving': row.isLeavingKaraoke,
+                'is-harmony-line': row.isHarmonyLine,
+                'is-pan-overflow': row.overflowPx > 1,
               },
             ]"
-            :style="{ top: `${row.verticalPct}%` }"
+            :style="{ '--row-y-px': computeRowOffsetPx(row.verticalPct) }"
           >
-            <div
-              class="dl-row-scale-inner"
-              :style="{
-                transform:
-                  row.fitScale < 0.995
-                    ? `scale(${row.fitScale.toFixed(4)})`
-                    : 'none',
-                transformOrigin:
-                  (row.alignOverride || 'center') === 'left'
-                    ? 'left center'
-                    : 'center center',
-              }"
-            >
-              <!-- 逐字 KRC 双层矢量描边 + 无极流光填充 -->
-              <div
-                v-if="row.words.length > 0 && row.isActiveKaraoke"
-                class="dl-line-text dl-krc-row"
-              >
-                <span
-                  v-for="(w, wIdx) in row.words"
-                  :key="wIdx"
-                  class="dl-krc-word-wrap"
-                  :style="getWordDualRender(row, w).wrapStyle"
+            <div class="dl-row-pan-viewport">
+              <div class="dl-row-pan-track">
+                <div
+                  class="dl-row-scale-inner"
+                  :style="{
+                    transform:
+                      row.fitScale < 0.995
+                        ? `scale(${row.fitScale.toFixed(4)})`
+                        : 'none',
+                    transformOrigin:
+                      row.alignOverride === 'left'
+                        ? 'left center'
+                        : row.alignOverride === 'right'
+                        ? 'right center'
+                        : 'center center',
+                  }"
                 >
-                  <span
-                    v-if="getWordDualRender(row, w).strokeStyle"
-                    class="dl-stroke-back"
-                    aria-hidden="true"
-                    :style="getWordDualRender(row, w).strokeStyle!"
-                    >{{ w.text }}</span
+                  <!-- 1. 逐字 KRC 纯 GPU 三层字粒（整行连贯 OKLab 流光 + 词簇防折断 + 零斑马纹） -->
+                  <div
+                    v-if="
+                      row.presentation &&
+                      row.presentation.clusters.length > 0 &&
+                      (row.isActiveKaraoke || row.isLeavingKaraoke)
+                    "
+                    class="dl-line-text dl-krc-row"
                   >
-                  <span
-                    class="dl-fill-front"
-                    :style="getWordDualRender(row, w).fillStyle"
-                    >{{ w.text }}</span
-                  >
-                </span>
-              </div>
+                    <template
+                      v-for="(cluster, cIdx) in row.presentation.clusters"
+                      :key="cIdx"
+                    ><span
+                        class="dl-word-cluster"
+                        :class="{
+                          'is-harmony-word':
+                            harmonyStyleEnabled &&
+                            cluster.isHarmony &&
+                            !row.isHarmonyLine,
+                        }"
+                      ><span
+                          v-for="w in cluster.words"
+                          :key="w.wordIdx"
+                          class="dl-kw-span"
+                          :data-text="w.text"
+                        ><span
+                            v-if="hasSvgOutline || shadowEnabled"
+                            class="dl-kw-backing"
+                            aria-hidden="true"
+                            >{{ w.text }}</span
+                          ><span class="dl-kw-base">{{ w.text }}</span
+                          ><span
+                            class="dl-kw-lit"
+                            aria-hidden="true"
+                            :style="getWordLitStyle(w)"
+                            >{{ w.text }}</span
+                          ></span
+                        ></span
+                      ><template v-if="cluster.trailingSpace">{{ " " }}</template></template
+                    >
+                  </div>
 
-              <!-- 整行 / 译文 / 预告行 双层矢量描边 + 纯净梯度填充 -->
-              <div
-                v-else
-                class="dl-line-text dl-plain-stack"
-                :class="{ 'is-sub': row.isSecondary }"
-                :style="getPlainRowDualRender(row).wrapStyle"
-              >
-                <span
-                  v-if="getPlainRowDualRender(row).strokeStyle"
-                  class="dl-stroke-back"
-                  aria-hidden="true"
-                  :style="getPlainRowDualRender(row).strokeStyle!"
-                  >{{ row.text }}</span
-                >
-                <span
-                  class="dl-fill-front"
-                  :style="getPlainRowDualRender(row).fillStyle"
-                  >{{ row.text }}</span
-                >
+                  <!-- 2. 整行 LRC 活动行（300% 静态羽化遮罩扫光） -->
+                  <div
+                    v-else-if="row.isActiveKaraoke"
+                    class="dl-line-text dl-plain-stack is-active-plain"
+                  >
+                    <span
+                      v-if="hasSvgOutline || shadowEnabled"
+                      class="dl-kw-backing"
+                      aria-hidden="true"
+                      >{{ row.text }}</span
+                    >
+                    <span class="dl-plain-base">{{ row.text }}</span>
+                    <span
+                      class="dl-plain-lit"
+                      aria-hidden="true"
+                      :style="getPlainLitStyle()"
+                      >{{ row.text }}</span
+                    >
+                  </div>
+
+                  <!-- 3. 译文 / 注音 / KTV 预告副行 -->
+                  <div
+                    v-else
+                    class="dl-line-text dl-plain-stack"
+                    :class="{
+                      'is-sub': row.isSecondary,
+                      'is-ktv-peer-text': row.isKtvPeer,
+                    }"
+                  >
+                    <span
+                      v-if="hasSvgOutline || shadowEnabled"
+                      class="dl-kw-backing"
+                      :class="{ 'is-sub-backing': row.isSecondary }"
+                      aria-hidden="true"
+                      >{{ row.text }}</span
+                    >
+                    <span class="dl-plain-passive">{{ row.text }}</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         </TransitionGroup>
       </div>
 
-      <!-- 底部 2px 实时播放进度流光细线（60fps GPU scaleX 无极滑动，仅悬停显露） -->
+      <!-- 底部 2px 实时播放进度流光细线（仅悬停显露，直写 GPU scaleX） -->
       <div class="dl-progress-track" :class="{ 'is-visible': glassVisible }">
-        <div
-          class="dl-progress-fill"
-          :style="{
-            transform: `scaleX(${(progressPct / 100).toFixed(5)})`,
-          }"
-        ></div>
+        <div ref="progressFillRef" class="dl-progress-fill"></div>
       </div>
 
-      <!-- 向下展开式 3-Tab 轻分栏设置抽屉（固定最大 580px 居中，调宽时滑块原地不动零跑偏） -->
+      <!-- 向下展开式 3-Tab 高定工作台抽屉（预设与动效 / 配色与轮廓 / 排版与窗体） -->
       <div
         class="dl-settings-collapse"
         :class="{ 'is-open': isSettingsOpen && !isLocked }"
@@ -3470,54 +4307,170 @@ onBeforeUnmount(() => {
       >
         <div class="dl-settings-clip">
           <div ref="settingsInnerRef" class="dl-settings-inner">
-            <!-- 顶部分栏导航条 + 一键重置 -->
+            <!-- 顶部分栏导航条 + 同步播放页 + 恢复默认 -->
             <div class="dl-pod-nav">
-              <div class="dl-pod-tabs" role="tablist" aria-label="桌面歌词设置分栏">
+              <div
+                class="dl-pod-tabs"
+                role="tablist"
+                aria-label="桌面歌词工作台分栏"
+              >
                 <button
+                  id="dl-pod-tab-preset"
                   type="button"
                   role="tab"
                   class="dl-pod-tab"
-                  :class="{ 'is-active': settingsTab === 'color' }"
-                  :aria-selected="settingsTab === 'color'"
-                  @click.stop="settingsTab = 'color'"
+                  :aria-selected="settingsTab === 'preset'"
+                  :tabindex="settingsTab === 'preset' ? 0 : -1"
+                  @click.stop="settingsTab = 'preset'"
+                  @keydown="handlePodTabKeydown($event, 0)"
                 >
-                  配色
+                  预设与动效
                 </button>
                 <button
+                  id="dl-pod-tab-style"
                   type="button"
                   role="tab"
                   class="dl-pod-tab"
-                  :class="{ 'is-active': settingsTab === 'typography' }"
-                  :aria-selected="settingsTab === 'typography'"
-                  @click.stop="settingsTab = 'typography'"
+                  :aria-selected="settingsTab === 'style'"
+                  :tabindex="settingsTab === 'style' ? 0 : -1"
+                  @click.stop="settingsTab = 'style'"
+                  @keydown="handlePodTabKeydown($event, 1)"
                 >
-                  字体与描边
+                  配色与轮廓
                 </button>
                 <button
+                  id="dl-pod-tab-layout"
                   type="button"
                   role="tab"
                   class="dl-pod-tab"
-                  :class="{ 'is-active': settingsTab === 'layout' }"
                   :aria-selected="settingsTab === 'layout'"
+                  :tabindex="settingsTab === 'layout' ? 0 : -1"
                   @click.stop="settingsTab = 'layout'"
+                  @keydown="handlePodTabKeydown($event, 2)"
                 >
                   排版与窗体
                 </button>
               </div>
 
-              <button
-                type="button"
-                class="dl-reset-btn"
-                title="恢复桌面歌词默认配色与排版"
-                @click.stop="handleResetDefaults"
-              >
-                恢复默认
-              </button>
+              <div class="dl-pod-actions">
+                <button
+                  type="button"
+                  class="dl-reset-btn"
+                  title="一键同步播放页的配色、动效引擎与字体风格"
+                  @click.stop="handleSyncFromNowPlaying"
+                >
+                  同步播放页
+                </button>
+                <button
+                  type="button"
+                  class="dl-reset-btn"
+                  title="恢复苹果清透默认风格"
+                  @click.stop="handleResetDefaults"
+                >
+                  恢复默认
+                </button>
+              </div>
             </div>
 
-            <!-- ================= 分栏 1：双通道独立配色（已唱 + 未唱） ================= -->
-            <div v-if="settingsTab === 'color'" class="dl-pod-pane">
-              <!-- 已唱高亮 -->
+            <!-- ================= 分栏 1：5 套桌面高定预设 + 4 套 GPU 动效引擎 ================= -->
+            <div
+              v-if="settingsTab === 'preset'"
+              role="tabpanel"
+              aria-labelledby="dl-pod-tab-preset"
+              class="dl-pod-pane"
+            >
+              <!-- 5 套桌面场景预设 -->
+              <div class="dl-set-card">
+                <div class="dl-set-head">
+                  <span class="dl-set-label">桌面场景预设</span>
+                  <span class="dl-value-pill">{{ activeScenePresetLabel }}</span>
+                </div>
+                <div
+                  class="dl-preset-grid"
+                  role="radiogroup"
+                  aria-label="桌面歌词高定预设"
+                >
+                  <button
+                    v-for="p in DESKTOP_LYRIC_SCENE_PRESETS"
+                    :key="p.id"
+                    type="button"
+                    role="radio"
+                    class="dl-preset-tile"
+                    :class="{ 'is-active': activeScenePreset === p.id }"
+                    :aria-checked="activeScenePreset === p.id"
+                    @click.stop="applyScenePresetVal(p.id)"
+                  >
+                    <span
+                      class="dl-preset-bar"
+                      :style="{ background: p.accentSwatch }"
+                      aria-hidden="true"
+                    ></span>
+                    <span class="dl-preset-name">{{ p.label }}</span>
+                    <span class="dl-preset-tag">{{ p.tagline }}</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- 4 套纯 GPU 逐字动效引擎 + 细腻开关 -->
+              <div class="dl-set-card">
+                <div class="dl-set-head">
+                  <span class="dl-set-label">逐字动效引擎</span>
+                  <div class="dl-head-right">
+                    <button
+                      type="button"
+                      class="dl-toggle-chip"
+                      :class="{
+                        'is-active':
+                          wordBounceEnabled && motionStyle !== 'apple_minimal',
+                      }"
+                      :disabled="
+                        !wordByWordEnabled || motionStyle === 'apple_minimal'
+                      "
+                      @click.stop="toggleWordBounce"
+                    >
+                      逐字微浮
+                    </button>
+                    <button
+                      type="button"
+                      class="dl-toggle-chip"
+                      :class="{ 'is-active': harmonyStyleEnabled }"
+                      @click.stop="toggleHarmonyStyle"
+                    >
+                      和声轻量化
+                    </button>
+                  </div>
+                </div>
+
+                <div
+                  class="dl-motion-grid"
+                  role="radiogroup"
+                  aria-label="桌面歌词逐字动效风格"
+                >
+                  <button
+                    v-for="ms in LYRIC_MOTION_STYLE_OPTIONS"
+                    :key="ms.id"
+                    type="button"
+                    role="radio"
+                    class="dl-motion-tile"
+                    :class="{ 'is-active': motionStyle === ms.id }"
+                    :aria-checked="motionStyle === ms.id"
+                    @click.stop="setMotionStyleVal(ms.id)"
+                  >
+                    <span class="dl-motion-name">{{ ms.label }}</span>
+                    <span class="dl-motion-desc">{{ ms.desc }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- ================= 分栏 2：双通道配色 + 圆角抗锯齿轮廓与空气柔影 ================= -->
+            <div
+              v-else-if="settingsTab === 'style'"
+              role="tabpanel"
+              aria-labelledby="dl-pod-tab-style"
+              class="dl-pod-pane"
+            >
+              <!-- 已唱高亮 + 未唱配色 -->
               <div class="dl-set-card">
                 <div class="dl-set-head">
                   <span class="dl-set-label">已唱高亮</span>
@@ -3607,162 +4560,52 @@ onBeforeUnmount(() => {
                     <span>终色</span>
                   </label>
                 </div>
-              </div>
 
-              <!-- 未唱独立配色 + 透明度 -->
-              <div class="dl-set-card">
-                <div class="dl-set-head">
-                  <span class="dl-set-label">未唱文字</span>
-                  <div class="dl-head-right dl-head-slider">
-                    <span class="dl-value-pill subtle">{{
-                      activeUnsungLabel
-                    }}</span>
-                    <span class="dl-set-sublabel">透明</span>
-                    <input
-                      type="range"
-                      class="dl-range-slider sm"
-                      min="0.35"
-                      max="0.98"
-                      step="0.01"
-                      aria-label="未唱歌词透明度"
-                      :value="unsungOpacity"
-                      :style="{ '--dl-range-pct': unsungOpacityRangePct }"
-                      @input="
-                        setUnsungOpacityVal(
-                          Number(($event.target as HTMLInputElement).value)
-                        )
-                      "
-                    />
-                    <span class="dl-num-val">{{
-                      Math.round(unsungOpacity * 100)
-                    }}%</span>
-                  </div>
-                </div>
+                <div class="dl-set-row dl-split-row dl-sub-divider">
+                  <div class="dl-unsung-row">
+                    <span class="dl-set-sublabel">未唱</span>
+                    <button
+                      v-for="up in LYRIC_UNSUNG_PRESETS"
+                      :key="up.id"
+                      type="button"
+                      class="dl-unsung-chip"
+                      :class="{ 'is-active': unsungPreset === up.id }"
+                      @click.stop="selectUnsungPreset(up.id)"
+                    >
+                      <span
+                        class="dl-mini-dot"
+                        :style="{ background: up.swatchDark }"
+                      ></span>
+                      <span>{{ up.label }}</span>
+                    </button>
 
-                <div class="dl-unsung-row">
-                  <button
-                    v-for="up in LYRIC_UNSUNG_PRESETS"
-                    :key="up.id"
-                    type="button"
-                    class="dl-unsung-chip"
-                    :class="{ 'is-active': unsungPreset === up.id }"
-                    @click.stop="selectUnsungPreset(up.id)"
-                  >
-                    <span
-                      class="dl-mini-dot"
-                      :style="{ background: up.swatchDark }"
-                    ></span>
-                    <span>{{ up.label }}</span>
-                  </button>
-
-                  <label
-                    class="dl-color-chip"
-                    :class="{ 'is-active': unsungPreset === 'custom' }"
-                    title="自定义未唱颜色"
-                  >
-                    <input
-                      type="color"
-                      class="dl-native-color"
-                      aria-label="自定义未唱文字颜色"
-                      :value="unsungCustomHex"
-                      @input="
-                        pickCustomUnsungHex(
-                          ($event.target as HTMLInputElement).value
-                        )
-                      "
-                    />
-                    <span>自选</span>
-                  </label>
-                </div>
-              </div>
-            </div>
-
-            <!-- ================= 分栏 2：字体、真 4 档字重与真光学矢量描边 ================= -->
-            <div v-else-if="settingsTab === 'typography'" class="dl-pod-pane">
-              <!-- 字形、字重与字号/辉光 -->
-              <div class="dl-set-card">
-                <div class="dl-set-row dl-split-row">
-                  <div class="dl-inline-ctrl">
-                    <span class="dl-set-label">字体</span>
-                    <div class="dl-pill-group">
-                      <button
-                        v-for="ff in LYRIC_FONT_FAMILY_OPTIONS"
-                        :key="ff.id"
-                        type="button"
-                        class="dl-pill-btn"
-                        :class="{ 'is-active': fontFamily === ff.id }"
-                        @click.stop="setFontFamilyVal(ff.id)"
-                      >
-                        {{ ff.label.slice(-2) }}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div class="dl-inline-ctrl">
-                    <span class="dl-set-sublabel">字重</span>
-                    <div class="dl-pill-group">
-                      <button
-                        v-for="fw in LYRIC_FONT_WEIGHT_OPTIONS"
-                        :key="fw.id"
-                        type="button"
-                        class="dl-pill-btn"
-                        :class="{ 'is-active': fontWeight === fw.id }"
-                        @click.stop="setFontWeightVal(fw.id)"
-                      >
-                        {{ fw.label }}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="dl-set-row dl-split-row">
-                  <div class="dl-slider-box">
-                    <span class="dl-set-label">字号</span>
-                    <input
-                      type="range"
-                      class="dl-range-slider"
-                      min="18"
-                      max="56"
-                      step="1"
-                      aria-label="桌面歌词字号"
-                      :value="fontSize"
-                      :style="{ '--dl-range-pct': fontRangePct }"
-                      @input="
-                        setFontSizeVal(
-                          Number(($event.target as HTMLInputElement).value)
-                        )
-                      "
-                    />
-                    <span class="dl-num-val">{{ Math.round(fontSize) }}px</span>
-                  </div>
-
-                  <div class="dl-slider-box dl-compact-slider">
-                    <span class="dl-set-sublabel">辉光</span>
-                    <input
-                      type="range"
-                      class="dl-range-slider"
-                      min="0"
-                      max="150"
-                      step="5"
-                      aria-label="桌面歌词霓虹辉光"
-                      :value="glowIntensity"
-                      :style="{ '--dl-range-pct': glowRangePct }"
-                      @input="
-                        setGlowVal(
-                          Number(($event.target as HTMLInputElement).value)
-                        )
-                      "
-                    />
-                    <span class="dl-num-val">{{ glowIntensity }}%</span>
+                    <label
+                      class="dl-color-chip"
+                      :class="{ 'is-active': unsungPreset === 'custom' }"
+                      title="自定义未唱颜色"
+                    >
+                      <input
+                        type="color"
+                        class="dl-native-color"
+                        aria-label="自定义未唱文字颜色"
+                        :value="unsungCustomHex"
+                        @input="
+                          pickCustomUnsungHex(
+                            ($event.target as HTMLInputElement).value
+                          )
+                        "
+                      />
+                      <span>自选</span>
+                    </label>
                   </div>
                 </div>
               </div>
 
-              <!-- 光学矢量描边（双层外描边 + 颜色 + 立体柔影） -->
+              <!-- 圆角外扩轮廓 + 空气柔影 + 未唱透明与辉光 -->
               <div class="dl-set-card">
                 <div class="dl-set-row dl-split-row">
                   <div class="dl-inline-ctrl">
-                    <span class="dl-set-label">描边</span>
+                    <span class="dl-set-label">圆角轮廓</span>
                     <div class="dl-pill-group">
                       <button
                         v-for="sw in DESKTOP_STROKE_WIDTH_OPTIONS"
@@ -3783,12 +4626,12 @@ onBeforeUnmount(() => {
                     :class="{ 'is-active': shadowEnabled }"
                     @click.stop="toggleShadowEnabled"
                   >
-                    立体柔影
+                    空气柔影
                   </button>
                 </div>
 
-                <div class="dl-set-row">
-                  <span class="dl-set-label">边色</span>
+                <div v-if="strokeWidth !== 'none'" class="dl-set-row">
+                  <span class="dl-set-sublabel">轮廓色</span>
                   <div class="dl-unsung-row">
                     <button
                       v-for="sc in DESKTOP_STROKE_COLOR_OPTIONS"
@@ -3808,12 +4651,12 @@ onBeforeUnmount(() => {
                     <label
                       class="dl-color-chip"
                       :class="{ 'is-active': strokeColorMode === 'custom' }"
-                      title="自定义描边色"
+                      title="自定义轮廓色"
                     >
                       <input
                         type="color"
                         class="dl-native-color"
-                        aria-label="自定义描边颜色"
+                        aria-label="自定义轮廓颜色"
                         :value="strokeCustomHex"
                         @input="
                           pickCustomStrokeHex(
@@ -3825,12 +4668,61 @@ onBeforeUnmount(() => {
                     </label>
                   </div>
                 </div>
+
+                <div class="dl-set-row dl-split-row">
+                  <div class="dl-slider-box">
+                    <span class="dl-set-sublabel">辉光</span>
+                    <input
+                      type="range"
+                      class="dl-range-slider"
+                      min="0"
+                      max="150"
+                      step="5"
+                      aria-label="桌面歌词逐字辉光"
+                      :value="glowIntensity"
+                      :style="{ '--dl-range-pct': glowRangePct }"
+                      @input="
+                        setGlowVal(
+                          Number(($event.target as HTMLInputElement).value)
+                        )
+                      "
+                    />
+                    <span class="dl-num-val">{{ glowIntensity }}%</span>
+                  </div>
+
+                  <div class="dl-slider-box dl-compact-slider">
+                    <span class="dl-set-sublabel">未唱透明</span>
+                    <input
+                      type="range"
+                      class="dl-range-slider"
+                      min="0.35"
+                      max="0.98"
+                      step="0.01"
+                      aria-label="未唱歌词透明度"
+                      :value="unsungOpacity"
+                      :style="{ '--dl-range-pct': unsungOpacityRangePct }"
+                      @input="
+                        setUnsungOpacityVal(
+                          Number(($event.target as HTMLInputElement).value)
+                        )
+                      "
+                    />
+                    <span class="dl-num-val">{{
+                      Math.round(unsungOpacity * 100)
+                    }}%</span>
+                  </div>
+                </div>
               </div>
             </div>
 
-            <!-- ================= 分栏 3：排版、平滑宽幅与显示开关 ================= -->
-            <div v-else class="dl-pod-pane">
-              <!-- 形态、时间校准与平滑中心锚定宽幅 -->
+            <!-- ================= 分栏 3：排版布局、字形尺寸、宽幅与生态开关 ================= -->
+            <div
+              v-else
+              role="tabpanel"
+              aria-labelledby="dl-pod-tab-layout"
+              class="dl-pod-pane"
+            >
+              <!-- 形态、字体、字重与校准 -->
               <div class="dl-set-card">
                 <div class="dl-set-row dl-split-row">
                   <div class="dl-inline-ctrl">
@@ -3894,9 +4786,84 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
 
-                <!-- 中心锚定平滑宽幅滑块 -->
-                <div class="dl-set-row">
-                  <div class="dl-slider-box dl-full-slider">
+                <div class="dl-set-row dl-split-row">
+                  <div class="dl-inline-ctrl">
+                    <span class="dl-set-label">字体</span>
+                    <div class="dl-pill-group">
+                      <button
+                        v-for="ff in LYRIC_FONT_FAMILY_OPTIONS"
+                        :key="ff.id"
+                        type="button"
+                        class="dl-pill-btn"
+                        :class="{ 'is-active': fontFamily === ff.id }"
+                        @click.stop="setFontFamilyVal(ff.id)"
+                      >
+                        {{ ff.label.slice(-2) }}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="dl-inline-ctrl">
+                    <span class="dl-set-sublabel">字重</span>
+                    <div class="dl-pill-group">
+                      <button
+                        v-for="fw in LYRIC_FONT_WEIGHT_OPTIONS"
+                        :key="fw.id"
+                        type="button"
+                        class="dl-pill-btn"
+                        :class="{ 'is-active': fontWeight === fw.id }"
+                        @click.stop="setFontWeightVal(fw.id)"
+                      >
+                        {{ fw.label }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="dl-set-row dl-split-row">
+                  <div class="dl-slider-box">
+                    <span class="dl-set-label">字号</span>
+                    <input
+                      type="range"
+                      class="dl-range-slider"
+                      min="18"
+                      max="56"
+                      step="1"
+                      aria-label="桌面歌词字号"
+                      :value="fontSize"
+                      :style="{ '--dl-range-pct': fontRangePct }"
+                      @input="
+                        setFontSizeVal(
+                          Number(($event.target as HTMLInputElement).value)
+                        )
+                      "
+                    />
+                    <span class="dl-num-val">{{ Math.round(fontSize) }}px</span>
+                  </div>
+
+                  <div class="dl-slider-box dl-compact-slider">
+                    <span class="dl-set-sublabel">行距</span>
+                    <input
+                      type="range"
+                      class="dl-range-slider"
+                      min="0"
+                      max="16"
+                      step="1"
+                      aria-label="双行间距"
+                      :value="lineSpacing"
+                      :style="{ '--dl-range-pct': lineSpacingRangePct }"
+                      @input="
+                        setLineSpacingVal(
+                          Number(($event.target as HTMLInputElement).value)
+                        )
+                      "
+                    />
+                    <span class="dl-num-val">{{ lineSpacing }}px</span>
+                  </div>
+                </div>
+
+                <div class="dl-set-row dl-split-row">
+                  <div class="dl-slider-box">
                     <span class="dl-set-label">宽幅</span>
                     <input
                       type="range"
@@ -3921,11 +4888,9 @@ onBeforeUnmount(() => {
                     />
                     <span class="dl-num-val wide">{{ widthPx }}px</span>
                   </div>
-                </div>
 
-                <div class="dl-set-row dl-split-row">
-                  <div class="dl-slider-box">
-                    <span class="dl-set-label">透明</span>
+                  <div class="dl-slider-box dl-compact-slider">
+                    <span class="dl-set-sublabel">透明</span>
                     <input
                       type="range"
                       class="dl-range-slider"
@@ -3945,30 +4910,10 @@ onBeforeUnmount(() => {
                       Math.round(lyricOpacity * 100)
                     }}%</span>
                   </div>
-
-                  <div class="dl-slider-box dl-compact-slider">
-                    <span class="dl-set-sublabel">行距</span>
-                    <input
-                      type="range"
-                      class="dl-range-slider"
-                      min="0"
-                      max="16"
-                      step="1"
-                      aria-label="双行间距"
-                      :value="lineSpacing"
-                      :style="{ '--dl-range-pct': lineSpacingRangePct }"
-                      @input="
-                        setLineSpacingVal(
-                          Number(($event.target as HTMLInputElement).value)
-                        )
-                      "
-                    />
-                    <span class="dl-num-val">{{ lineSpacing }}px</span>
-                  </div>
                 </div>
               </div>
 
-              <!-- 显示开关组 -->
+              <!-- 显示与交互开关组 -->
               <div class="dl-set-card compact-card">
                 <div class="dl-set-row">
                   <span class="dl-set-label">开关</span>
@@ -3995,7 +4940,7 @@ onBeforeUnmount(() => {
                       :class="{ 'is-active': wordByWordEnabled }"
                       @click.stop="toggleWordByWord"
                     >
-                      逐字染色
+                      逐字演绎
                     </button>
                     <button
                       type="button"
@@ -4013,6 +4958,15 @@ onBeforeUnmount(() => {
                     >
                       暂停淡出
                     </button>
+                    <button
+                      type="button"
+                      class="dl-toggle-chip"
+                      :class="{ 'is-active': hoverDodgeEnabled }"
+                      title="锁定时鼠标移至歌词上方自动柔和淡隐，避免遮挡底下内容"
+                      @click.stop="toggleHoverDodge"
+                    >
+                      锁态避让
+                    </button>
                   </div>
                 </div>
               </div>
@@ -4025,6 +4979,14 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.dl-svg-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
 /* 100% 透明根容器：常态零底色、零方形投影，悬浮置顶于任意桌面应用之上 */
 .dl-shell {
   width: 100vw;
@@ -4038,22 +5000,19 @@ onBeforeUnmount(() => {
   justify-content: flex-start;
   user-select: none;
   overflow: hidden;
-  cursor: grab;
+  pointer-events: none;
   color: var(--dl-ui-text-1, #f5f7fa);
 }
 
 .dl-shell.is-locked {
   background: transparent;
-  cursor: default;
-}
-
-.dl-shell:active:not(.is-locked) {
-  cursor: grabbing;
 }
 
 /* ================= 无框主容器（常态 100% 纯透明，悬停丝滑浮现四主题毛玻璃框） ================= */
 .dl-glass-card {
   position: relative;
+  pointer-events: auto;
+  cursor: grab;
   width: min(100%, var(--dl-target-w, 820px));
   margin: 0 auto;
   display: flex;
@@ -4067,6 +5026,18 @@ onBeforeUnmount(() => {
     background 0.18s cubic-bezier(0.22, 1, 0.36, 1),
     backdrop-filter 0.18s ease,
     box-shadow 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.dl-shell.is-locked .dl-glass-card {
+  cursor: default;
+}
+
+.dl-glass-card:active {
+  cursor: grabbing;
+}
+
+.dl-shell.is-locked .dl-glass-card:active {
+  cursor: default;
 }
 
 .dl-shell.is-glass-active .dl-glass-card {
@@ -4138,7 +5109,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   opacity: 0;
   pointer-events: none;
-  transform: translateY(-4px);
+  transform: translate3d(0, -4px, 0);
   transition:
     opacity 0.15s ease,
     transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
@@ -4147,7 +5118,7 @@ onBeforeUnmount(() => {
 .dl-toolbar.is-visible {
   opacity: 1;
   pointer-events: auto;
-  transform: translateY(0);
+  transform: translate3d(0, 0, 0);
 }
 
 .dl-bar-group {
@@ -4213,7 +5184,9 @@ onBeforeUnmount(() => {
 .dl-toggle-chip:focus-visible,
 .dl-unsung-chip:focus-visible,
 .dl-swatch-btn:focus-visible,
-.dl-unlock-pill:focus-visible {
+.dl-unlock-pill:focus-visible,
+.dl-preset-tile:focus-visible,
+.dl-motion-tile:focus-visible {
   outline: 2px solid var(--dl-ui-primary, #5e6ad2);
   outline-offset: 2px;
 }
@@ -4234,11 +5207,6 @@ onBeforeUnmount(() => {
 }
 
 .dl-play-btn:hover {
-  background: linear-gradient(
-    135deg,
-    var(--dl-ui-primary, #5e6ad2) 0%,
-    var(--dl-ui-secondary, #38bdf8) 100%
-  );
   filter: brightness(1.07);
 }
 
@@ -4246,29 +5214,34 @@ onBeforeUnmount(() => {
   background: rgba(239, 68, 68, 0.24);
 }
 
-/* 切歌迷你提示胶囊 */
-.dl-intro-pill {
+/* 切歌轻透浮空小标（无实体重框，空气柔影承托） */
+.dl-intro-caption {
   position: absolute;
-  top: 8px;
+  top: 10px;
   left: 50%;
-  transform: translateX(-50%);
+  transform: translate3d(-50%, 0, 0);
   max-width: calc(100% - 72px);
-  height: 24px;
-  padding: 0 12px;
-  border-radius: 999px;
-  background: var(--dl-ui-unlock-bg);
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.22);
-  color: var(--dl-ui-unlock-text);
-  font-size: 12px;
-  font-weight: 700;
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  color: rgba(248, 250, 252, 0.94);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-shadow:
+    0 1px 2px rgba(4, 7, 14, 0.85),
+    0 2px 8px rgba(4, 7, 14, 0.6);
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   pointer-events: none;
   z-index: 8;
+}
+
+.dl-intro-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .dl-intro-dot {
@@ -4276,7 +5249,7 @@ onBeforeUnmount(() => {
   height: 6px;
   border-radius: 50%;
   background: var(--dl-accent, #5eead4);
-  box-shadow: 0 0 6px var(--dl-accent, #5eead4);
+  box-shadow: 0 0 8px var(--dl-accent, #5eead4);
   flex-shrink: 0;
 }
 
@@ -4327,7 +5300,7 @@ onBeforeUnmount(() => {
 
 .dl-hover-tip.tip-center {
   left: 50%;
-  transform: translateX(-50%);
+  transform: translate3d(-50%, 0, 0);
 }
 
 .dl-hover-tip.tip-right {
@@ -4339,7 +5312,7 @@ onBeforeUnmount(() => {
   position: absolute;
   top: 6px;
   left: 50%;
-  transform: translateX(-50%);
+  transform: translate3d(-50%, 0, 0);
   z-index: 40;
 }
 
@@ -4354,7 +5327,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 4px 10px rgba(0, 0, 0, 0.24);
   color: var(--dl-ui-unlock-text);
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 700;
   cursor: pointer;
   transition: transform 0.18s cubic-bezier(0.22, 1.4, 0.36, 1);
 }
@@ -4364,11 +5337,11 @@ onBeforeUnmount(() => {
   transform: scale(1.05);
 }
 
-/* ================= 歌词主舞台（100% 纯透明浮空 · 悬停 0px 位移） ================= */
+/* ================= 歌词主舞台（100% 纯净无底浮空 · GPU 合成管线） ================= */
 .dl-lyric-viewport {
   position: relative;
   width: 100%;
-  height: var(--dl-viewport-h, 126px);
+  height: var(--dl-viewport-h, 130px);
   padding: 4px 20px;
   box-sizing: border-box;
   overflow: hidden;
@@ -4381,44 +5354,55 @@ onBeforeUnmount(() => {
     "PingFang SC",
     sans-serif
   );
+  text-rendering: geometricPrecision;
   opacity: var(--dl-lyric-opacity, 1);
   transition:
-    opacity 0.28s ease,
+    opacity 0.24s cubic-bezier(0.22, 1, 0.36, 1),
     height 0.22s ease;
 }
 
 .dl-lyric-viewport.is-idle-faded {
-  opacity: calc(var(--dl-lyric-opacity, 1) * 0.45);
+  opacity: calc(var(--dl-lyric-opacity, 1) * 0.42);
 }
 
-.dl-interlude-dots {
+/* 锁定穿透态鼠标靠近柔和避让：自动淡隐让底下代码/网页清晰可见 */
+.dl-lyric-viewport.is-locked-dodged {
+  opacity: calc(var(--dl-lyric-opacity, 1) * 0.18);
+}
+
+/* 液态光珠间奏倒计时 */
+.dl-interlude-beads {
   position: absolute;
   top: 4px;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 24px;
+  right: 24px;
+  height: 12px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   z-index: 6;
   pointer-events: none;
 }
 
-.dl-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.36);
-  transform: scale(0.82);
-  transition:
-    background 0.3s ease,
-    transform 0.3s cubic-bezier(0.22, 1.4, 0.36, 1),
-    box-shadow 0.3s ease;
+.dl-interlude-beads.align-left {
+  justify-content: flex-start;
 }
 
-.dl-dot.is-lit {
-  background: var(--dl-accent, #5eead4);
-  transform: scale(1.2);
-  box-shadow: 0 0 8px var(--dl-accent, #5eead4);
+.dl-interlude-beads.align-center {
+  justify-content: center;
+}
+
+.dl-interlude-beads.align-right {
+  justify-content: flex-end;
+}
+
+.dl-interlude-bead {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.38);
+  transform-origin: center center;
 }
 
 .dl-rows-stage {
@@ -4427,16 +5411,17 @@ onBeforeUnmount(() => {
   height: 100%;
 }
 
+/* 纯合成器线程定位与行切换（使用 translate3d 替代 top 动画） */
 .dl-row-slot {
   position: absolute;
+  top: 0;
   left: 0;
   right: 0;
-  transform: translate3d(0, -50%, 0);
+  transform: translate3d(0, calc(var(--row-y-px, 64px) - 50%), 0);
   display: flex;
   align-items: center;
   transition:
-    top 0.36s cubic-bezier(0.22, 1, 0.36, 1),
-    transform 0.36s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1),
     opacity 0.26s ease;
 }
 
@@ -4450,87 +5435,289 @@ onBeforeUnmount(() => {
   text-align: left;
 }
 
+.dl-row-slot.align-right {
+  justify-content: flex-end;
+  text-align: right;
+}
+
+.dl-row-pan-viewport {
+  max-width: 100%;
+  overflow: visible;
+  display: inline-flex;
+  align-items: center;
+}
+
+.dl-row-slot.is-pan-overflow .dl-row-pan-viewport {
+  width: 100%;
+  overflow: hidden;
+  justify-content: flex-start;
+  padding: 6px 0;
+  margin: -6px 0;
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    #000 26px,
+    #000 calc(100% - 26px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    #000 26px,
+    #000 calc(100% - 26px),
+    transparent 100%
+  );
+}
+
+.dl-row-pan-track {
+  display: inline-flex;
+  align-items: center;
+  transform: translate3d(var(--dl-pan-x, 0px), 0, 0);
+}
+
 .dl-row-scale-inner {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  transition: transform 0.24s ease;
+  transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .dl-line-text {
   font-size: var(--dl-font-size, 32px);
   font-weight: var(--dl-font-weight, 700);
-  line-height: 1.28;
+  line-height: 1.32;
   letter-spacing: 0.015em;
   white-space: nowrap;
   transition:
-    font-size 0.2s cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 0.22s ease;
+    font-size 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.24s ease;
+}
+
+.dl-row-slot.is-harmony-line .dl-line-text {
+  font-size: calc(var(--dl-font-size, 32px) * 0.84);
+  font-style: italic;
+  opacity: 0.88;
 }
 
 .dl-krc-row {
-  display: inline-flex;
-  align-items: baseline;
-  flex-wrap: nowrap;
+  display: inline-block;
+  white-space: nowrap;
 }
 
-/* 双层光学矢量描边堆栈：底层外描边 + 顶层纯净流光渐变，100% 锐利零吃字 */
-.dl-krc-word-wrap,
+.dl-word-cluster {
+  display: inline-block;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+
+.dl-word-cluster.is-harmony-word {
+  font-size: 0.8em;
+  font-style: italic;
+  opacity: 0.84;
+  margin: 0 0.08em;
+}
+
+/* ==================== 纯 GPU 三层合成字粒结构 ==================== */
+.dl-kw-span,
 .dl-plain-stack {
   position: relative;
   display: inline-block;
-  white-space: pre;
+  transform-origin: center 72%;
 }
 
-.dl-plain-stack.is-sub {
-  font-size: var(--dl-sub-font-size, 20px);
-  font-weight: 600;
+.dl-row-slot.is-active .dl-kw-span,
+.dl-row-slot.is-leaving .dl-kw-span {
+  transform: translate3d(0, var(--kw-y, 0px), 0) scale(var(--kw-s, 1));
 }
 
-.dl-stroke-back {
+/* 静态预光栅化辉光伪层：每帧仅合成 opacity，零发毛零主线程重绘 */
+.dl-row-slot.is-active .dl-kw-span::before,
+.dl-row-slot.is-leaving .dl-kw-span::before {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  user-select: none;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  text-shadow:
+    0 0 var(--dl-kw-glow-r1, 10px) var(--dl-kw-glow-c1, rgba(94, 234, 212, 0.35)),
+    0 0 var(--dl-kw-glow-r2, 22px) var(--dl-kw-glow-c2, rgba(96, 165, 250, 0.18));
+  opacity: var(--kw-glow, 0);
+}
+
+/* 底层轮廓 / 多层光学空气柔影层（静止纹理 GPU 缓存，零每帧重算） */
+.dl-kw-backing {
   position: absolute;
   inset: 0;
   z-index: 0;
   pointer-events: none;
   user-select: none;
   white-space: inherit;
-  paint-order: stroke fill;
-  stroke-linejoin: round;
-  stroke-linecap: round;
 }
 
-.dl-fill-front {
+/* 模式 A（默认苹果清透）：无硬描边，纯三层紧致光学空气柔影 */
+.dl-lyric-viewport.has-air-shadow .dl-kw-backing {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  text-shadow: var(--dl-sung-air-shadow, none);
+}
+
+.dl-lyric-viewport.has-air-shadow .dl-row-slot:not(.is-active) .dl-kw-backing {
+  text-shadow: var(--dl-unsung-air-shadow, none);
+}
+
+.dl-lyric-viewport.has-air-shadow .dl-kw-backing.is-sub-backing {
+  text-shadow: var(--dl-sub-air-shadow, none);
+}
+
+/* 模式 B（开启圆角描边）：SVG feMorphology + 柔角陡化纯外扩轮廓，彻底零尖刺零吃字 */
+.dl-lyric-viewport.has-svg-outline .dl-kw-backing {
+  color: #000000;
+  -webkit-text-fill-color: #000000;
+  filter: url(#dl-outline-sung);
+}
+
+.dl-lyric-viewport.has-svg-outline .dl-row-slot:not(.is-active) .dl-kw-backing {
+  filter: url(#dl-outline-unsung);
+}
+
+.dl-lyric-viewport.has-svg-outline .dl-kw-backing.is-sub-backing {
+  filter: url(#dl-outline-sub);
+}
+
+.dl-lyric-viewport.has-stroke-shadow .dl-row-slot.is-active .dl-line-text {
+  filter: drop-shadow(0 2px 7px rgba(4, 7, 14, 0.44));
+}
+
+.dl-lyric-viewport.has-stroke-shadow .dl-row-slot:not(.is-active) .dl-line-text {
+  filter: drop-shadow(0 2px 6px rgba(4, 7, 14, 0.36));
+}
+
+/* 中层：未唱基字 */
+.dl-kw-base,
+.dl-plain-base {
   position: relative;
   z-index: 1;
   display: inline-block;
-  white-space: inherit;
+  color: var(--dl-unsung-color, #eef3fa);
+  -webkit-text-stroke: var(--dl-heavy-unsung-stroke, 0px transparent);
+  paint-order: stroke fill;
+  opacity: calc(var(--dl-unsung-opacity, 0.78) * (1 - var(--kw-base-fade, 0)));
+}
+
+/* 顶层：整行连贯 OKLab 流光点亮层（静态 300% 宽羽化遮罩纯 GPU 推进） */
+.dl-kw-lit,
+.dl-plain-lit {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: inline-block;
+  pointer-events: none;
+  user-select: none;
   -webkit-background-clip: text;
   background-clip: text;
-  -webkit-text-fill-color: transparent;
   color: transparent;
+  -webkit-text-fill-color: transparent;
+  -webkit-text-stroke: var(--dl-heavy-sung-stroke, 0px transparent);
   paint-order: stroke fill;
 }
 
-/* 切行阻尼滑动动画 */
+.dl-kw-lit {
+  opacity: var(--kw-lit, 0);
+}
+
+.dl-plain-lit {
+  opacity: var(--dl-plain-lit, 1);
+}
+
+.dl-lyric-viewport.dl-motion-sweep .dl-kw-lit,
+.dl-lyric-viewport.dl-motion-sweep .dl-plain-lit {
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 34%,
+    rgba(0, 0, 0, 0.68) 41%,
+    rgba(0, 0, 0, 0.22) 48%,
+    transparent 55%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 34%,
+    rgba(0, 0, 0, 0.68) 41%,
+    rgba(0, 0, 0, 0.22) 48%,
+    transparent 55%,
+    transparent 100%
+  );
+  -webkit-mask-size: 300% 100%;
+  mask-size: 300% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+
+.dl-lyric-viewport.dl-motion-sweep .dl-kw-lit {
+  -webkit-mask-position: var(--kw-mask-x, 100%) 0;
+  mask-position: var(--kw-mask-x, 100%) 0;
+}
+
+.dl-lyric-viewport.dl-motion-sweep .dl-plain-lit {
+  -webkit-mask-position: var(--dl-plain-mask-x, 100%) 0;
+  mask-position: var(--dl-plain-mask-x, 100%) 0;
+}
+
+.dl-lyric-viewport.dl-motion-bloom .dl-kw-lit,
+.dl-lyric-viewport.dl-motion-bloom .dl-plain-lit {
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+/* 副行 / KTV 预告同级行 */
+.dl-plain-stack.is-sub {
+  font-size: var(--dl-sub-font-size, 20px);
+  font-weight: 600;
+}
+
+.dl-plain-stack.is-ktv-peer-text {
+  font-size: var(--dl-ktv-peer-size, 29px);
+  font-weight: var(--dl-font-weight, 700);
+}
+
+.dl-plain-passive {
+  position: relative;
+  z-index: 1;
+  display: inline-block;
+  color: var(--dl-unsung-color, #eef3fa);
+  opacity: var(--dl-unsung-opacity, 0.78);
+}
+
+.dl-row-slot.is-preview-next .dl-plain-passive {
+  opacity: calc(var(--dl-unsung-opacity, 0.78) * 0.86);
+}
+
+/* 切行阻尼滑动动画（纯 transform + opacity 合成器驱动） */
 .dl-row-glide-enter-active,
 .dl-row-glide-leave-active {
   transition:
     opacity 0.28s cubic-bezier(0.22, 1, 0.36, 1),
-    transform 0.32s cubic-bezier(0.22, 1, 0.36, 1),
-    top 0.36s cubic-bezier(0.22, 1, 0.36, 1);
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .dl-row-glide-enter-from {
   opacity: 0;
-  transform: translate3d(0, calc(-50% + 9px), 0) scale(0.975);
+  transform: translate3d(0, calc(var(--row-y-px, 64px) - 50% + 10px), 0)
+    scale(0.975);
 }
 
 .dl-row-glide-leave-to {
   opacity: 0;
-  transform: translate3d(0, calc(-50% - 9px), 0) scale(0.975);
+  transform: translate3d(0, calc(var(--row-y-px, 64px) - 50% - 10px), 0)
+    scale(0.975);
 }
 
-/* 底部 2px 实时播放进度流光细线（60fps 无极滑动，仅悬停显露） */
+/* 底部 2px 实时播放进度流光细线（仅悬停显露） */
 .dl-progress-track {
   height: 2px;
   margin: 0 22px 4px;
@@ -4549,6 +5736,7 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   border-radius: 999px;
+  transform: scaleX(0);
   transform-origin: left center;
   background: linear-gradient(
     90deg,
@@ -4557,12 +5745,12 @@ onBeforeUnmount(() => {
   );
 }
 
-/* ================= 向下展开式 3-Tab 轻分栏设置抽屉 ================= */
+/* ================= 向下展开式 3-Tab 高定工作台抽屉 ================= */
 .dl-settings-collapse {
   display: grid;
   grid-template-rows: 0fr;
   opacity: 0;
-  transform: translateY(-4px);
+  transform: translate3d(0, -4px, 0);
   pointer-events: none;
   transition:
     grid-template-rows 0.24s cubic-bezier(0.22, 1, 0.36, 1),
@@ -4573,7 +5761,7 @@ onBeforeUnmount(() => {
 .dl-settings-collapse.is-open {
   grid-template-rows: 1fr;
   opacity: 1;
-  transform: translateY(0);
+  transform: translate3d(0, 0, 0);
   pointer-events: auto;
 }
 
@@ -4582,9 +5770,8 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-/* 核心居中锚定：宽幅 ≥ 620px 时滑块相对桌面屏幕位置绝对静止，拖拽绝不跑偏 */
 .dl-settings-inner {
-  width: min(100%, 620px);
+  width: min(100%, 640px);
   margin: 0 auto;
   padding: 6px 14px 12px;
   box-sizing: border-box;
@@ -4598,6 +5785,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .dl-pod-tabs {
@@ -4610,7 +5798,8 @@ onBeforeUnmount(() => {
 }
 
 .dl-pod-tab {
-  height: 26px;
+  position: relative;
+  height: 27px;
   padding: 0 13px;
   border-radius: 999px;
   border: none;
@@ -4630,15 +5819,34 @@ onBeforeUnmount(() => {
   color: var(--dl-ui-text-1);
 }
 
-.dl-pod-tab.is-active {
+/* 按 aria-selected 同步态着色，保持恒定字重零尺寸抖动，并附非纯色形状底标满足 WCAG 1.4.1 */
+.dl-pod-tab[aria-selected="true"] {
   background: linear-gradient(
     135deg,
     var(--dl-ui-primary, #5e6ad2) 0%,
     var(--dl-ui-secondary, #38bdf8) 100%
   );
   color: var(--dl-ui-on-primary, #ffffff);
-  font-weight: 800;
   box-shadow: 0 2px 8px var(--dl-accent-glow);
+}
+
+.dl-pod-tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 2px;
+  width: 14px;
+  height: 2px;
+  border-radius: 999px;
+  transform: translateX(-50%);
+  background: currentColor;
+  opacity: 0.72;
+}
+
+.dl-pod-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .dl-reset-btn {
@@ -4686,26 +5894,35 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  min-height: 26px;
+  min-height: 24px;
 }
 
 .dl-head-right {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
-}
-
-.dl-head-slider {
-  flex: 1;
-  justify-content: flex-end;
 }
 
 .dl-set-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 28px;
+  min-height: 26px;
+}
+
+.dl-sub-divider {
+  padding-top: 6px;
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--dl-ui-divider) 12%,
+    var(--dl-ui-divider) 88%,
+    transparent 100%
+  );
+  background-size: 100% 1px;
+  background-repeat: no-repeat;
+  background-position: top center;
 }
 
 .dl-split-row {
@@ -4723,11 +5940,124 @@ onBeforeUnmount(() => {
 }
 
 .dl-set-sublabel {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--dl-ui-text-2);
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+/* 5 套桌面场景预设瓷砖 */
+.dl-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.dl-shell.is-compact .dl-preset-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.dl-preset-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 7px 8px;
+  border-radius: 11px;
+  border: none;
+  background: var(--dl-ui-tile);
+  color: var(--dl-ui-text-1);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.16s ease,
+    transform 0.18s cubic-bezier(0.22, 1.35, 0.36, 1),
+    box-shadow 0.18s ease;
+}
+
+.dl-preset-tile:hover {
+  background: var(--dl-ui-chip-hover);
+  transform: translateY(-1px);
+}
+
+.dl-preset-tile.is-active {
+  background: var(--dl-ui-primary-soft);
+  box-shadow: 0 3px 10px var(--dl-accent-glow);
+}
+
+.dl-preset-bar {
+  width: 16px;
+  height: 4px;
+  border-radius: 999px;
+  margin-bottom: 1px;
+}
+
+.dl-preset-name {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--dl-ui-text-1);
+  white-space: nowrap;
+}
+
+.dl-preset-tag {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--dl-ui-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* 4 套 GPU 逐字动效风格选择卡 */
+.dl-motion-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.dl-motion-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 7px 9px;
+  border-radius: 11px;
+  border: none;
+  background: var(--dl-ui-tile);
+  color: var(--dl-ui-text-1);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.dl-motion-tile:hover {
+  background: var(--dl-ui-chip-hover);
+}
+
+.dl-motion-tile.is-active {
+  background: var(--dl-ui-primary-soft);
+  box-shadow: 0 3px 10px var(--dl-accent-glow);
+}
+
+.dl-motion-name {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--dl-ui-text-1);
+}
+
+.dl-motion-desc {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--dl-ui-text-3);
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .dl-swatch-strip {
@@ -4798,20 +6128,17 @@ onBeforeUnmount(() => {
 .dl-color-chip:hover,
 .dl-color-chip.is-active {
   background: var(--dl-ui-primary-soft);
-  color: var(--dl-ui-primary-text, var(--dl-ui-primary));
+  color: var(--dl-ui-text-1);
 }
 
 .dl-native-color {
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   padding: 0;
   border: none;
   border-radius: 50%;
   background: transparent;
   cursor: pointer;
-  overflow: hidden;
-  -webkit-appearance: none;
-  appearance: none;
 }
 
 .dl-native-color::-webkit-color-swatch-wrapper {
@@ -4823,93 +6150,47 @@ onBeforeUnmount(() => {
   border-radius: 50%;
 }
 
-.dl-unsung-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 5px;
-  flex: 1;
-}
-
-.dl-unsung-chip {
-  height: 25px;
-  padding: 0 8px 0 6px;
-  border-radius: 999px;
-  border: none;
-  background: var(--dl-ui-chip);
-  color: var(--dl-ui-text-2);
-  font-size: 11.5px;
-  font-weight: 700;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition:
-    background 0.16s ease,
-    color 0.16s ease;
-}
-
-.dl-unsung-chip:hover {
-  background: var(--dl-ui-chip-hover);
-  color: var(--dl-ui-text-1);
-}
-
-.dl-unsung-chip.is-active {
-  background: var(--dl-ui-primary-soft);
-  color: var(--dl-ui-primary-text, var(--dl-ui-primary));
-  font-weight: 800;
-}
-
-.dl-mini-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-}
-
 .dl-value-pill {
-  font-size: 11.5px;
-  font-weight: 800;
-  color: var(--dl-ui-primary-text, var(--dl-ui-primary));
-  background: var(--dl-ui-primary-soft);
-  padding: 2px 9px;
+  padding: 2px 8px;
   border-radius: 999px;
+  background: var(--dl-ui-primary-soft);
+  color: var(--dl-ui-primary-text);
+  font-size: 11px;
+  font-weight: 700;
   white-space: nowrap;
-}
-
-.dl-value-pill.subtle {
-  margin-right: auto;
 }
 
 .dl-inline-ctrl {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .dl-pill-group {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
   padding: 2px;
   border-radius: 999px;
   background: var(--dl-ui-chip);
 }
 
+.dl-pill-group.compact {
+  padding: 2px;
+}
+
 .dl-pill-btn {
-  height: 24px;
+  height: 23px;
   padding: 0 9px;
   border-radius: 999px;
   border: none;
   background: transparent;
-  font-size: 12px;
-  font-weight: 700;
   color: var(--dl-ui-text-2);
-  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 700;
   cursor: pointer;
+  white-space: nowrap;
   transition:
     background 0.16s ease,
     color 0.16s ease;
@@ -4917,73 +6198,87 @@ onBeforeUnmount(() => {
 
 .dl-pill-btn:hover {
   color: var(--dl-ui-text-1);
-  background: var(--dl-ui-chip-hover);
 }
 
 .dl-pill-btn.is-active {
-  background: var(--dl-ui-primary-soft);
-  color: var(--dl-ui-primary-text, var(--dl-ui-primary));
-  font-weight: 800;
+  background: var(--dl-ui-primary, #5e6ad2);
+  color: var(--dl-ui-on-primary, #ffffff);
 }
 
+.dl-unsung-row,
 .dl-toggle-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
   flex: 1;
 }
 
+.dl-unsung-chip,
 .dl-toggle-chip {
-  height: 27px;
-  padding: 0 11px;
+  height: 24px;
+  padding: 0 9px;
   border-radius: 999px;
   border: none;
   background: var(--dl-ui-chip);
   color: var(--dl-ui-text-2);
-  font-size: 12.5px;
+  font-size: 11.5px;
   font-weight: 700;
-  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   cursor: pointer;
+  white-space: nowrap;
   transition:
     background 0.16s ease,
     color 0.16s ease;
 }
 
+.dl-unsung-chip:hover,
 .dl-toggle-chip:hover {
   background: var(--dl-ui-chip-hover);
   color: var(--dl-ui-text-1);
 }
 
+.dl-unsung-chip.is-active,
 .dl-toggle-chip.is-active {
   background: var(--dl-ui-primary-soft);
-  color: var(--dl-ui-primary-text, var(--dl-ui-primary));
-  font-weight: 800;
+  color: var(--dl-ui-primary-text);
+}
+
+.dl-toggle-chip:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.dl-mini-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 
 .dl-slider-box {
   flex: 1;
-  min-width: 195px;
+  min-width: 185px;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.dl-slider-box.dl-compact-slider {
-  flex: 0.78;
-  min-width: 160px;
-}
-
-.dl-slider-box.dl-full-slider {
-  min-width: 100%;
+.dl-compact-slider {
+  max-width: 240px;
 }
 
 .dl-range-slider {
-  -webkit-appearance: none;
-  appearance: none;
   flex: 1;
-  height: 6px;
+  min-width: 72px;
+  height: 5px;
   border-radius: 999px;
+  appearance: none;
+  -webkit-appearance: none;
+  outline: none;
+  cursor: pointer;
   background: linear-gradient(
     90deg,
     var(--dl-ui-primary, #5e6ad2) 0%,
@@ -4991,75 +6286,84 @@ onBeforeUnmount(() => {
     var(--dl-ui-chip) var(--dl-range-pct, 50%),
     var(--dl-ui-chip) 100%
   );
-  cursor: pointer;
-}
-
-.dl-range-slider:focus-visible {
-  outline: 2px solid var(--dl-ui-primary, #5e6ad2);
-  outline-offset: 4px;
 }
 
 .dl-range-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
-  appearance: none;
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: #ffffff;
   border: none;
-  box-shadow:
-    0 1px 5px rgba(0, 0, 0, 0.34),
-    0 0 6px var(--dl-accent-glow);
+  background: var(--dl-ui-primary, #5e6ad2);
+  box-shadow: 0 2px 6px var(--dl-accent-glow);
   cursor: pointer;
-  transition: transform 0.16s cubic-bezier(0.22, 1.4, 0.36, 1);
-}
-
-.dl-range-slider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #ffffff;
-  border: none;
-  box-shadow:
-    0 1px 5px rgba(0, 0, 0, 0.34),
-    0 0 6px var(--dl-accent-glow);
-  cursor: pointer;
+  transition: transform 0.15s cubic-bezier(0.22, 1.4, 0.36, 1);
 }
 
 .dl-range-slider::-webkit-slider-thumb:hover {
   transform: scale(1.16);
 }
 
-.dl-range-slider.sm {
-  max-width: 112px;
-  height: 5px;
-}
-
 .dl-num-val {
-  font-size: 12.5px;
-  font-weight: 800;
-  color: var(--dl-ui-primary-text, var(--dl-ui-primary));
-  font-variant-numeric: tabular-nums;
-  min-width: 38px;
+  min-width: 36px;
   text-align: right;
-  flex-shrink: 0;
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--dl-ui-text-2);
 }
 
 .dl-num-val.wide {
-  min-width: 48px;
+  min-width: 44px;
 }
 
-/* 微提示淡入淡出 */
+/* 提示淡入淡出 */
 .dl-tip-fade-enter-active,
 .dl-tip-fade-leave-active {
   transition:
-    opacity 0.15s ease,
-    transform 0.16s ease;
+    opacity 0.18s ease,
+    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .dl-tip-fade-enter-from,
 .dl-tip-fade-leave-to {
   opacity: 0;
-  transform: translateY(-3px);
+  transform: translate3d(-50%, -4px, 0);
+}
+
+.dl-hover-tip.tip-left.dl-tip-fade-enter-from,
+.dl-hover-tip.tip-left.dl-tip-fade-leave-to,
+.dl-hover-tip.tip-right.dl-tip-fade-enter-from,
+.dl-hover-tip.tip-right.dl-tip-fade-leave-to {
+  transform: translate3d(0, -4px, 0);
+}
+
+.dl-fade-soft-enter-active,
+.dl-fade-soft-leave-active {
+  transition: opacity 0.22s ease;
+}
+
+.dl-fade-soft-enter-from,
+.dl-fade-soft-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dl-row-slot,
+  .dl-row-glide-enter-active,
+  .dl-row-glide-leave-active,
+  .dl-row-scale-inner,
+  .dl-toolbar,
+  .dl-settings-collapse,
+  .dl-preset-tile,
+  .dl-icon-btn {
+    transition-property: opacity, background, color;
+    transition-duration: 0.14s;
+  }
+
+  .dl-row-glide-enter-from,
+  .dl-row-glide-leave-to {
+    transform: translate3d(0, calc(var(--row-y-px, 64px) - 50%), 0);
+  }
 }
 </style>

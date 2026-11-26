@@ -354,6 +354,62 @@ fn schedule_subwindow_suspend(app: &AppHandle, label: &'static str, visible_flag
     });
 }
 
+fn set_desktop_lyric_click_through(win: &tauri::WebviewWindow, click_through: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(raw) = win.hwnd() {
+            let _ = window_transition::win_impl::set_overlay_click_through_raw(
+                raw.0 as isize,
+                click_through,
+            );
+            return;
+        }
+    }
+    let _ = win.set_ignore_cursor_events(click_through);
+}
+
+/// 必须在主线程调用：安全显示独立桌面悬浮歌词窗（A=0 透明锁底 + 纯 WS_POPUP 无框 + DWMWA_CLOAK 原子揭幕 + 置顶复核，零闪屏、零抢焦）。
+fn show_desktop_lyric_window_safely(win: &tauri::WebviewWindow, click_through: bool) {
+    set_subwindow_suspended(win, false);
+    set_webview_memory_target_low(win, false);
+    enforce_transparent_webview2_bg(win);
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(raw) = win.hwnd() {
+            window_transition::win_impl::show_overlay_window_native(raw.0 as isize, click_through);
+            return;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        enforce_transparent_overlay_window_style(win);
+        let _ = win.set_ignore_cursor_events(click_through);
+        let _ = win.show();
+        enforce_transparent_overlay_window_style(win);
+        let _ = win.set_always_on_top(true);
+    }
+}
+
+/// 必须在主线程调用：安全隐藏独立桌面悬浮歌词窗（原生 SW_HIDE + 剥离置顶 + 延迟挂起 WebView2 省电省内存）。
+fn hide_desktop_lyric_window_safely(
+    app: &AppHandle,
+    win: &tauri::WebviewWindow,
+    vis_flag: Arc<AtomicBool>,
+) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(raw) = win.hwnd() {
+            window_transition::win_impl::hide_overlay_window_native(raw.0 as isize);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.hide();
+    }
+    schedule_subwindow_suspend(app, "desktop_lyric", vis_flag);
+}
+
 fn ensure_desktop_lyric_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     if let Some(existing) = app.get_webview_window("desktop_lyric") {
         return Some(existing);
@@ -378,6 +434,13 @@ fn ensure_desktop_lyric_window(app: &AppHandle) -> Option<tauri::WebviewWindow> 
     match builder.build() {
         Ok(win) => {
             harden_desktop_webview2(&win);
+            enforce_transparent_webview2_bg(&win);
+            #[cfg(target_os = "windows")]
+            if let Ok(raw) = win.hwnd() {
+                let _ = window_transition::win_impl::enforce_frameless_overlay_popup_style_native(
+                    raw.0 as isize,
+                );
+            }
             enforce_transparent_overlay_window_style(&win);
             Some(win)
         }
@@ -3129,23 +3192,17 @@ async fn set_desktop_lyric_window_state_cmd(
         }
 
         if should_apply_visibility {
-            enforce_transparent_overlay_window_style(&win);
-            let _ = win.set_always_on_top(true);
-            let _ = win.set_ignore_cursor_events(locked);
-            if visible {
-                set_subwindow_suspended(&win, false);
-                set_webview_memory_target_low(&win, false);
-                let _ = win.show();
-                enforce_transparent_overlay_window_style(&win);
-                let _ = win.set_always_on_top(true);
-            } else {
-                let _ = win.hide();
-                schedule_subwindow_suspend(
-                    &app,
-                    "desktop_lyric",
-                    state.desktop_lyric_visible.clone(),
-                );
-            }
+            let app_ui = app.clone();
+            let vis_flag = state.desktop_lyric_visible.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Some(dl_win) = app_ui.get_webview_window("desktop_lyric") {
+                    if visible {
+                        show_desktop_lyric_window_safely(&dl_win, locked);
+                    } else {
+                        hide_desktop_lyric_window_safely(&app_ui, &dl_win, vis_flag);
+                    }
+                }
+            });
             let _ = app.emit(
                 "bm-desktop-lyric-visibility",
                 serde_json::json!({
@@ -3418,9 +3475,12 @@ async fn send_desktop_lyric_command_cmd(
             "CMD_LOCK" => {
                 state.desktop_lyric_locked.store(true, Ordering::Relaxed);
                 wake_hotkey_thread(&state.hotkey_thread_id);
-                if let Some(win) = app.get_webview_window("desktop_lyric") {
-                    let _ = win.set_ignore_cursor_events(true);
-                }
+                let app_ui = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Some(win) = app_ui.get_webview_window("desktop_lyric") {
+                        set_desktop_lyric_click_through(&win, true);
+                    }
+                });
                 let _ = app.emit(
                     "bm-desktop-lyric-lock-sync",
                     serde_json::json!({ "locked": true, "notify": false }),
@@ -3429,9 +3489,12 @@ async fn send_desktop_lyric_command_cmd(
             "CMD_UNLOCK" => {
                 state.desktop_lyric_locked.store(false, Ordering::Relaxed);
                 wake_hotkey_thread(&state.hotkey_thread_id);
-                if let Some(win) = app.get_webview_window("desktop_lyric") {
-                    let _ = win.set_ignore_cursor_events(false);
-                }
+                let app_ui = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Some(win) = app_ui.get_webview_window("desktop_lyric") {
+                        set_desktop_lyric_click_through(&win, false);
+                    }
+                });
                 let _ = app.emit_to(
                     "desktop_lyric",
                     "bm-desktop-lyric-locked-hover",
@@ -3448,14 +3511,13 @@ async fn send_desktop_lyric_command_cmd(
             "CMD_CLOSE" => {
                 state.desktop_lyric_visible.store(false, Ordering::Relaxed);
                 wake_hotkey_thread(&state.hotkey_thread_id);
-                if let Some(win) = app.get_webview_window("desktop_lyric") {
-                    let _ = win.hide();
-                    schedule_subwindow_suspend(
-                        &app,
-                        "desktop_lyric",
-                        state.desktop_lyric_visible.clone(),
-                    );
-                }
+                let app_ui = app.clone();
+                let vis_flag = state.desktop_lyric_visible.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Some(win) = app_ui.get_webview_window("desktop_lyric") {
+                        hide_desktop_lyric_window_safely(&app_ui, &win, vis_flag);
+                    }
+                });
                 let locked = state.desktop_lyric_locked.load(Ordering::Relaxed);
                 let _ = app.emit(
                     "bm-desktop-lyric-visibility",
@@ -6442,11 +6504,14 @@ fn spawn_windows_global_hotkey_listener(
                                     was_in_unlock_zone = false;
                                     last_ignore_cursor = Some(next_locked);
                                     last_lyric_cursor = None;
-                                    if let Some(win) =
-                                        app_handle.get_webview_window("desktop_lyric")
-                                    {
-                                        let _ = win.set_ignore_cursor_events(next_locked);
-                                    }
+                                    let app_ui = app_handle.clone();
+                                    let _ = app_handle.run_on_main_thread(move || {
+                                        if let Some(win) =
+                                            app_ui.get_webview_window("desktop_lyric")
+                                        {
+                                            set_desktop_lyric_click_through(&win, next_locked);
+                                        }
+                                    });
                                     let _ = app_handle.emit(
                                         "bm-desktop-lyric-lock-sync",
                                         serde_json::json!({
@@ -6494,9 +6559,12 @@ fn spawn_windows_global_hotkey_listener(
             } else if !is_lck {
                 last_lyric_cursor = None;
                 if last_ignore_cursor != Some(false) {
-                    if let Some(win) = app_handle.get_webview_window("desktop_lyric") {
-                        let _ = win.set_ignore_cursor_events(false);
-                    }
+                    let app_ui = app_handle.clone();
+                    let _ = app_handle.run_on_main_thread(move || {
+                        if let Some(win) = app_ui.get_webview_window("desktop_lyric") {
+                            set_desktop_lyric_click_through(&win, false);
+                        }
+                    });
                     last_ignore_cursor = Some(false);
                 }
                 if was_in_window || was_in_unlock_zone {
@@ -6559,7 +6627,17 @@ fn spawn_windows_global_hotkey_listener(
 
                                 let desired_ignore = !in_unlock_zone;
                                 if last_ignore_cursor != Some(desired_ignore) {
-                                    let _ = win.set_ignore_cursor_events(desired_ignore);
+                                    let app_ui = app_handle.clone();
+                                    let _ = app_handle.run_on_main_thread(move || {
+                                        if let Some(dl_win) =
+                                            app_ui.get_webview_window("desktop_lyric")
+                                        {
+                                            set_desktop_lyric_click_through(
+                                                &dl_win,
+                                                desired_ignore,
+                                            );
+                                        }
+                                    });
                                     last_ignore_cursor = Some(desired_ignore);
                                 }
 
@@ -7136,7 +7214,7 @@ pub fn run() {
                         st.desktop_lyric_locked.store(next_locked, Ordering::Relaxed);
                         wake_hotkey_thread(&st.hotkey_thread_id);
                         if let Some(win) = app_handle.get_webview_window("desktop_lyric") {
-                            let _ = win.set_ignore_cursor_events(next_locked);
+                            set_desktop_lyric_click_through(&win, next_locked);
                         }
                         let _ = app_handle.emit(
                             "bm-desktop-lyric-lock-sync",
@@ -7277,12 +7355,15 @@ pub fn run() {
                         let state = app.state::<AppState>();
                         state.desktop_lyric_visible.store(false, Ordering::Relaxed);
                         wake_hotkey_thread(&state.hotkey_thread_id);
-                        let _ = window.hide();
-                        schedule_subwindow_suspend(
-                            &app,
-                            "desktop_lyric",
-                            state.desktop_lyric_visible.clone(),
-                        );
+                        if let Some(dl_win) = app.get_webview_window("desktop_lyric") {
+                            hide_desktop_lyric_window_safely(
+                                &app,
+                                &dl_win,
+                                state.desktop_lyric_visible.clone(),
+                            );
+                        } else {
+                            let _ = window.hide();
+                        }
                         let locked = state.desktop_lyric_locked.load(Ordering::Relaxed);
                         let _ = app.emit(
                             "bm-desktop-lyric-visibility",

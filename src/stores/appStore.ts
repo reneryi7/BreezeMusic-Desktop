@@ -24,6 +24,7 @@ import type {
   DarkThemeVariant,
   DesktopLyricClarityMode,
   DesktopLyricLayoutMode,
+  DesktopLyricScenePresetId,
   DesktopLyricSnapAnchor,
   DesktopLyricStrokeColorMode,
   DesktopLyricStrokeWidth,
@@ -133,7 +134,9 @@ import {
   isBrowserDevPreviewEnv,
 } from "../utils/devPreviewShowcase";
 import {
+  DESKTOP_LYRIC_SCENE_PRESETS,
   LYRIC_SCENE_PRESETS,
+  matchActiveDesktopLyricPreset,
   matchActiveLyricScenePreset,
   normalizeLyricMotionStyle,
   normalizeLyricScrollCascadeMode,
@@ -380,8 +383,9 @@ export const useAppStore = defineStore("breezeApp", () => {
   const desktopLyricColorScheme = ref<string>(
     normalizeLyricThemeId(localStorage.getItem("bm_desktop_lyric_scheme") || "dynamic_cover")
   );
+  const rawSavedDlSungMode = localStorage.getItem("bm_dl_sung_mode_v2");
   const desktopLyricSungMode = ref<LyricSungColorMode>(
-    localStorage.getItem("bm_dl_sung_mode_v2") === "solid" ? "solid" : "gradient"
+    rawSavedDlSungMode === "gradient" ? "gradient" : "solid"
   );
   const desktopLyricCustomPrimary = ref<string>(
     localStorage.getItem("bm_dl_custom_primary_v2") || "#5EEAD4"
@@ -399,7 +403,9 @@ export const useAppStore = defineStore("breezeApp", () => {
   const desktopLyricUnsungCustomHex = ref<string>(
     localStorage.getItem("bm_dl_unsung_custom_v2") || "#E6ECF5"
   );
-  const rawSavedDlUnsungOp = Number(localStorage.getItem("bm_dl_unsung_opacity_v2"));
+  const rawSavedDlUnsungOpStr = localStorage.getItem("bm_dl_unsung_opacity_v2");
+  const rawSavedDlUnsungOp =
+    rawSavedDlUnsungOpStr !== null ? Number(rawSavedDlUnsungOpStr) : NaN;
   const desktopLyricUnsungOpacity = ref<number>(
     Number.isFinite(rawSavedDlUnsungOp) && rawSavedDlUnsungOp >= 0.35 && rawSavedDlUnsungOp <= 0.98
       ? Number(rawSavedDlUnsungOp.toFixed(2))
@@ -412,7 +418,7 @@ export const useAppStore = defineStore("breezeApp", () => {
       rawSavedDlStrokeW === "medium" ||
       rawSavedDlStrokeW === "bold"
       ? rawSavedDlStrokeW
-      : "medium"
+      : "none"
   );
   const rawSavedDlStrokeC = localStorage.getItem("bm_dl_stroke_color_mode_v2");
   const desktopLyricStrokeColorMode = ref<DesktopLyricStrokeColorMode>(
@@ -508,21 +514,25 @@ export const useAppStore = defineStore("breezeApp", () => {
       ? rawSavedDlUnsung
       : "snow"
   );
-  const rawSavedDlSpacing = Number(localStorage.getItem("bm_desktop_lyric_line_spacing"));
+  const rawSavedDlSpacingStr = localStorage.getItem("bm_desktop_lyric_line_spacing");
+  const rawSavedDlSpacing =
+    rawSavedDlSpacingStr !== null ? Number(rawSavedDlSpacingStr) : NaN;
   const desktopLyricLineSpacing = ref<number>(
     Number.isFinite(rawSavedDlSpacing) && rawSavedDlSpacing >= 0 && rawSavedDlSpacing <= 16
       ? Math.round(rawSavedDlSpacing)
       : 6
   );
-  const rawSavedDlGlow = Number(localStorage.getItem("bm_desktop_lyric_glow_v2"));
+  const rawSavedDlGlowStr = localStorage.getItem("bm_desktop_lyric_glow_v2");
+  const rawSavedDlGlow =
+    rawSavedDlGlowStr !== null ? Number(rawSavedDlGlowStr) : NaN;
   const desktopLyricGlowIntensity = ref<number>(
     Number.isFinite(rawSavedDlGlow) && rawSavedDlGlow >= 0 && rawSavedDlGlow <= 150
       ? Math.round(rawSavedDlGlow)
-      : 90
+      : 35
   );
-  const rawSavedDlOpacity = Number(
-    localStorage.getItem("bm_desktop_lyric_opacity")
-  );
+  const rawSavedDlOpacityStr = localStorage.getItem("bm_desktop_lyric_opacity");
+  const rawSavedDlOpacity =
+    rawSavedDlOpacityStr !== null ? Number(rawSavedDlOpacityStr) : NaN;
   const desktopLyricOpacity = ref<number>(
     Number.isFinite(rawSavedDlOpacity) &&
       rawSavedDlOpacity >= 0.35 &&
@@ -538,6 +548,37 @@ export const useAppStore = defineStore("breezeApp", () => {
   );
   const desktopLyricShowPhonetic = ref<boolean>(
     localStorage.getItem("bm_desktop_lyric_phonetic") === "true"
+  );
+  const desktopLyricMotionStyle = ref<LyricMotionStyle>(
+    normalizeLyricMotionStyle(
+      localStorage.getItem("bm_dl_motion_style_v1") || "apple_minimal"
+    )
+  );
+  const rawSavedDlWordBounce = localStorage.getItem("bm_dl_word_bounce_v1");
+  const desktopLyricWordBounceEnabled = ref<boolean>(
+    rawSavedDlWordBounce !== null ? rawSavedDlWordBounce === "true" : false
+  );
+  const desktopLyricHarmonyStyleEnabled = ref<boolean>(
+    localStorage.getItem("bm_dl_harmony_style_v1") !== "false"
+  );
+  const desktopLyricHoverDodge = ref<boolean>(
+    localStorage.getItem("bm_dl_hover_dodge_v1") !== "false"
+  );
+
+  const activeDesktopLyricPreset = computed<DesktopLyricScenePresetId>(() =>
+    matchActiveDesktopLyricPreset({
+      motionStyle: desktopLyricMotionStyle.value,
+      sungMode: desktopLyricSungMode.value,
+      strokeWidth: desktopLyricStrokeWidth.value,
+      shadowEnabled: desktopLyricShadowEnabled.value,
+      fontFamily: desktopLyricFontFamily.value,
+      fontWeight: desktopLyricFontWeight.value,
+      fontSize: desktopLyricFontSize.value,
+      glowIntensity: desktopLyricGlowIntensity.value,
+      wordByWord: desktopLyricWordByWord.value,
+      wordBounceEnabled: desktopLyricWordBounceEnabled.value,
+      harmonyStyleEnabled: desktopLyricHarmonyStyleEnabled.value,
+    })
   );
   const activeHighResCoverUrl = ref<string>("");
   const activeHighResCoverMetrics = ref<{
@@ -1984,6 +2025,28 @@ export const useAppStore = defineStore("breezeApp", () => {
     localStorage.setItem("bm_desktop_lyric_phonetic", String(v));
     broadcastDesktopLyricState();
   });
+  watch(desktopLyricMotionStyle, (v) => {
+    const safe = normalizeLyricMotionStyle(v);
+    localStorage.setItem("bm_dl_motion_style_v1", safe);
+    broadcastDesktopLyricState();
+  });
+  watch(desktopLyricWordBounceEnabled, (v) => {
+    localStorage.setItem("bm_dl_word_bounce_v1", String(v));
+    broadcastDesktopLyricState();
+  });
+  watch(desktopLyricHarmonyStyleEnabled, (v) => {
+    localStorage.setItem("bm_dl_harmony_style_v1", String(v));
+    broadcastDesktopLyricState();
+  });
+  watch(desktopLyricHoverDodge, (v) => {
+    localStorage.setItem("bm_dl_hover_dodge_v1", String(v));
+    broadcastDesktopLyricState();
+  });
+  watch(motionLevel, () => {
+    if (!isStandaloneSubWindow && desktopLyricEnabled.value) {
+      broadcastDesktopLyricState();
+    }
+  });
   watch(lyricGlowIntensity, (v) =>
     localStorage.setItem("bm_lyric_glow_int", String(v))
   );
@@ -2133,10 +2196,15 @@ export const useAppStore = defineStore("breezeApp", () => {
         unsungPreset: String(desktopLyricUnsungPreset.value || "auto"),
         unsungCustomHex: String(desktopLyricUnsungCustomHex.value || "#E6ECF5"),
         unsungOpacity: Number(desktopLyricUnsungOpacity.value) || 0.78,
-        strokeWidth: String(desktopLyricStrokeWidth.value || "medium"),
+        strokeWidth: String(desktopLyricStrokeWidth.value || "none"),
         strokeColorMode: String(desktopLyricStrokeColorMode.value || "auto"),
         strokeCustomHex: String(desktopLyricStrokeCustomHex.value || "#090D16"),
         shadowEnabled: Boolean(desktopLyricShadowEnabled.value),
+        motionStyle: String(desktopLyricMotionStyle.value || "apple_minimal"),
+        wordBounceEnabled: Boolean(desktopLyricWordBounceEnabled.value),
+        harmonyStyleEnabled: Boolean(desktopLyricHarmonyStyleEnabled.value),
+        hoverDodge: Boolean(desktopLyricHoverDodge.value),
+        motionLevel: resolveEffectiveMotionLevel(motionLevel.value),
         dynamicPrimary: String(dynamicPrimary || "#5EEAD4"),
         dynamicSecondary: String(dynamicSecondary || "#60A5FA"),
         themePrimary: String(
@@ -2321,6 +2389,20 @@ export const useAppStore = defineStore("breezeApp", () => {
       }
     } else if (msg.type === "CMD_RESET_DEFAULTS") {
       resetDesktopLyricSettingsToDefault();
+    } else if (msg.type === "CMD_SYNC_FROM_NOW_PLAYING") {
+      syncDesktopLyricFromNowPlaying();
+    } else if (msg.type === "CMD_APPLY_SCENE_PRESET" && msg.presetId) {
+      applyDesktopLyricScenePreset(
+        String(msg.presetId) as Exclude<DesktopLyricScenePresetId, "custom">
+      );
+    } else if (msg.type === "CMD_SET_MOTION_STYLE" && msg.motionStyle) {
+      desktopLyricMotionStyle.value = normalizeLyricMotionStyle(String(msg.motionStyle));
+    } else if (msg.type === "CMD_SET_WORD_BOUNCE" && msg.wordBounceEnabled !== undefined) {
+      desktopLyricWordBounceEnabled.value = Boolean(msg.wordBounceEnabled);
+    } else if (msg.type === "CMD_SET_HARMONY_STYLE" && msg.harmonyStyleEnabled !== undefined) {
+      desktopLyricHarmonyStyleEnabled.value = Boolean(msg.harmonyStyleEnabled);
+    } else if (msg.type === "CMD_SET_HOVER_DODGE" && msg.hoverDodge !== undefined) {
+      desktopLyricHoverDodge.value = Boolean(msg.hoverDodge);
     } else if (msg.type === "CMD_SET_WIDTH" && msg.width) {
       skipNextOsWidthSync = true;
       desktopLyricWidth.value = clampVal(Number(msg.width), 440, 1280);
@@ -2787,6 +2869,26 @@ export const useAppStore = defineStore("breezeApp", () => {
     snapDesktopLyricPosition("bottom");
   }
 
+  function applyDesktopLyricScenePreset(
+    presetId: Exclude<DesktopLyricScenePresetId, "custom">
+  ) {
+    const preset = DESKTOP_LYRIC_SCENE_PRESETS.find((p) => p.id === presetId);
+    if (!preset) return;
+    const c = preset.config;
+    desktopLyricMotionStyle.value = c.motionStyle;
+    desktopLyricSungMode.value = c.sungMode;
+    desktopLyricStrokeWidth.value = c.strokeWidth;
+    desktopLyricShadowEnabled.value = c.shadowEnabled;
+    desktopLyricFontFamily.value = c.fontFamily;
+    desktopLyricFontWeight.value = c.fontWeight;
+    desktopLyricFontSize.value = c.fontSize;
+    desktopLyricGlowIntensity.value = c.glowIntensity;
+    desktopLyricWordByWord.value = c.wordByWord;
+    desktopLyricWordBounceEnabled.value = c.wordBounceEnabled;
+    desktopLyricHarmonyStyleEnabled.value = c.harmonyStyleEnabled;
+    broadcastDesktopLyricState();
+  }
+
   function syncDesktopLyricFromNowPlaying() {
     const nextScheme = normalizeLyricThemeId(lyricTheme.value);
     setDesktopLyricColorScheme(nextScheme);
@@ -2800,6 +2902,9 @@ export const useAppStore = defineStore("breezeApp", () => {
       0.35,
       0.98
     );
+    desktopLyricMotionStyle.value = normalizeLyricMotionStyle(lyricMotionStyle.value);
+    desktopLyricWordBounceEnabled.value = Boolean(lyricWordBounceEnabled.value);
+    desktopLyricHarmonyStyleEnabled.value = Boolean(lyricHarmonyStyleEnabled.value);
     desktopLyricFontFamily.value = lyricFontFamily.value;
     desktopLyricFontWeight.value = lyricFontWeight.value;
     desktopLyricWordByWord.value = lyricWordByWord.value;
@@ -2811,16 +2916,20 @@ export const useAppStore = defineStore("breezeApp", () => {
 
   function resetDesktopLyricSettingsToDefault() {
     setDesktopLyricColorScheme("dynamic_cover");
-    desktopLyricSungMode.value = "gradient";
+    desktopLyricSungMode.value = "solid";
     desktopLyricCustomPrimary.value = "#5EEAD4";
     desktopLyricCustomSecondary.value = "#60A5FA";
     desktopLyricUnsungPreset.value = "auto";
     desktopLyricUnsungCustomHex.value = "#E6ECF5";
     desktopLyricUnsungOpacity.value = 0.78;
-    desktopLyricStrokeWidth.value = "medium";
+    desktopLyricStrokeWidth.value = "none";
     desktopLyricStrokeColorMode.value = "auto";
     desktopLyricStrokeCustomHex.value = "#090D16";
     desktopLyricShadowEnabled.value = true;
+    desktopLyricMotionStyle.value = "apple_minimal";
+    desktopLyricWordBounceEnabled.value = false;
+    desktopLyricHarmonyStyleEnabled.value = true;
+    desktopLyricHoverDodge.value = true;
     desktopLyricFontSize.value = 32;
     desktopLyricWidth.value = defaultCompactLyricWidth;
     desktopLyricLayoutMode.value = "center";
@@ -2831,7 +2940,7 @@ export const useAppStore = defineStore("breezeApp", () => {
     desktopLyricWordByWord.value = true;
     desktopLyricUnsungTone.value = "snow";
     desktopLyricLineSpacing.value = 6;
-    desktopLyricGlowIntensity.value = 90;
+    desktopLyricGlowIntensity.value = 35;
     desktopLyricOpacity.value = 1.0;
     desktopLyricIdleFade.value = false;
     desktopLyricShowIntro.value = true;
@@ -7761,6 +7870,12 @@ export const useAppStore = defineStore("breezeApp", () => {
     desktopLyricIdleFade,
     desktopLyricShowIntro,
     desktopLyricShowPhonetic,
+    desktopLyricMotionStyle,
+    desktopLyricWordBounceEnabled,
+    desktopLyricHarmonyStyleEnabled,
+    desktopLyricHoverDodge,
+    activeDesktopLyricPreset,
+    applyDesktopLyricScenePreset,
     activeHighResCoverUrl,
     activeHighResCoverMetrics,
     isNowPlayingLightStage,
